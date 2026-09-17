@@ -1,0 +1,40 @@
+name: Repository checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repository-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  whitespace:
+    name: Repository whitespace
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check changed lines
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$BASE_SHA...$HEAD_SHA"
+          elif [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ] && [ -n "$BEFORE_SHA" ]; then
+            git diff --check "$BEFORE_SHA" "$GITHUB_SHA"
+          else
+            git show --format= --check "$GITHUB_SHA"
+          fi

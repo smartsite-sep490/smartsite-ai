@@ -12,7 +12,7 @@ Cả nhóm làm xuyên Web, Backend, Mobile và AI. Chọn người thực hiệ
 
 ## CI hiện tại và giới hạn
 
-Workflow hiện tại chỉ kiểm tra lỗi whitespace trong diff. Chưa có build, test ứng dụng hay kiểm tra nghiệp vụ vì stack và code chưa được dựng. Khi thêm ứng dụng, PR khởi tạo ứng dụng phải thêm lệnh build/test phù hợp; khi thêm contract máy đọc được, thêm kiểm tra producer/consumer.
+Workflow kiểm tra whitespace, uv lock/install, Ruff lint/format, pytest config/HTTP, Python distribution và Docker build/smoke. Chạy các lệnh trong README trước khi gửi PR. Chưa có kiểm tra model, camera, GPU hoặc nghiệp vụ PPE/Zone; khi thêm event contract máy đọc được, thêm kiểm tra producer/consumer.
 
 Với Organization Free và repo private, quy tắc review ở trên là quy ước nhóm; không khẳng định GitHub đang cưỡng chế protected branch. Xem [tài liệu GitHub về protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
 

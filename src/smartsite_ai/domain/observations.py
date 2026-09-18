@@ -1,5 +1,4 @@
 import re
-from datetime import date
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -8,12 +7,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-RFC3339_DATETIME_RE = re.compile(
-    r"^(\d{4})-(\d{2})-(\d{2})[tT]"
-    r"(\d{2}):(\d{2}):(\d{2})"
-    r"(?:\.\d+)?"
-    r"(?:[zZ]|[+-]\d{2}(?::?\d{2})?)$"
-)
+DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+
+def is_leap_year(year: int) -> bool:
+    return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+
+
+DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)([zZ]|([+-])(\d{2})(?::?(\d{2}))?)?$")
+DATE_TIME_SEP_RE = re.compile(r"[tT\s]")
 
 
 def validate_uuid_str(v: Any, field_name: str) -> str:
@@ -27,27 +30,60 @@ def validate_uuid_str(v: Any, field_name: str) -> str:
 
 
 def validate_rfc3339_captured_at(v: Any) -> str:
+    """Validates date-time string matching Ajv date-time full format with strict time zone."""
     if not isinstance(v, str):
         raise ValueError("capturedAt must be a string")
-    match = RFC3339_DATETIME_RE.match(v)
-    if not match:
-        raise ValueError(f"capturedAt '{v}' does not match RFC 3339 date-time format")
-    year_s, month_s, day_s, hour_s, min_s, sec_s = match.groups()
-    year, month, day = int(year_s), int(month_s), int(day_s)
-    hour, minute, second = int(hour_s), int(min_s), int(sec_s)
 
-    if hour > 23 or minute > 59:
-        raise ValueError(f"Invalid time components in capturedAt '{v}'")
-    if second > 60:
-        raise ValueError(f"Second component cannot exceed 60 in capturedAt '{v}'")
-    if second == 60 and (hour != 23 or minute != 59):
-        raise ValueError(f"Leap second only valid at 23:59:60 in capturedAt '{v}'")
+    parts = DATE_TIME_SEP_RE.split(v)
+    if len(parts) != 2:
+        raise ValueError(f"capturedAt '{v}' must contain exactly one date-time separator")
 
-    try:
-        date(year, month, day)
-    except ValueError as e:
-        raise ValueError(f"Invalid calendar date in capturedAt '{v}': {e}") from e
-    return v
+    date_part, time_part = parts
+
+    date_match = DATE_RE.match(date_part)
+    if not date_match:
+        raise ValueError(f"Invalid date format in capturedAt '{v}'")
+
+    year = int(date_match.group(1))
+    month = int(date_match.group(2))
+    day = int(date_match.group(3))
+
+    if month < 1 or month > 12:
+        raise ValueError(f"Invalid month {month} in capturedAt '{v}'")
+
+    max_days = 29 if (month == 2 and is_leap_year(year)) else DAYS_IN_MONTH[month]
+    if day < 1 or day > max_days:
+        raise ValueError(f"Invalid day {day} for month {month} in capturedAt '{v}'")
+
+    time_match = TIME_RE.match(time_part)
+    if not time_match:
+        raise ValueError(f"Invalid time format in capturedAt '{v}'")
+
+    hr = int(time_match.group(1))
+    min_ = int(time_match.group(2))
+    sec = float(time_match.group(3))
+    tz = time_match.group(4)
+
+    if not tz:
+        raise ValueError(f"Missing required timezone offset in capturedAt '{v}'")
+
+    tz_sign = -1 if time_match.group(5) == "-" else 1
+    tz_h = int(time_match.group(6) or 0)
+    tz_m = int(time_match.group(7) or 0)
+
+    if tz_h > 23 or tz_m > 59:
+        raise ValueError(f"Timezone offset out of range in capturedAt '{v}': {tz_h:02d}:{tz_m:02d}")
+
+    if hr <= 23 and min_ <= 59 and sec < 60.0:
+        return v
+
+    # Leap second handling matching Ajv
+    utc_min = min_ - tz_m * tz_sign
+    utc_hr = hr - tz_h * tz_sign - (1 if utc_min < 0 else 0)
+    if (utc_hr == 23 or utc_hr == -1) and (utc_min == 59 or utc_min == -1) and sec < 61.0:
+        return v
+
+    raise ValueError(f"Invalid time or leap-second components in capturedAt '{v}'")
 
 
 class StrictWireModel(BaseModel):

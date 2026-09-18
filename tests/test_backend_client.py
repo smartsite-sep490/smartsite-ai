@@ -181,6 +181,28 @@ async def test_successful_event_dispatch_returns_decoded_json(
     assert sent_body == event.to_wire_dict()
 
 
+@pytest.mark.anyio
+async def test_success_status_with_invalid_json_is_not_treated_as_accepted():
+    captured_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_requests.append(request)
+        return httpx.Response(202, content=b"not json")
+
+    tracker = SleepTracker()
+    async with BackendClient(
+        base_url="http://backend:3000",
+        service_token=SecretStr("test-token"),
+        transport=httpx.MockTransport(handler),
+        sleep_func=tracker.sleep,
+    ) as client:
+        with pytest.raises(json.JSONDecodeError):
+            await client.post_event(make_sample_event())
+
+    assert len(captured_requests) == 1
+    assert tracker.delays == []
+
+
 # ============================================================================
 # 4. Retry on TransportError (3 retries = 4 attempts, backoff 0.5, 1.0, 2.0s)
 # ============================================================================

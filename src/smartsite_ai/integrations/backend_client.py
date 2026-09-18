@@ -198,10 +198,7 @@ class BackendClient:
 
             # 1. Successful response (2xx) -> return decoded JSON
             if 200 <= status < 300:
-                try:
-                    return response.json()
-                except Exception:
-                    return {}
+                return response.json()
 
             # 2. Retryable HTTP errors: 408 (Timeout), 429 (Too Many Requests), 5xx
             if status in (408, 429) or (500 <= status < 600):

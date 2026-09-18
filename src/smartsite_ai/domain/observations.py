@@ -14,8 +14,10 @@ def is_leap_year(year: int) -> bool:
     return year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
 
 
-DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
-TIME_RE = re.compile(r"^(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)([zZ]|([+-])(\d{2})(?::?(\d{2}))?)?$")
+DATE_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$")
+TIME_RE = re.compile(
+    r"^([0-9]{2}):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)([zZ]|([+-])([0-9]{2})(?::?([0-9]{2}))?)?$"
+)
 DATE_TIME_SEP_RE = re.compile(r"[tT\s]")
 
 

@@ -86,6 +86,14 @@ def test_constructor_default_timeout_and_retries():
     assert client.backoff_factor == 0.5
 
 
+def test_constructor_rejects_negative_retries_and_backoff():
+    with pytest.raises(ValueError, match="max_retries must be non-negative"):
+        BackendClient("http://backend:3000", "secret-token", max_retries=-1)
+
+    with pytest.raises(ValueError, match="backoff_factor must be non-negative"):
+        BackendClient("http://backend:3000", "secret-token", backoff_factor=-0.1)
+
+
 def test_from_settings_fails_when_unconfigured():
     empty_settings = Settings(_env_file=None)
     with pytest.raises(ValueError, match="backend_ingestion_url is not configured"):
@@ -129,15 +137,24 @@ def test_client_repr_and_str_never_leak_token():
 # ============================================================================
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected_body"),
+    [
+        (202, {"status": "ACCEPTED", "eventId": "11111111-1111-4111-8111-111111111111"}),
+        (200, {"status": "DUPLICATE_ACCEPTED", "eventId": "11111111-1111-4111-8111-111111111111"}),
+    ],
+)
 @pytest.mark.anyio
-async def test_successful_event_dispatch():
+async def test_successful_event_dispatch_returns_decoded_json(
+    status_code: int, expected_body: dict[str, Any]
+):
     raw_token = "secret-token-abc"
     event = make_sample_event()
     captured_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_requests.append(request)
-        return httpx.Response(202, json={"status": "ACCEPTED", "eventId": event.event_id})
+        return httpx.Response(status_code, json=expected_body)
 
     tracker = SleepTracker()
     transport = httpx.MockTransport(handler)
@@ -148,10 +165,9 @@ async def test_successful_event_dispatch():
         transport=transport,
         sleep_func=tracker.sleep,
     ) as client:
-        response = await client.post_event(event)
+        result = await client.post_event(event)
 
-    assert response.status_code == 202
-    assert response.json()["status"] == "ACCEPTED"
+    assert result == expected_body
     assert len(captured_requests) == 1
     assert tracker.delays == []  # No retries/sleep on immediate success
 
@@ -191,8 +207,8 @@ async def test_retry_on_transport_error_succeeds_on_fourth_attempt():
         sleep_func=tracker.sleep,
     )
 
-    response = await client.post_event(make_sample_event())
-    assert response.status_code == 200
+    result = await client.post_event(make_sample_event())
+    assert result == {"status": "OK"}
     assert call_count == 4
     assert tracker.delays == [0.5, 1.0, 2.0]
     await client.aclose()
@@ -252,8 +268,8 @@ async def test_retry_on_retryable_http_statuses(status_code: int):
         sleep_func=tracker.sleep,
     )
 
-    response = await client.post_event(make_sample_event())
-    assert response.status_code == 200
+    result = await client.post_event(make_sample_event())
+    assert result == {"status": "OK"}
     assert call_count == 4
     assert tracker.delays == [0.5, 1.0, 2.0]
     await client.aclose()

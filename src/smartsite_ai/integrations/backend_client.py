@@ -54,6 +54,12 @@ class BackendClient:
         else:
             raise ValueError("service_token must be a SecretStr or string")
 
+        if max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+
+        if backoff_factor < 0:
+            raise ValueError("backoff_factor must be non-negative")
+
         raw_url = str(base_url).strip().rstrip("/")
         self._base_url = raw_url
         self._timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
@@ -153,9 +159,10 @@ class BackendClient:
     async def post_event(
         self,
         event: TechnicalObservationEvent | dict[str, Any],
-    ) -> httpx.Response:
+    ) -> dict[str, Any]:
         """Dispatches an observation event to the backend ingestion endpoint.
 
+        Returns decoded JSON on 200/202 success.
         Retries on TransportError, 408, 429, and 5xx up to max_retries times.
         Immediately calls raise_for_status on all other 4xx errors without retrying.
         """
@@ -189,9 +196,12 @@ class BackendClient:
 
             status = response.status_code
 
-            # 1. Successful response (2xx)
+            # 1. Successful response (2xx) -> return decoded JSON
             if 200 <= status < 300:
-                return response
+                try:
+                    return response.json()
+                except Exception:
+                    return {}
 
             # 2. Retryable HTTP errors: 408 (Timeout), 429 (Too Many Requests), 5xx
             if status in (408, 429) or (500 <= status < 600):

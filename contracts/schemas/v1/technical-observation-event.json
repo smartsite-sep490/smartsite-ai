@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.local/contracts/v1/technical-observation-event.json",
+  "title": "TechnicalObservationEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "schemaVersion",
+    "cameraExternalId",
+    "streamSessionId",
+    "capturedAt",
+    "frameDimensions",
+    "observations",
+    "evidence"
+  ],
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "schemaVersion": { "const": "1.0.0" },
+    "cameraExternalId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "streamSessionId": { "type": "string", "format": "uuid" },
+    "capturedAt": { "type": "string", "format": "date-time" },
+    "frameDimensions": { "$ref": "#/$defs/frameDimensions" },
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/observation" }
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidenceItem" }
+    }
+  },
+  "$defs": {
+    "frameDimensions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "boundingBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x1", "y1", "x2", "y2", "coordinateSpace"],
+      "properties": {
+        "x1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y1": { "type": "number", "minimum": 0, "maximum": 1 },
+        "x2": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y2": { "type": "number", "minimum": 0, "maximum": 1 },
+        "coordinateSpace": { "const": "NORMALIZED_0_1" }
+      }
+    },
+    "personObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId"],
+      "properties": {
+        "type": { "const": "PERSON" },
+        "trackId": { "type": "integer", "minimum": 0 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "boundingBox": { "$ref": "#/$defs/boundingBox" }
+      }
+    },
+    "ppeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId", "ppeItem", "status", "regionId", "geometryVersion"],
+      "properties": {
+        "type": { "const": "PPE" },
+        "trackId": { "type": "integer", "minimum": 0 },
+        "ppeItem": { "enum": ["HARD_HAT", "SAFETY_VEST"] },
+        "status": { "enum": ["PRESENT", "MISSING"] },
+        "regionId": { "type": "string", "format": "uuid" },
+        "geometryVersion": { "type": "integer", "minimum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "boundingBox": { "$ref": "#/$defs/boundingBox" }
+      }
+    },
+    "zoneEntryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId", "regionId", "geometryVersion"],
+      "properties": {
+        "type": { "const": "ZONE_ENTRY" },
+        "trackId": { "type": "integer", "minimum": 0 },
+        "regionId": { "type": "string", "format": "uuid" },
+        "geometryVersion": { "type": "integer", "minimum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "identityCandidateObservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "trackId", "status", "candidateWorkerId", "similarityScore"],
+          "properties": {
+            "type": { "const": "IDENTITY_CANDIDATE" },
+            "trackId": { "type": "integer", "minimum": 0 },
+            "status": { "const": "CANDIDATE" },
+            "candidateWorkerId": { "type": "string", "minLength": 1 },
+            "similarityScore": { "type": "number", "minimum": 0, "maximum": 1 },
+            "qualityScore": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "trackId", "status"],
+          "properties": {
+            "type": { "const": "IDENTITY_CANDIDATE" },
+            "trackId": { "type": "integer", "minimum": 0 },
+            "status": { "enum": ["UNKNOWN", "UNAVAILABLE"] },
+            "qualityScore": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      ]
+    },
+    "observation": {
+      "oneOf": [
+        { "$ref": "#/$defs/personObservation" },
+        { "$ref": "#/$defs/ppeObservation" },
+        { "$ref": "#/$defs/zoneEntryObservation" },
+        { "$ref": "#/$defs/identityCandidateObservation" }
+      ]
+    },
+    "evidenceItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "uri"],
+      "properties": {
+        "kind": { "enum": ["FRAME", "CROP", "SNAPSHOT"] },
+        "uri": { "type": "string", "minLength": 1 },
+        "trackId": { "type": "integer", "minimum": 0 },
+        "boundingBox": { "$ref": "#/$defs/boundingBox" }
+      }
+    }
+  }
+}

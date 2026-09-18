@@ -1,0 +1,34 @@
+[
+  {
+    "description": "Vietnamese accents and emoji",
+    "input": {
+      "text": "Công trường Landmark 81 🏗️",
+      "code": "CT-01"
+    },
+    "expectedCanonical": "{\"code\":\"CT-01\",\"text\":\"Công trường Landmark 81 🏗️\"}",
+    "expectedSha256": "3d69d86e0f2f30efa7464b5d5f6e8f20b623879c45630a31ac0f6dcde92ca00b"
+  },
+  {
+    "description": "ordinary JSON numbers",
+    "input": {
+      "zero": 0,
+      "negative": -42,
+      "decimal": 0.125,
+      "ratio": 1
+    },
+    "expectedCanonical": "{\"decimal\":0.125,\"negative\":-42,\"ratio\":1,\"zero\":0}",
+    "expectedSha256": "e12c69e6bffbe8f6e1424dc5f8c0b0c590d8491aafd83c2ff33c1b000ba6470d"
+  },
+  {
+    "description": "nested ordering and escaping",
+    "input": {
+      "z": {
+        "b": 2,
+        "a": 1
+      },
+      "message": "quote: \" and slash: \\ and tab: \t"
+    },
+    "expectedCanonical": "{\"message\":\"quote: \\\" and slash: \\\\ and tab: \\t\",\"z\":{\"a\":1,\"b\":2}}",
+    "expectedSha256": "19887554026cd9ff2241feea249acbab0c3ba1cccbbf857cddf784bf190cc696"
+  }
+]

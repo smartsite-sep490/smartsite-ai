@@ -57,3 +57,10 @@ runs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local planning / generated documentation
+docs/
+*.md
+!README.md
+!CONTRIBUTING.md
+!**/README.md

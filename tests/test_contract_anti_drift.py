@@ -50,9 +50,10 @@ def test_contracts_provenance_and_schema_hash_integrity():
     computed_sha256 = hashlib.sha256(schema_bytes).hexdigest()
     assert metadata["schemaSha256"] == computed_sha256
 
-    # Verify actual source commit schema blob if sibling worktree is available
+    # CI can check out the AI repository alone. When the source checkout is
+    # present, a missing commit or blob must fail rather than skip provenance.
     sibling_repo = ROOT.parent / "smartsite"
-    if (sibling_repo / ".git").exists() or sibling_repo.exists():
+    if (sibling_repo / ".git").exists():
         proc = subprocess.run(
             [
                 "git",
@@ -65,10 +66,8 @@ def test_contracts_provenance_and_schema_hash_integrity():
             text=False,
             check=False,
         )
-        if proc.returncode == 0:
-            source_blob = proc.stdout.replace(b"\r\n", b"\n").strip()
-            vendored_blob = schema_bytes.replace(b"\r\n", b"\n").strip()
-            assert source_blob == vendored_blob, "Vendored schema does not match source commit blob"
+        assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+        assert proc.stdout == schema_bytes, "Vendored schema does not match source commit blob"
 
 
 # ============================================================================

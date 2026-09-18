@@ -243,6 +243,7 @@ def test_convenience_constructor_create():
         "2026-12-31T12:00:00+24",
         "2026-12-31T12:00:00+00:60",
         "٢٠٢٦-٠٩-١٩T١٢:٠٠:٠٠Z",  # Python \d matches Unicode digits; Ajv accepts ASCII only.
+        "2026-09-19\u008512:00:00Z",  # Python \s accepts U+0085, but Ajv does not.
     ],
 )
 def test_invalid_captured_at_rejected(bad_date: str):

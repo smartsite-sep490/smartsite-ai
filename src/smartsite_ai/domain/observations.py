@@ -18,7 +18,7 @@ DATE_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$")
 TIME_RE = re.compile(
     r"^([0-9]{2}):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)([zZ]|([+-])([0-9]{2})(?::?([0-9]{2}))?)?$"
 )
-DATE_TIME_SEP_RE = re.compile(r"[tT\s]")
+DATE_TIME_SEP_RE = re.compile(r"[tT ]")
 
 
 def validate_uuid_str(v: Any, field_name: str) -> str:

@@ -12,7 +12,7 @@ SmartSite AI is intended to provide:
 - person and PPE detection;
 - multi-frame tracking;
 - restricted-zone entry detection;
-- optional worker identity recognition;
+- optional identity-candidate generation;
 - evidence generation;
 - technical detection events;
 - supplementary OpenAI evidence analysis.
@@ -106,7 +106,7 @@ SmartSite Backend
 Zone permission evaluation
       |
       v
-Allowed / Denied / Unknown
+Allowed / Denied / Unavailable
 ```
 
 The AI service does not own Site/Zone authorization rules.
@@ -231,7 +231,7 @@ The runtime image installs only core runtime dependencies, runs as a non-root us
 RTSP Frame
    -> Person / PPE Detection
    -> Tracking
-   -> PPE Rule Evaluation
+   -> PPE Observation / Missing-PPE Signal
    -> Evidence
    -> Detection Event
    -> SmartSite Backend
@@ -239,7 +239,7 @@ RTSP Frame
    -> Safety Officer Verification
 ```
 
-The initial PPE scope focuses on missing safety helmets and high-visibility vests. Exact model classes and weights must be validated against representative project data.
+The initial PPE scope focuses on missing safety helmets and high-visibility vests. Exact model classes and weights must be validated against representative project data. Required-PPE business policy and violation determination belong to the SmartSite Backend.
 
 ## MF06 — Restricted-Zone Monitoring
 

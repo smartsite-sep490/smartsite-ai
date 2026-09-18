@@ -25,7 +25,7 @@ smartsite-ai = "smartsite_ai.main:run"
 [dependency-groups]
 dev = [
   "httpx2==2.13.0",
-  "jsonschema==4.23.0",
+  "jsonschema[format-nongpl]==4.23.0",
   "pytest==9.1.1",
   "ruff==0.16.8",
 ]

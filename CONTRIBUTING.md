@@ -5,14 +5,14 @@ Cả nhóm làm xuyên Web, Backend, Mobile và AI. Chọn người thực hiệ
 1. Tạo issue có MF/FR/UC liên quan, phạm vi và tiêu chí nghiệm thu.
 2. Tạo nhánh ngắn từ `main`, ví dụ `feat/mf05-alert-list`, `fix/mf06-unknown-identity` hoặc `docs/mf05-use-case`. Nhánh do Codex tạo dùng tiền tố `codex/`.
 3. Làm code và cập nhật tài liệu/contract trong cùng PR. Một PR có thể chạm nhiều ứng dụng nếu phục vụ cùng một hành vi.
-4. Ghi rõ đã kiểm thử gì. Nhờ một thành viên khác review; xử lý góp ý, squash merge rồi xóa nhánh đã merge.
+4. Ghi rõ đã kiểm thử gì. Nhờ một thành viên khác review; xử lý góp ý, squash merge và giữ lại nhánh đã merge. GitHub đã tắt tự xóa nhánh; chỉ xóa thủ công khi nhóm chủ động quyết định.
 5. Khi thay đổi cả hai repo, liên kết PR và ghi phiên bản contract tương thích. Không giả định hai PR được merge hoặc deploy đồng thời.
 
 `main` là nhánh tích hợp chung; ban đầu không cần thêm nhánh `develop` dài hạn. Không force-push lên nhánh dùng chung.
 
 ## CI hiện tại và giới hạn
 
-Workflow hiện tại chỉ kiểm tra lỗi whitespace trong diff. Chưa có build, test ứng dụng hay kiểm tra nghiệp vụ vì stack và code chưa được dựng. Khi thêm ứng dụng, PR khởi tạo ứng dụng phải thêm lệnh build/test phù hợp; khi thêm contract máy đọc được, thêm kiểm tra producer/consumer.
+Workflow kiểm tra whitespace, uv lock/install, Ruff lint/format, pytest config/HTTP, Python distribution và Docker build/smoke. Chạy các lệnh trong README trước khi gửi PR. Chưa có kiểm tra model, camera, GPU hoặc nghiệp vụ PPE/Zone; khi thêm event contract máy đọc được, thêm kiểm tra producer/consumer.
 
 Với Organization Free và repo private, quy tắc review ở trên là quy ước nhóm; không khẳng định GitHub đang cưỡng chế protected branch. Xem [tài liệu GitHub về protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
 

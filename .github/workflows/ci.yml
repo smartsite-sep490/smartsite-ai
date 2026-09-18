@@ -1,0 +1,68 @@
+name: AI service checks
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.11.6'
+          python-version: '3.12.13'
+          enable-cache: true
+      - name: Check lock and install core development environment
+        run: |
+          uv lock --check
+          uv sync --frozen
+      - name: Lint, format and test
+        run: |
+          uv run --frozen ruff check .
+          uv run --frozen ruff format --check .
+          uv run --frozen pytest
+      - name: Build distribution
+        run: uv build
+      - name: Verify minimal runtime package
+        run: |
+          uv venv .runtime-venv
+          uv pip install --python .runtime-venv/bin/python dist/*.whl
+          .runtime-venv/bin/python -c "from smartsite_ai.app import create_app; assert create_app().title == 'SmartSite AI'"
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build CPU foundation image
+        run: docker build --tag smartsite-ai:ci .
+      - name: Smoke test container and healthcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name smartsite-ai-check --publish 127.0.0.1:8000:8000 smartsite-ai:ci
+          trap 'docker logs smartsite-ai-check; docker rm -f smartsite-ai-check' EXIT
+          for attempt in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' smartsite-ai-check)
+            if [ "$status" = 'healthy' ]; then break; fi
+            sleep 2
+          done
+          test "$status" = 'healthy'
+          test "$(docker exec smartsite-ai-check id -u)" = '10001'
+          curl --fail --silent http://127.0.0.1:8000/health/live
+          curl --fail --silent http://127.0.0.1:8000/v1/capabilities | python -c 'import json, sys; data = json.load(sys.stdin); assert data["inference_ready"] is False; assert all(c["status"] == "not_configured" for c in data["capabilities"].values())'

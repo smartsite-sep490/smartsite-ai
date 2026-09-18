@@ -1,0 +1,1 @@
+"""SmartSite AI service foundation."""

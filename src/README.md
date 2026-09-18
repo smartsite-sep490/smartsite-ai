@@ -1,3 +1,3 @@
 # Runtime AI
 
-Nơi triển khai camera input, inference PPE, theo dõi người, hình học Zone, tích hợp identity và gửi event khi runtime/contract được chốt. Chưa có package hoặc server chạy được.
+`smartsite_ai` chứa app factory FastAPI, cấu hình process và entrypoint `smartsite-ai`. Hiện chỉ chạy health/capability HTTP; camera input, PPE inference, tracking, Zone, identity và event producer thuộc milestone sau.

@@ -4,7 +4,7 @@ Service AI độc lập cho SmartSite MF05 (PPE) và MF06 (Zone theo quyền t�
 
 **Trạng thái:** FastAPI foundation chạy được với health/capability endpoints. Chưa có camera ingestion, inference, nhận diện PPE/identity, event producer hoặc OpenAI adapter. API readiness không chứng minh inference hoạt động.
 
-Hướng pipeline đã chọn: **FastAPI + YOLO26 + Supervision**. **InsightFace** là ứng viên định danh cần đánh giá; **OpenAI** dùng bổ sung phân tích bằng chứng trong milestone sau. Backend sở hữu quyền nghiệp vụ và quy trình sự cố; AI không truy cập database nghiệp vụ. Track ID không phải Worker ID.
+Hướng pipeline đã chọn: **FastAPI + YOLO26 + Supervision**. **InsightFace** là ứng viên định danh cần đánh giá; **OpenAI** đã được chốt chính thức cho vai trò hỗ trợ phân tích bằng chứng và ngữ cảnh sự cố ở milestone sau (không thay thế detector, không quyết định danh tính hoặc cấp quyền Zone). Backend sở hữu quyền nghiệp vụ và quy trình sự cố; AI không truy cập database nghiệp vụ. Track ID không phải Worker ID.
 
 ## Chạy local
 

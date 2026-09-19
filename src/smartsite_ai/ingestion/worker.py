@@ -76,12 +76,17 @@ class StreamWorker:
     async def start(self) -> None:
         """Start the background ingestion loop for this stream.
 
-        Enforces single-use lifecycle: cannot restart a stopped worker.
+        Enforces single-use lifecycle: cannot restart after any terminal completion.
         Idempotent if already streaming or connecting.
         """
-        if self._has_stopped:
+        if (
+            self._has_stopped
+            or self.state in (StreamState.STOPPED, StreamState.ERROR)
+            or (self._loop_task is not None and self._loop_task.done())
+        ):
             raise RuntimeError(
-                f"StreamWorker '{self.config.stream_id}' has been stopped and cannot be restarted"
+                f"StreamWorker '{self.config.stream_id}' has completed its lifecycle "
+                "and cannot be restarted"
             )
 
         if self._loop_task is not None and not self._loop_task.done():
@@ -94,6 +99,17 @@ class StreamWorker:
             self._run_loop(),
             name=f"stream-worker-{self.config.stream_id}",
         )
+
+    async def _finalize_terminal(self) -> None:
+        """Finalize worker state on any terminal exit path exactly once."""
+        self._has_stopped = True
+        self._stop_event.set()
+        await self._close_source_safely()
+        self.queue.close()
+        if self.state != StreamState.ERROR:
+            self.state = StreamState.STOPPED
+        if self.stopped_at is None:
+            self.stopped_at = self._clock()
 
     async def _sleep(self, delay: float) -> None:
         """Sleep with cancellation support via custom sleeper or asyncio.wait_for."""
@@ -118,146 +134,137 @@ class StreamWorker:
                 self.last_error = f"close_error: {type(exc).__name__}"
 
     async def _run_loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self.state = StreamState.CONNECTING
-                if self.source is None:
-                    raise SourceConnectionError(
-                        f"No FrameSource configured for stream '{self.config.stream_id}'"
-                    )
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    self.state = StreamState.CONNECTING
+                    if self.source is None:
+                        raise SourceConnectionError(
+                            f"No FrameSource configured for stream '{self.config.stream_id}'"
+                        )
 
-                self._source_closed = False
-                await self.source.connect()
-                self.connected_at = self._clock()
-                self.state = StreamState.STREAMING
-                self._consecutive_successful_frames = 0
-                # Reset per-connection session tracking and sampling baseline upon new connection
-                self._current_session_id = None
-                self._last_sequence_number = None
-                self._last_sampled_timestamp = None
+                    await self.source.connect()
+                    self.connected_at = self._clock()
+                    self.state = StreamState.STREAMING
+                    self._consecutive_successful_frames = 0
+                    # Reset per-connection session tracking and sampling baseline
+                    self._current_session_id = None
+                    self._last_sequence_number = None
+                    self._last_sampled_timestamp = None
 
-                # Ingestion inner loop
-                while not self._stop_event.is_set():
-                    frame = await self.source.read_frame()
+                    # Ingestion inner loop
+                    while not self._stop_event.is_set():
+                        frame = await self.source.read_frame()
 
-                    if frame is None:
-                        # Remote stream EOF or closed
-                        if not self.config.is_live:
-                            # Finite clip has ended cleanly; stop worker
-                            self.state = StreamState.STOPPED
-                            await self._close_source_safely()
-                            return
+                        if frame is None:
+                            # Remote stream EOF or closed
+                            if not self.config.is_live:
+                                # Finite clip has ended cleanly; stop worker
+                                self.state = StreamState.STOPPED
+                                return
 
-                        # Live camera disconnected unexpectedly
-                        self.consecutive_failures += 1
+                            # Live camera disconnected unexpectedly
+                            self.consecutive_failures += 1
+                            self.connection_errors += 1
+                            self.reconnect_attempts += 1
+                            self._consecutive_successful_frames = 0
+                            self.last_error = "connection_closed_eof"
+
+                            max_fail = self.config.max_consecutive_failures
+                            if max_fail is not None and self.consecutive_failures >= max_fail:
+                                self.state = StreamState.ERROR
+                                return
+
+                            self.state = StreamState.BACKOFF
+                            delay = self.backoff.compute_next_delay()
+                            await self._sleep(delay)
+                            break
+
+                        # 1. Frame Identity Validation (stream_id & camera_external_id)
+                        if frame.stream_id != self.config.stream_id:
+                            self.integrity_errors += 1
+                            self.last_error = "frame_integrity_error"
+                            continue
+
+                        if frame.camera_external_id != self.config.camera_external_id:
+                            self.integrity_errors += 1
+                            self.last_error = "frame_integrity_error"
+                            continue
+
+                        # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
+                        if self._current_session_id is None:
+                            # First frame of connection establishes session and resets baseline
+                            self._current_session_id = frame.session_id
+                            self._last_sequence_number = frame.sequence_number
+                            self._last_sampled_timestamp = None
+                        else:
+                            # Within the same connection, session_id must not change
+                            if frame.session_id != self._current_session_id:
+                                self.sequence_errors += 1
+                                self.last_error = "session_sequence_error"
+                                continue
+
+                            # Within the same session, sequence_number must increase strictly
+                            if (
+                                self._last_sequence_number is not None
+                                and frame.sequence_number <= self._last_sequence_number
+                            ):
+                                self.sequence_errors += 1
+                                self.last_error = "session_sequence_error"
+                                continue
+
+                            self._last_sequence_number = frame.sequence_number
+
+                        # 3. Stable Criteria: reset backoff after min_stable_frames
+                        self._consecutive_successful_frames += 1
+                        if self._consecutive_successful_frames >= self.config.min_stable_frames:
+                            self.consecutive_failures = 0
+                            self.backoff.reset()
+
+                        # 4. Deterministic Sampling (target_fps limit)
+                        if self.config.target_fps is not None:
+                            min_interval = 1.0 / self.config.target_fps
+                            if self._last_sampled_timestamp is not None:
+                                elapsed = (
+                                    frame.captured_at - self._last_sampled_timestamp
+                                ).total_seconds()
+                                if elapsed < (min_interval - 1e-6):
+                                    self.sampled_out_frames += 1
+                                    continue
+                            self._last_sampled_timestamp = frame.captured_at
+
+                        # 5. Enqueue frame into bounded drop-stale queue
+                        self.queue.put(frame)
+                        self.last_frame_timestamp = frame.captured_at
+
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    self.last_error = classify_error_reason(exc)
+                    self.consecutive_failures += 1
+                    self._consecutive_successful_frames = 0
+                    if isinstance(exc, SourceReadError):
+                        self.read_errors += 1
+                    elif isinstance(exc, FrameIntegrityError):
+                        self.integrity_errors += 1
+                    elif isinstance(exc, SessionSequenceError):
+                        self.sequence_errors += 1
+                    else:
                         self.connection_errors += 1
-                        self.reconnect_attempts += 1
-                        self._consecutive_successful_frames = 0
-                        self.last_error = "connection_closed_eof"
+                    self.reconnect_attempts += 1
 
-                        if (
-                            self.config.max_consecutive_failures is not None
-                            and self.consecutive_failures >= self.config.max_consecutive_failures
-                        ):
-                            self.state = StreamState.ERROR
-                            await self._close_source_safely()
-                            return
-
-                        self.state = StreamState.BACKOFF
-                        delay = self.backoff.compute_next_delay()
-                        await self._close_source_safely()
-                        await self._sleep(delay)
+                    if (
+                        self.config.max_consecutive_failures is not None
+                        and self.consecutive_failures >= self.config.max_consecutive_failures
+                    ):
+                        self.state = StreamState.ERROR
                         break
 
-                    # 1. Frame Identity Validation (stream_id & camera_external_id)
-                    if frame.stream_id != self.config.stream_id:
-                        self.integrity_errors += 1
-                        self.last_error = "frame_integrity_error"
-                        continue
-
-                    if frame.camera_external_id != self.config.camera_external_id:
-                        self.integrity_errors += 1
-                        self.last_error = "frame_integrity_error"
-                        continue
-
-                    # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
-                    if self._current_session_id is None:
-                        # First frame of connection establishes session and resets sampling baseline
-                        self._current_session_id = frame.session_id
-                        self._last_sequence_number = frame.sequence_number
-                        self._last_sampled_timestamp = None
-                    else:
-                        # Within the same connection, session_id must not change
-                        if frame.session_id != self._current_session_id:
-                            self.sequence_errors += 1
-                            self.last_error = "session_sequence_error"
-                            continue
-
-                        # Within the same session, sequence_number must increase strictly
-                        if (
-                            self._last_sequence_number is not None
-                            and frame.sequence_number <= self._last_sequence_number
-                        ):
-                            self.sequence_errors += 1
-                            self.last_error = "session_sequence_error"
-                            continue
-
-                        self._last_sequence_number = frame.sequence_number
-
-                    # 3. Stable Criteria: reset backoff after min_stable_frames
-                    self._consecutive_successful_frames += 1
-                    if self._consecutive_successful_frames >= self.config.min_stable_frames:
-                        self.consecutive_failures = 0
-                        self.backoff.reset()
-
-                    # 4. Deterministic Sampling (target_fps limit)
-                    if self.config.target_fps is not None:
-                        min_interval = 1.0 / self.config.target_fps
-                        if self._last_sampled_timestamp is not None:
-                            elapsed = (
-                                frame.captured_at - self._last_sampled_timestamp
-                            ).total_seconds()
-                            if elapsed < (min_interval - 1e-6):
-                                self.sampled_out_frames += 1
-                                continue
-                        self._last_sampled_timestamp = frame.captured_at
-
-                    # 5. Enqueue frame into bounded drop-stale queue
-                    self.queue.put(frame)
-                    self.last_frame_timestamp = frame.captured_at
-
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                self.last_error = classify_error_reason(exc)
-                self.consecutive_failures += 1
-                self._consecutive_successful_frames = 0
-                if isinstance(exc, SourceReadError):
-                    self.read_errors += 1
-                elif isinstance(exc, FrameIntegrityError):
-                    self.integrity_errors += 1
-                elif isinstance(exc, SessionSequenceError):
-                    self.sequence_errors += 1
-                else:
-                    self.connection_errors += 1
-                self.reconnect_attempts += 1
-
-                if (
-                    self.config.max_consecutive_failures is not None
-                    and self.consecutive_failures >= self.config.max_consecutive_failures
-                ):
-                    self.state = StreamState.ERROR
-                    break
-
-                self.state = StreamState.BACKOFF
-                delay = self.backoff.compute_next_delay()
-                await self._close_source_safely()
-                await self._sleep(delay)
-
-        await self._close_source_safely()
-        if self.state != StreamState.ERROR:
-            self.state = StreamState.STOPPED
-        self.stopped_at = self._clock()
+                    self.state = StreamState.BACKOFF
+                    delay = self.backoff.compute_next_delay()
+                    await self._sleep(delay)
+        finally:
+            await self._finalize_terminal()
 
     async def stop(self) -> None:
         """Cooperatively stop the ingestion loop, unblock readers, and release resources."""
@@ -271,20 +278,22 @@ class StreamWorker:
         await self._close_source_safely()
 
         if self._loop_task is not None:
-            self._loop_task.cancel()
-            try:
-                await asyncio.wait_for(self._loop_task, timeout=2.0)
-            except asyncio.CancelledError:
-                pass
-            except TimeoutError:
-                self.last_error = "shutdown_timeout"
-            except Exception as exc:
-                self.last_error = f"shutdown_error: {type(exc).__name__}"
+            if not self._loop_task.done():
+                self._loop_task.cancel()
+                try:
+                    await asyncio.wait_for(self._loop_task, timeout=2.0)
+                except asyncio.CancelledError:
+                    pass
+                except TimeoutError:
+                    self.last_error = "shutdown_timeout"
+                except Exception as exc:
+                    self.last_error = f"shutdown_error: {type(exc).__name__}"
             self._loop_task = None
 
         if self.state != StreamState.ERROR:
             self.state = StreamState.STOPPED
-        self.stopped_at = self._clock()
+        if self.stopped_at is None:
+            self.stopped_at = self._clock()
 
     async def get_frame(self) -> FrameEnvelope:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""
@@ -367,15 +376,40 @@ class CameraIngestionWorker:
             await worker.stop()
 
     async def start(self) -> None:
-        """Start all registered stream workers."""
-        self._status = "running"
-        await asyncio.gather(*(worker.start() for worker in self._streams.values()))
+        """Start all registered stream workers.
+
+        Can only be started from 'idle'. Idempotent if already running.
+        Raises RuntimeError if manager has been stopped, is stopping, or is in an invalid state.
+        """
+        if self._status == "running":
+            return
+
+        if self._status == "stopped":
+            raise RuntimeError("CameraIngestionWorker has been stopped and cannot be restarted")
+
+        if self._status != "idle":
+            raise RuntimeError(
+                f"CameraIngestionWorker cannot be started when status is '{self._status}'"
+            )
+
+        try:
+            await asyncio.gather(*(worker.start() for worker in self._streams.values()))
+            self._status = "running"
+        except Exception:
+            self._status = "stopped"
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*(worker.stop() for worker in self._streams.values()))
+            raise
 
     async def stop(self) -> None:
         """Gracefully stop all stream workers and release resources."""
+        if self._status == "stopped":
+            return
         self._status = "stopping"
-        await asyncio.gather(*(worker.stop() for worker in self._streams.values()))
-        self._status = "stopped"
+        try:
+            await asyncio.gather(*(worker.stop() for worker in self._streams.values()))
+        finally:
+            self._status = "stopped"
 
     async def cancel(self) -> None:
         """Immediately cancel all stream workers."""

@@ -6,6 +6,7 @@ import pytest
 
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.queue import QueueClosedError
 from smartsite_ai.ingestion.source import SourceConnectionError
 from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.ingestion.testing import (
@@ -333,6 +334,98 @@ async def test_stream_worker_single_use_lifecycle_rejects_restart() -> None:
 
 
 @pytest.mark.anyio
+async def test_stream_worker_eof_natural_completion_lifecycle() -> None:
+    """Finite source EOF must finalize worker lifecycle without explicit stop() call."""
+    config = StreamConfig(
+        stream_id="cam-eof",
+        camera_external_id="ext-eof",
+        source_url="rtsp://10.0.0.1/video.mp4",
+        is_live=False,
+    )
+    frames = [
+        make_test_frame("cam-eof", 1, camera_external_id="ext-eof"),
+        make_test_frame("cam-eof", 2, camera_external_id="ext-eof"),
+    ]
+    source = FakeFrameSource(source_id="cam-eof", initial_frames=frames, is_live=False)
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+
+    f1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+    f2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+    assert f1.sequence_number == 1
+    assert f2.sequence_number == 2
+
+    # Wait for loop to naturally reach EOF and terminate
+    await wait_until(lambda: worker.state == StreamState.STOPPED)
+
+    # Invariant: Do NOT call worker.stop() before asserting terminal finalization
+    assert worker.state == StreamState.STOPPED
+    assert worker.stopped_at is not None
+    assert worker.stopped_at.tzinfo is not None
+    assert worker.queue.is_closed is True
+    assert source.close_calls == 1
+
+    # Queue must wake/reject subsequent gets with QueueClosedError
+    with pytest.raises(QueueClosedError):
+        await worker.get_frame()
+
+    # Restart must be rejected after natural EOF
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        await worker.start()
+
+    # Subsequent stop() call is safe idempotent no-op and preserves stopped_at and close_calls
+    initial_stopped_at = worker.stopped_at
+    await worker.stop()
+    assert source.close_calls == 1
+    assert worker.state == StreamState.STOPPED
+    assert worker.stopped_at == initial_stopped_at
+
+
+@pytest.mark.anyio
+async def test_stream_worker_error_terminal_completion_lifecycle() -> None:
+    """Terminal error path (max_consecutive_failures) must finalize lifecycle without stop()."""
+    config = StreamConfig(
+        stream_id="cam-term-err",
+        camera_external_id="ext-err",
+        source_url="rtsp://10.0.0.1/live",
+        reconnect_initial_delay=0.001,
+        reconnect_max_delay=0.002,
+        max_consecutive_failures=2,
+    )
+    source = FakeFrameSource(
+        source_id="cam-term-err",
+        initial_frames=[],
+        permanent_connect_failure=True,
+    )
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+
+    # Wait for terminal ERROR state
+    await wait_until(lambda: worker.state == StreamState.ERROR)
+
+    # Invariant: Do NOT call worker.stop() before assertions
+    assert worker.state == StreamState.ERROR
+    assert worker.stopped_at is not None
+    assert worker.queue.is_closed is True
+    assert source.close_calls == 1
+
+    with pytest.raises(QueueClosedError):
+        await worker.get_frame()
+
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        await worker.start()
+
+    # stop() preserves ERROR state, stopped_at, and close count
+    err_stopped_at = worker.stopped_at
+    await worker.stop()
+    assert worker.state == StreamState.ERROR
+    assert worker.stopped_at == err_stopped_at
+    assert source.close_calls == 1
+
+
+@pytest.mark.anyio
 async def test_stream_worker_idempotent_start() -> None:
     """Calling start() on an already streaming worker is an idempotent no-op."""
     config = StreamConfig(
@@ -589,6 +682,70 @@ async def test_camera_ingestion_worker_manager_lifecycle_and_invariants() -> Non
         await asyncio.wait_for(manager.stop(), timeout=1.0)
 
     assert manager.snapshot().status == "stopped"
+
+
+@pytest.mark.anyio
+async def test_camera_ingestion_worker_manager_restart_preserves_stopped_status() -> None:
+    """Manager start -> stop -> start must raise RuntimeError and preserve 'stopped' status."""
+    manager = CameraIngestionWorker()
+    config = StreamConfig(
+        stream_id="cam-mgr-restart",
+        camera_external_id="ext-mgr-restart",
+        source_url="rtsp://10.0.0.1/live",
+        is_live=False,
+    )
+    source = FakeFrameSource(
+        source_id="cam-mgr-restart",
+        initial_frames=[
+            make_test_frame("cam-mgr-restart", 1, camera_external_id="ext-mgr-restart")
+        ],
+        is_live=False,
+    )
+    manager.add_stream(config, source=source)
+
+    assert manager.snapshot().status == "idle"
+
+    await manager.start()
+    assert manager.snapshot().status == "running"
+
+    # Idempotent start while running
+    await manager.start()
+    assert manager.snapshot().status == "running"
+
+    await manager.stop()
+    assert manager.snapshot().status == "stopped"
+
+    # Attempt to restart after stopped must raise BEFORE changing status
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        await manager.start()
+
+    # Snapshot and internal status must remain "stopped", NOT "running"
+    snapshot = manager.snapshot()
+    assert snapshot.status == "stopped"
+
+
+@pytest.mark.anyio
+async def test_camera_ingestion_worker_start_failure_does_not_leave_status_running() -> None:
+    """If starting workers fails during manager.start(), status must not remain 'running'."""
+    manager = CameraIngestionWorker()
+    config = StreamConfig(
+        stream_id="cam-fail-start",
+        camera_external_id="ext-fs",
+        source_url="rtsp://10.0.0.1/live",
+        is_live=False,
+    )
+    source = FakeFrameSource(source_id="cam-fail-start", initial_frames=[], is_live=False)
+    worker = manager.add_stream(config, source=source)
+
+    # Manually stop the worker so worker.start() will raise RuntimeError
+    await worker.stop()
+
+    with pytest.raises(RuntimeError, match="cannot be restarted"):
+        await manager.start()
+
+    # Status must NOT be running
+    snapshot = manager.snapshot()
+    assert snapshot.status == "stopped"
 
 
 @pytest.mark.anyio

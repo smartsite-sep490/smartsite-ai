@@ -5,5 +5,7 @@
 !README.md
 !src
 !src/**
+!contracts
+!contracts/**
 **/__pycache__
 **/*.py[cod]

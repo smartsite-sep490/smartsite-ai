@@ -1,20 +1,20 @@
 # Tích hợp SmartSite Backend
 
-Nguồn chuẩn: thư mục `contracts/` trong repository `smartsite`.
+Nguồn chuẩn: `contracts/schemas/v1/technical-observation-event.json` tại commit bất biến ghi trong `contracts/metadata.json` của repository `smartsite`.
 
-Phiên bản event contract đang dùng: **chưa phát hành**. Không có event endpoint/path/schema mặc định được coi là đã chốt.
+Phiên bản event contract đang dùng: **1.0.0**. Schema và golden vectors được vendor nguyên bytes; CI tải đúng source commit và fail nếu có drift.
 
 ## Contract foundation đang chạy
 
-Service mặc định ở `127.0.0.1:8000`; trong Compose, các container cùng mạng dùng `http://ai:8000` nếu service được đặt tên `ai`. Backend chưa có consumer hoặc job inference kết nối service này.
+Service mặc định ở `127.0.0.1:8000`; trong Compose, các container cùng mạng dùng `http://ai:8000`. Backend consumer hiện là `POST http://backend:3000/api/v1/integrations/ai/events`, xác thực bằng Bearer service token.
 
 - `GET /health/live`: 200, `{"status":"ok","service":"smartsite-ai"}`.
 - `GET /health/ready`: 200 sau startup, `{"status":"ready","service":"smartsite-ai","scope":"api","inference_ready":false}`. Ngoài lifecycle trả 503 với `status: "not_ready"`.
 - `GET /v1/capabilities`: `api_version: "v1"`, `inference_ready: false`, `capabilities` gồm camera, detector, zone, identity, openai. Mỗi capability có `status: "not_configured"`, `provider` và `reason`. Các ghi chú không chứa secret hoặc model path.
 
-Không dùng API readiness để bật nghiệp vụ PPE/Zone. Service chưa phát event, chưa có camera scheduler hoặc kết nối database/Backend/OpenAI. OpenAPI development mô tả chính các HTTP endpoint hiện có.
+Không dùng API readiness để bật nghiệp vụ PPE/Zone. Contract models, canonical hash và Backend client đã có; camera scheduler/producer loop, inference và OpenAI adapter chưa có. OpenAPI development mô tả chính các HTTP endpoint hiện có.
 
-Khi triển khai contract đầu tiên, ghi version và commit nguồn, thêm schema/example tương ứng có nguồn gốc rõ, chạy kiểm tra trước khi gửi event. Không sửa một bản sao schema riêng rồi coi hai repo đã đồng bộ.
+Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit schema trước, sau đó vendor bytes và cập nhật source SHA/checksums ở repo này. Không sửa schema vendored trước.
 
 ## Thiết kế dự kiến
 
@@ -24,7 +24,7 @@ Khi triển khai contract đầu tiên, ghi version và commit nguồn, thêm sc
 - Backend quyết định quyền vào theo identity, Zone và thời gian; AI không truy cập trực tiếp database nghiệp vụ.
 - Mất quyền truy cập hoặc không định danh được phải có trạng thái riêng.
 
-HTTP/event transport, xác thực, timeout/retry và cache chính sách còn cần chốt ở contract.
+Client có timeout riêng cho connect/read/write/pool; retry tối đa ba lần chỉ với lỗi transport, 408, 429 và 5xx. 4xx nghiệp vụ không retry. Mọi request dict được Pydantic validate trước khi gửi; acknowledgement phải có status hợp lệ, `alertIds` và cùng `eventId`.
 
 ## Release
 

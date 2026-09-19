@@ -44,3 +44,30 @@ def test_dotenv_accepts_unrelated_values_without_leaking_them(tmp_path):
 
     assert settings.port == 8124
     assert "fake-only" not in settings.model_dump_json()
+
+
+def test_backend_ingestion_settings_default_to_none():
+    from smartsite_ai.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.backend_ingestion_url is None
+    assert settings.backend_service_token is None
+
+
+def test_backend_ingestion_settings_read_from_env_and_mask_token(monkeypatch):
+    from smartsite_ai.config import Settings
+
+    raw_token = "secret-svc-token-12345"
+    monkeypatch.setenv("SMARTSITE_AI_BACKEND_INGESTION_URL", "http://backend.internal:3000")
+    monkeypatch.setenv("SMARTSITE_AI_BACKEND_SERVICE_TOKEN", raw_token)
+
+    settings = Settings(_env_file=None)
+    assert settings.backend_ingestion_url == "http://backend.internal:3000"
+    assert settings.backend_service_token is not None
+    assert settings.backend_service_token.get_secret_value() == raw_token
+
+    # Ensure token is never printed in plain text
+    assert raw_token not in repr(settings)
+    assert raw_token not in str(settings)
+    assert raw_token not in settings.model_dump_json()
+    assert "**********" in repr(settings.backend_service_token)

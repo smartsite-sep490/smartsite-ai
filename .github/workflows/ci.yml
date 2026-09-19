@@ -29,6 +29,19 @@ jobs:
         run: |
           uv lock --check
           uv sync --frozen
+      - name: Verify vendored contract against its immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_repository=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceRepository"])')
+          source_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceCommitSha"])')
+          source_checkout="$RUNNER_TEMP/smartsite-contract-source"
+          git init --quiet "$source_checkout"
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$source_commit"
+          git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1/technical-observation-event.json > "$RUNNER_TEMP/source-schema.json"
+          git -C "$source_checkout" show FETCH_HEAD:contracts/test/golden-vectors.json > "$RUNNER_TEMP/source-golden-vectors.json"
+          cmp contracts/schemas/v1/technical-observation-event.json "$RUNNER_TEMP/source-schema.json"
+          cmp contracts/golden-vectors.json "$RUNNER_TEMP/source-golden-vectors.json"
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .
@@ -36,6 +49,20 @@ jobs:
           uv run --frozen pytest
       - name: Build distribution
         run: uv build
+      - name: Verify distribution contains contract provenance
+        shell: bash
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheel = next(Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+          assert "smartsite_ai/contracts/metadata.json" in names
+          assert "smartsite_ai/contracts/schemas/v1/technical-observation-event.json" in names
+          assert "smartsite_ai/contracts/golden-vectors.json" in names
+          PY
       - name: Verify minimal runtime package
         run: |
           uv venv .runtime-venv
@@ -66,3 +93,120 @@ jobs:
           test "$(docker exec smartsite-ai-check id -u)" = '10001'
           curl --fail --silent http://127.0.0.1:8000/health/live
           curl --fail --silent http://127.0.0.1:8000/v1/capabilities | python -c 'import json, sys; data = json.load(sys.stdin); assert data["inference_ready"] is False; assert all(c["status"] == "not_configured" for c in data["capabilities"].values())'
+
+  paired-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-bookworm
+        env:
+          POSTGRES_USER: smartsite
+          POSTGRES_PASSWORD: smartsite_ci_only
+          POSTGRES_DB: smartsite
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U smartsite -d smartsite"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: '0.11.6'
+          python-version: '3.12.13'
+          enable-cache: true
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: '24.19.0'
+      - name: Install AI and pinned Backend source
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          npm install --global pnpm@12.4.2
+          source_repository=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceRepository"])')
+          source_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceCommitSha"])')
+          source_checkout="$RUNNER_TEMP/smartsite-contract-source"
+          git init --quiet "$source_checkout"
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$source_commit"
+          git -C "$source_checkout" checkout --quiet FETCH_HEAD
+          cd "$source_checkout"
+          pnpm --filter @smartsite/contracts --filter @smartsite/backend install --frozen-lockfile
+      - name: Migrate and start pinned Backend
+        shell: bash
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://smartsite:smartsite_ci_only@127.0.0.1:5432/smartsite
+          DATABASE_TIMEOUT_MS: '5000'
+          CORS_ORIGINS: ''
+          SMARTSITE_AI_SERVICE_TOKEN: paired_contract_ci_token
+        run: |
+          set -euo pipefail
+          source_checkout="$RUNNER_TEMP/smartsite-contract-source"
+          cd "$source_checkout"
+          pnpm --filter @smartsite/backend db:migrate:run
+          pnpm --filter @smartsite/backend start > "$RUNNER_TEMP/smartsite-backend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/smartsite-backend.pid"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/api/v1/health/ready > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/smartsite-backend.log"
+          exit 1
+      - name: Exercise Python client through HTTP, auth, idempotency, and PostgreSQL
+        shell: bash
+        run: |
+          uv run --frozen python - <<'PY'
+          import asyncio
+          from datetime import datetime, timezone
+          from uuid import uuid4
+
+          import httpx
+
+          from smartsite_ai.domain.observations import TechnicalObservationEvent
+          from smartsite_ai.integrations.backend_client import BackendClient
+
+          async def main() -> None:
+              event = TechnicalObservationEvent.model_validate({
+                  "eventId": str(uuid4()),
+                  "schemaVersion": "1.0.0",
+                  "cameraExternalId": "CI-UNKNOWN-CAMERA",
+                  "streamSessionId": str(uuid4()),
+                  "capturedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "frameDimensions": {"width": 1920, "height": 1080},
+                  "observations": [{"type": "PERSON", "trackId": 1}],
+                  "evidence": [],
+              })
+
+              async with BackendClient(
+                  "http://127.0.0.1:3000",
+                  "paired_contract_ci_token",
+              ) as client:
+                  first = await client.post_event(event)
+                  assert first["status"] == "SKIPPED_UNKNOWN_CAMERA"
+                  duplicate = await client.post_event(event)
+                  assert duplicate["status"] == "DUPLICATE_ACCEPTED"
+
+              async with BackendClient("http://127.0.0.1:3000", "wrong-token") as client:
+                  try:
+                      await client.post_event(event)
+                  except httpx.HTTPStatusError as exc:
+                      assert exc.response.status_code == 401
+                  else:
+                      raise AssertionError("Wrong service token was accepted")
+
+          asyncio.run(main())
+          PY
+      - name: Show Backend log and stop process
+        if: always()
+        shell: bash
+        run: |
+          test ! -f "$RUNNER_TEMP/smartsite-backend.log" || cat "$RUNNER_TEMP/smartsite-backend.log"
+          test ! -f "$RUNNER_TEMP/smartsite-backend.pid" || kill "$(cat "$RUNNER_TEMP/smartsite-backend.pid")" || true

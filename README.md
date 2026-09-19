@@ -64,7 +64,7 @@ SmartSite Backend
 | Responsibility | Technology |
 | --- | --- |
 | API | Python, FastAPI |
-| Detection | YOLO26 |
+| Detection | YOLO11s baseline |
 | Tracking | Supervision + tracker |
 | PPE monitoring | Trained PPE detection weights |
 | Zone monitoring | Tracking + configured geometry |
@@ -73,7 +73,7 @@ SmartSite Backend
 | Business authorization | SmartSite Backend |
 | Business database | Neon PostgreSQL through Backend |
 
-RF-DETR remains a comparison/fallback candidate. Roboflow Workflows and NVIDIA DeepStream have been researched but are not part of the initial implementation baseline.
+YOLO11s is the selected implementation baseline for MF05/MF06. RF-DETR Nano/Small and YOLO26s remain optional benchmark challengers; they do not block the first implementation. Roboflow Workflows and NVIDIA DeepStream have been researched but are not part of the initial implementation baseline.
 
 ## Design Principles
 
@@ -202,7 +202,7 @@ Vision dependencies are isolated from the core API environment.
 uv sync --frozen --extra vision
 ```
 
-The optional vision group currently pins Ultralytics and Supervision. GPU support must be validated against the selected PyTorch, CUDA, hardware, and model versions before it is treated as a supported runtime.
+The optional vision group currently pins Ultralytics and Supervision. YOLO11s selects the detector architecture/size, not a validated PPE checkpoint. GPU support must be validated against the selected PyTorch, CUDA, hardware, and trained weights before it is treated as a supported runtime. Ultralytics artifacts are AGPL-3.0 by default; a proprietary or commercial deployment must complete a license review before release.
 
 ## Testing
 

@@ -114,11 +114,8 @@ def test_valid_minimal_event_passes_model_and_json_schema():
         "2026-09-18T10:00:00Z",
         "2026-12-31T23:59:60Z",
         "2026-12-31T18:59:60-05:00",
-        "2026-12-31T23:59:60+00",
-        "2026-12-31T23:59:59+00",
         "2026-12-31T23:59:60+00:00",
         "2027-01-01T06:59:60+07:00",
-        "2026-12-31T23:59:60+0000",
         "2026-12-31T12:00:00+23:59",
     ],
 )
@@ -242,6 +239,10 @@ def test_convenience_constructor_create():
         "2026-12-31T12:00:00+2400",
         "2026-12-31T12:00:00+24",
         "2026-12-31T12:00:00+00:60",
+        "2026-12-31T23:59:60+00",
+        "2026-12-31T23:59:60+0000",
+        "2026-12-31 23:59:60Z",
+        "2026-12-31\t23:59:60Z",
         "٢٠٢٦-٠٩-١٩T١٢:٠٠:٠٠Z",  # Python \d matches Unicode digits; Ajv accepts ASCII only.
         "2026-09-19\u008512:00:00Z",  # Python \s accepts U+0085, but Ajv does not.
     ],
@@ -506,3 +507,79 @@ def test_empty_observations_list_rejected():
     data = create_sample_event_dict(observations=[])
     with pytest.raises(ValidationError):
         TechnicalObservationEvent.model_validate(data)
+
+
+def test_cross_runtime_integer_boundaries_and_integral_json_numbers():
+    maximum = 9_007_199_254_740_991
+
+    boundary = create_sample_event_dict(
+        frameDimensions={"width": maximum, "height": maximum},
+        observations=[{"type": "PERSON", "trackId": maximum}],
+        evidence=[{"kind": "FRAME", "uri": "s3://frame", "trackId": maximum}],
+    )
+    assert TechnicalObservationEvent.model_validate(boundary).to_wire_dict() == boundary
+
+    integral_float = create_sample_event_dict(
+        frameDimensions={"width": 1920.0, "height": 1080.0},
+        observations=[{"type": "PERSON", "trackId": 1.0}],
+    )
+    normalized = TechnicalObservationEvent.model_validate(integral_float).to_wire_dict()
+    assert normalized["frameDimensions"] == {"width": 1920, "height": 1080}
+    assert normalized["observations"][0]["trackId"] == 1
+
+    for unsafe_payload in [
+        create_sample_event_dict(observations=[{"type": "PERSON", "trackId": maximum + 1}]),
+        create_sample_event_dict(frameDimensions={"width": maximum + 1, "height": 1080}),
+        create_sample_event_dict(
+            observations=[
+                {
+                    "type": "ZONE_ENTRY",
+                    "trackId": 1,
+                    "regionId": str(uuid4()),
+                    "geometryVersion": maximum + 1,
+                }
+            ]
+        ),
+    ]:
+        with pytest.raises(ValidationError):
+            TechnicalObservationEvent.model_validate(unsafe_payload)
+
+
+def test_storage_safe_string_and_collection_boundaries():
+    candidate_128 = {
+        "type": "IDENTITY_CANDIDATE",
+        "trackId": 1,
+        "status": "CANDIDATE",
+        "candidateWorkerId": "W" * 128,
+        "similarityScore": 0.9,
+    }
+    TechnicalObservationEvent.model_validate(create_sample_event_dict(observations=[candidate_128]))
+
+    invalid_payloads = [
+        create_sample_event_dict(observations=[{**candidate_128, "candidateWorkerId": "W" * 129}]),
+        create_sample_event_dict(cameraExternalId="CAM\u0000BROKEN"),
+        create_sample_event_dict(evidence=[{"kind": "FRAME", "uri": "s3://frame\u0000.jpg"}]),
+        create_sample_event_dict(
+            observations=[{"type": "PERSON", "trackId": i} for i in range(257)]
+        ),
+        create_sample_event_dict(
+            evidence=[{"kind": "FRAME", "uri": f"s3://frame/{i}"} for i in range(257)]
+        ),
+    ]
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            TechnicalObservationEvent.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "noncanonical_value",
+    [
+        "urn:uuid:11111111-1111-4111-8111-111111111111",
+        "{11111111-1111-4111-8111-111111111111}",
+    ],
+)
+def test_noncanonical_uuid_forms_are_rejected_by_schema_and_model(noncanonical_value: str):
+    payload = create_sample_event_dict(eventId=noncanonical_value)
+    assert not VALIDATOR.is_valid(payload)
+    with pytest.raises(ValidationError):
+        TechnicalObservationEvent.model_validate(payload)

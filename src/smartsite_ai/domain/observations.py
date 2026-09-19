@@ -2,12 +2,28 @@ import re
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
+POSTGRES_SAFE_STRING_PATTERN = r"^[^\x00]+$"
+
+
+def validate_json_integer(v: Any) -> int:
+    """Accepts JSON-Schema integers without accepting strings or booleans."""
+    if isinstance(v, bool):
+        raise ValueError("boolean is not an integer in this wire contract")
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    raise ValueError("value must be an integer JSON number")
+
+
+JsonInteger = Annotated[int, BeforeValidator(validate_json_integer)]
 
 
 def is_leap_year(year: int) -> bool:
@@ -16,9 +32,9 @@ def is_leap_year(year: int) -> bool:
 
 DATE_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})$")
 TIME_RE = re.compile(
-    r"^([0-9]{2}):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)([zZ]|([+-])([0-9]{2})(?::?([0-9]{2}))?)?$"
+    r"^([0-9]{2}):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)([zZ]|([+-])([0-9]{2}):([0-9]{2}))$"
 )
-DATE_TIME_SEP_RE = re.compile(r"[tT ]")
+DATE_TIME_SEP_RE = re.compile(r"[tT]")
 
 
 def validate_uuid_str(v: Any, field_name: str) -> str:
@@ -64,11 +80,6 @@ def validate_rfc3339_captured_at(v: Any) -> str:
     hr = int(time_match.group(1))
     min_ = int(time_match.group(2))
     sec = float(time_match.group(3))
-    tz = time_match.group(4)
-
-    if not tz:
-        raise ValueError(f"Missing required timezone offset in capturedAt '{v}'")
-
     tz_sign = -1 if time_match.group(5) == "-" else 1
     tz_h = int(time_match.group(6) or 0)
     tz_m = int(time_match.group(7) or 0)
@@ -110,8 +121,8 @@ class StrictWireModel(BaseModel):
 
 
 class FrameDimensions(StrictWireModel):
-    width: int = Field(..., ge=1)
-    height: int = Field(..., ge=1)
+    width: JsonInteger = Field(..., ge=1, le=MAX_SAFE_INTEGER)
+    height: JsonInteger = Field(..., ge=1, le=MAX_SAFE_INTEGER)
 
 
 class BoundingBox(StrictWireModel):
@@ -132,18 +143,18 @@ class BoundingBox(StrictWireModel):
 
 class PersonObservation(StrictWireModel):
     type: Literal["PERSON"] = Field(..., alias="type")
-    track_id: int = Field(..., ge=0, alias="trackId")
+    track_id: JsonInteger = Field(..., ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
 
 
 class PpeObservation(StrictWireModel):
     type: Literal["PPE"] = Field(..., alias="type")
-    track_id: int = Field(..., ge=0, alias="trackId")
+    track_id: JsonInteger = Field(..., ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     ppe_item: Literal["HARD_HAT", "SAFETY_VEST"] = Field(..., alias="ppeItem")
     status: Literal["PRESENT", "MISSING"]
     region_id: str = Field(..., alias="regionId")
-    geometry_version: int = Field(..., ge=1, alias="geometryVersion")
+    geometry_version: JsonInteger = Field(..., ge=1, le=MAX_SAFE_INTEGER, alias="geometryVersion")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
 
@@ -155,9 +166,9 @@ class PpeObservation(StrictWireModel):
 
 class ZoneEntryObservation(StrictWireModel):
     type: Literal["ZONE_ENTRY"] = Field(..., alias="type")
-    track_id: int = Field(..., ge=0, alias="trackId")
+    track_id: JsonInteger = Field(..., ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     region_id: str = Field(..., alias="regionId")
-    geometry_version: int = Field(..., ge=1, alias="geometryVersion")
+    geometry_version: JsonInteger = Field(..., ge=1, le=MAX_SAFE_INTEGER, alias="geometryVersion")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("region_id")
@@ -168,9 +179,15 @@ class ZoneEntryObservation(StrictWireModel):
 
 class IdentityCandidateObservation(StrictWireModel):
     type: Literal["IDENTITY_CANDIDATE"] = Field(..., alias="type")
-    track_id: int = Field(..., ge=0, alias="trackId")
+    track_id: JsonInteger = Field(..., ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     status: Literal["CANDIDATE", "UNKNOWN", "UNAVAILABLE"]
-    candidate_worker_id: str | None = Field(default=None, min_length=1, alias="candidateWorkerId")
+    candidate_worker_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=POSTGRES_SAFE_STRING_PATTERN,
+        alias="candidateWorkerId",
+    )
     similarity_score: float | None = Field(default=None, ge=0.0, le=1.0, alias="similarityScore")
     quality_score: float | None = Field(default=None, ge=0.0, le=1.0, alias="qualityScore")
 
@@ -197,20 +214,26 @@ Observation = Annotated[
 
 class EvidenceItem(StrictWireModel):
     kind: Literal["FRAME", "CROP", "SNAPSHOT"]
-    uri: str = Field(..., min_length=1)
-    track_id: int | None = Field(default=None, ge=0, alias="trackId")
+    uri: str = Field(..., min_length=1, pattern=POSTGRES_SAFE_STRING_PATTERN)
+    track_id: JsonInteger | None = Field(default=None, ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
 
 
 class TechnicalObservationEvent(StrictWireModel):
     event_id: str = Field(..., alias="eventId")
     schema_version: Literal["1.0.0"] = Field(..., alias="schemaVersion")
-    camera_external_id: str = Field(..., min_length=1, max_length=128, alias="cameraExternalId")
+    camera_external_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=POSTGRES_SAFE_STRING_PATTERN,
+        alias="cameraExternalId",
+    )
     stream_session_id: str = Field(..., alias="streamSessionId")
     captured_at: str = Field(..., alias="capturedAt")
     frame_dimensions: FrameDimensions = Field(..., alias="frameDimensions")
-    observations: list[Observation] = Field(..., min_length=1)
-    evidence: list[EvidenceItem] = Field(..., alias="evidence")
+    observations: list[Observation] = Field(..., min_length=1, max_length=256)
+    evidence: list[EvidenceItem] = Field(..., max_length=256, alias="evidence")
 
     @field_validator("event_id")
     @classmethod

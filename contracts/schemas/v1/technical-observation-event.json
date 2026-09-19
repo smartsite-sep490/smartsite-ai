@@ -15,19 +15,38 @@
     "evidence"
   ],
   "properties": {
-    "eventId": { "type": "string", "format": "uuid" },
+    "eventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
     "schemaVersion": { "const": "1.0.0" },
-    "cameraExternalId": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "streamSessionId": { "type": "string", "format": "uuid" },
-    "capturedAt": { "type": "string", "format": "date-time" },
+    "cameraExternalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "streamSessionId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt](?:[01][0-9]|2[0-3]):[0-5][0-9]:(?:[0-5][0-9]|60)(?:\\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$"
+    },
     "frameDimensions": { "$ref": "#/$defs/frameDimensions" },
     "observations": {
       "type": "array",
       "minItems": 1,
+      "maxItems": 256,
       "items": { "$ref": "#/$defs/observation" }
     },
     "evidence": {
       "type": "array",
+      "maxItems": 256,
       "items": { "$ref": "#/$defs/evidenceItem" }
     }
   },
@@ -37,8 +56,8 @@
       "additionalProperties": false,
       "required": ["width", "height"],
       "properties": {
-        "width": { "type": "integer", "minimum": 1 },
-        "height": { "type": "integer", "minimum": 1 }
+        "width": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "boundingBox": {
@@ -59,7 +78,7 @@
       "required": ["type", "trackId"],
       "properties": {
         "type": { "const": "PERSON" },
-        "trackId": { "type": "integer", "minimum": 0 },
+        "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "boundingBox": { "$ref": "#/$defs/boundingBox" }
       }
@@ -70,11 +89,15 @@
       "required": ["type", "trackId", "ppeItem", "status", "regionId", "geometryVersion"],
       "properties": {
         "type": { "const": "PPE" },
-        "trackId": { "type": "integer", "minimum": 0 },
+        "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "ppeItem": { "enum": ["HARD_HAT", "SAFETY_VEST"] },
         "status": { "enum": ["PRESENT", "MISSING"] },
-        "regionId": { "type": "string", "format": "uuid" },
-        "geometryVersion": { "type": "integer", "minimum": 1 },
+        "regionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "geometryVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "boundingBox": { "$ref": "#/$defs/boundingBox" }
       }
@@ -85,9 +108,13 @@
       "required": ["type", "trackId", "regionId", "geometryVersion"],
       "properties": {
         "type": { "const": "ZONE_ENTRY" },
-        "trackId": { "type": "integer", "minimum": 0 },
-        "regionId": { "type": "string", "format": "uuid" },
-        "geometryVersion": { "type": "integer", "minimum": 1 },
+        "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "regionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "geometryVersion": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
       }
     },
@@ -99,9 +126,14 @@
           "required": ["type", "trackId", "status", "candidateWorkerId", "similarityScore"],
           "properties": {
             "type": { "const": "IDENTITY_CANDIDATE" },
-            "trackId": { "type": "integer", "minimum": 0 },
+            "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
             "status": { "const": "CANDIDATE" },
-            "candidateWorkerId": { "type": "string", "minLength": 1 },
+            "candidateWorkerId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[^\\u0000]+$"
+            },
             "similarityScore": { "type": "number", "minimum": 0, "maximum": 1 },
             "qualityScore": { "type": "number", "minimum": 0, "maximum": 1 }
           }
@@ -112,7 +144,7 @@
           "required": ["type", "trackId", "status"],
           "properties": {
             "type": { "const": "IDENTITY_CANDIDATE" },
-            "trackId": { "type": "integer", "minimum": 0 },
+            "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
             "status": { "enum": ["UNKNOWN", "UNAVAILABLE"] },
             "qualityScore": { "type": "number", "minimum": 0, "maximum": 1 }
           }
@@ -133,8 +165,8 @@
       "required": ["kind", "uri"],
       "properties": {
         "kind": { "enum": ["FRAME", "CROP", "SNAPSHOT"] },
-        "uri": { "type": "string", "minLength": 1 },
-        "trackId": { "type": "integer", "minimum": 0 },
+        "uri": { "type": "string", "minLength": 1, "pattern": "^[^\\u0000]+$" },
+        "trackId": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
         "boundingBox": { "$ref": "#/$defs/boundingBox" }
       }
     }

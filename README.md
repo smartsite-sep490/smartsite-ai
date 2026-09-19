@@ -119,6 +119,9 @@ Implemented:
 
 - FastAPI application factory;
 - validated environment configuration;
+- strict, versioned MF05/MF06 observation models and vendored JSON Schema provenance;
+- RFC 8785 compatible hashing with cross-runtime safe-integer guards;
+- authenticated Backend ingestion client with bounded retries and strict response validation;
 - liveness endpoint;
 - readiness endpoint;
 - capability endpoint;
@@ -138,7 +141,7 @@ Not yet implemented:
 - tracking pipeline;
 - Zone geometry processing;
 - InsightFace integration;
-- AI event producer;
+- camera/inference event producer loop;
 - OpenAI adapter;
 - benchmark results.
 
@@ -186,8 +189,10 @@ Environment variables use the `SMARTSITE_AI_` prefix.
 | `SMARTSITE_AI_HOST` | `127.0.0.1` | API bind address |
 | `SMARTSITE_AI_PORT` | `8000` | API port |
 | `SMARTSITE_AI_LOG_LEVEL` | `info` | Logging level |
+| `SMARTSITE_AI_BACKEND_INGESTION_URL` | unset | Backend origin or exact AI ingestion endpoint |
+| `SMARTSITE_AI_BACKEND_SERVICE_TOKEN` | unset | Bearer credential for Backend ingestion |
 
-Invalid configuration prevents startup. Camera credentials, model paths, and OpenAI credentials are intentionally not treated as implemented capabilities yet.
+Invalid configuration prevents startup. The ingestion client fails closed when its URL or token is absent, but the FastAPI health/capability foundation can run before a camera worker is enabled. Camera credentials, model paths, and OpenAI credentials are intentionally not treated as implemented capabilities yet.
 
 ## Vision Dependencies
 
@@ -277,7 +282,7 @@ No FPS, latency, throughput, or accuracy claim is considered guaranteed until be
 
 Integration notes live in [docs/integration.md](docs/integration.md).
 
-The AI service emits technical detection evidence. The SmartSite backend is responsible for validating events, enforcing business rules, resolving access permission, deduplicating detections, creating Safety Alerts, and maintaining Incident lifecycle.
+The AI service emits technical detection evidence through `POST /api/v1/integrations/ai/events`. The client validates both request and acknowledgement contracts, retries only transport/408/429/5xx failures, and checks that the returned `eventId` matches the submitted event. The SmartSite backend is responsible for validating events, enforcing business rules, resolving access permission, deduplicating detections, creating Safety Alerts, and maintaining Incident lifecycle.
 
 ## Security and Privacy
 

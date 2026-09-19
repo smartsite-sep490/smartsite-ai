@@ -33,6 +33,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/smartsite_ai"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"contracts" = "smartsite_ai/contracts"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

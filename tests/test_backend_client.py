@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.observations import (
@@ -94,6 +94,21 @@ def test_constructor_rejects_negative_retries_and_backoff():
         BackendClient("http://backend:3000", "secret-token", backoff_factor=-0.1)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://backend:3000",
+        "http://user:pass@backend:3000",
+        "http://backend:3000/api/v1",
+        "http://backend:3000?debug=true",
+        "http://backend:3000/#fragment",
+    ],
+)
+def test_constructor_rejects_ambiguous_or_unsafe_backend_urls(url: str):
+    with pytest.raises(ValueError, match="origin URL or exact ingestion endpoint"):
+        BackendClient(url, "secret-token")
+
+
 def test_from_settings_fails_when_unconfigured():
     empty_settings = Settings(_env_file=None)
     with pytest.raises(ValueError, match="backend_ingestion_url is not configured"):
@@ -138,18 +153,19 @@ def test_client_repr_and_str_never_leak_token():
 
 
 @pytest.mark.parametrize(
-    ("status_code", "expected_body"),
+    ("status_code", "response_status"),
     [
-        (202, {"status": "ACCEPTED", "eventId": "11111111-1111-4111-8111-111111111111"}),
-        (200, {"status": "DUPLICATE_ACCEPTED", "eventId": "11111111-1111-4111-8111-111111111111"}),
+        (202, "PROCESSED"),
+        (200, "DUPLICATE_ACCEPTED"),
     ],
 )
 @pytest.mark.anyio
 async def test_successful_event_dispatch_returns_decoded_json(
-    status_code: int, expected_body: dict[str, Any]
+    status_code: int, response_status: str
 ):
     raw_token = "secret-token-abc"
     event = make_sample_event()
+    expected_body = {"status": response_status, "eventId": event.event_id, "alertIds": []}
     captured_requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -203,6 +219,52 @@ async def test_success_status_with_invalid_json_is_not_treated_as_accepted():
     assert tracker.delays == []
 
 
+@pytest.mark.parametrize(
+    "invalid_body",
+    [
+        [],
+        {"status": "ACCEPTED", "eventId": "11111111-1111-4111-8111-111111111111", "alertIds": []},
+        {"status": "PROCESSED", "eventId": "11111111-1111-4111-8111-111111111111"},
+        {"status": "PROCESSED", "eventId": "22222222-2222-4222-8222-222222222222", "alertIds": []},
+    ],
+)
+@pytest.mark.anyio
+async def test_success_response_must_match_backend_contract_and_submitted_event(invalid_body: Any):
+    event = TechnicalObservationEvent.model_validate(
+        {
+            **make_sample_event().to_wire_dict(),
+            "eventId": "11111111-1111-4111-8111-111111111111",
+        }
+    )
+
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(lambda _: httpx.Response(202, json=invalid_body)),
+    ) as client:
+        with pytest.raises((ValidationError, ValueError, TypeError)):
+            await client.post_event(event)
+
+
+@pytest.mark.anyio
+async def test_dictionary_input_is_validated_before_network_dispatch():
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(202, json={})
+
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ValidationError):
+            await client.post_event({})
+
+    assert requests == []
+
+
 # ============================================================================
 # 4. Retry on TransportError (3 retries = 4 attempts, backoff 0.5, 1.0, 2.0s)
 # ============================================================================
@@ -217,7 +279,11 @@ async def test_retry_on_transport_error_succeeds_on_fourth_attempt():
         call_count += 1
         if call_count < 4:
             raise httpx.ConnectError("Network is down", request=request)
-        return httpx.Response(200, json={"status": "OK"})
+        event_id = json.loads(request.content)["eventId"]
+        return httpx.Response(
+            200,
+            json={"status": "DUPLICATE_ACCEPTED", "eventId": event_id, "alertIds": []},
+        )
 
     tracker = SleepTracker()
     transport = httpx.MockTransport(handler)
@@ -230,7 +296,7 @@ async def test_retry_on_transport_error_succeeds_on_fourth_attempt():
     )
 
     result = await client.post_event(make_sample_event())
-    assert result == {"status": "OK"}
+    assert result["status"] == "DUPLICATE_ACCEPTED"
     assert call_count == 4
     assert tracker.delays == [0.5, 1.0, 2.0]
     await client.aclose()
@@ -278,7 +344,11 @@ async def test_retry_on_retryable_http_statuses(status_code: int):
         call_count += 1
         if call_count < 4:
             return httpx.Response(status_code, json={"error": f"Temporary {status_code}"})
-        return httpx.Response(200, json={"status": "OK"})
+        event_id = json.loads(request.content)["eventId"]
+        return httpx.Response(
+            200,
+            json={"status": "DUPLICATE_ACCEPTED", "eventId": event_id, "alertIds": []},
+        )
 
     tracker = SleepTracker()
     transport = httpx.MockTransport(handler)
@@ -291,7 +361,7 @@ async def test_retry_on_retryable_http_statuses(status_code: int):
     )
 
     result = await client.post_event(make_sample_event())
-    assert result == {"status": "OK"}
+    assert result["status"] == "DUPLICATE_ACCEPTED"
     assert call_count == 4
     assert tracker.delays == [0.5, 1.0, 2.0]
     await client.aclose()

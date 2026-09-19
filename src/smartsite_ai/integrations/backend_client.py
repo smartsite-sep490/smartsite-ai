@@ -1,17 +1,45 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
-from pydantic import SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from smartsite_ai.config import Settings
-from smartsite_ai.domain.observations import TechnicalObservationEvent
+from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_FACTOR = 0.5
 INGESTION_ENDPOINT_PATH = "/api/v1/integrations/ai/events"
+
+
+class BackendIngestionResponse(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", populate_by_name=False)
+
+    event_id: str = Field(..., alias="eventId")
+    status: Literal[
+        "PROCESSED",
+        "SKIPPED_CLOCK_SKEW",
+        "SKIPPED_NO_CANDIDATE",
+        "SKIPPED_UNKNOWN_CAMERA",
+        "DUPLICATE_ACCEPTED",
+    ]
+    alert_ids: list[str] = Field(..., alias="alertIds")
+
+    @field_validator("event_id")
+    @classmethod
+    def check_event_id(cls, value: str) -> str:
+        return validate_uuid_str(value, "eventId")
+
+    @field_validator("alert_ids")
+    @classmethod
+    def check_alert_ids(cls, values: list[str]) -> list[str]:
+        return [validate_uuid_str(value, "alertIds") for value in values]
+
+    def to_wire_dict(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", by_alias=True)
 
 
 class BackendClient:
@@ -61,6 +89,20 @@ class BackendClient:
             raise ValueError("backoff_factor must be non-negative")
 
         raw_url = str(base_url).strip().rstrip("/")
+        parsed_url = urlsplit(raw_url)
+        allowed_path = parsed_url.path in ("", INGESTION_ENDPOINT_PATH)
+        if (
+            parsed_url.scheme not in ("http", "https")
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+            or bool(parsed_url.query)
+            or bool(parsed_url.fragment)
+            or not allowed_path
+        ):
+            raise ValueError(
+                "BackendClient base_url must be an HTTP(S) origin URL or exact ingestion endpoint"
+            )
         self._base_url = raw_url
         self._timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
         self._transport = transport
@@ -167,13 +209,14 @@ class BackendClient:
         Immediately calls raise_for_status on all other 4xx errors without retrying.
         """
         if isinstance(event, TechnicalObservationEvent):
-            payload = event.to_wire_dict()
+            validated_event = event
         elif isinstance(event, dict):
-            payload = event
+            validated_event = TechnicalObservationEvent.model_validate(event)
         else:
             raise TypeError(
                 f"event must be TechnicalObservationEvent or dict, got {type(event).__name__}"
             )
+        payload = validated_event.to_wire_dict()
 
         url = self._resolve_url()
         headers = self._get_headers()
@@ -198,7 +241,12 @@ class BackendClient:
 
             # 1. Successful response (2xx) -> return decoded JSON
             if 200 <= status < 300:
-                return response.json()
+                accepted = BackendIngestionResponse.model_validate(response.json())
+                if accepted.event_id != validated_event.event_id:
+                    raise ValueError(
+                        "Backend ingestion response eventId does not match the submitted event"
+                    )
+                return accepted.to_wire_dict()
 
             # 2. Retryable HTTP errors: 408 (Timeout), 429 (Too Many Requests), 5xx
             if status in (408, 429) or (500 <= status < 600):

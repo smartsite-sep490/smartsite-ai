@@ -42,6 +42,7 @@ INDEPENDENT_VALIDATOR = jsonschema.Draft202012Validator(
 def test_contracts_provenance_and_schema_hash_integrity():
     metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
     schema_bytes = SCHEMA_PATH.read_bytes()
+    golden_bytes = (ROOT / "contracts/golden-vectors.json").read_bytes()
 
     assert metadata["sourceRepository"] == "smartsite-sep490/smartsite"
     assert re.fullmatch(r"[0-9a-f]{40}", metadata["sourceCommitSha"])
@@ -49,6 +50,7 @@ def test_contracts_provenance_and_schema_hash_integrity():
 
     computed_sha256 = hashlib.sha256(schema_bytes).hexdigest()
     assert metadata["schemaSha256"] == computed_sha256
+    assert metadata["goldenVectorsSha256"] == hashlib.sha256(golden_bytes).hexdigest()
 
     # CI can check out the AI repository alone. When the source checkout is
     # present, a missing commit or blob must fail rather than skip provenance.
@@ -68,6 +70,23 @@ def test_contracts_provenance_and_schema_hash_integrity():
         )
         assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
         assert proc.stdout == schema_bytes, "Vendored schema does not match source commit blob"
+
+        golden_proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling_repo),
+                "show",
+                f"{metadata['sourceCommitSha']}:contracts/test/golden-vectors.json",
+            ],
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+        assert golden_proc.returncode == 0, golden_proc.stderr.decode("utf-8", errors="replace")
+        assert golden_proc.stdout == golden_bytes, (
+            "Vendored vectors do not match source commit blob"
+        )
 
 
 # ============================================================================

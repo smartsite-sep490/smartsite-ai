@@ -1,56 +1,111 @@
-"""Source protocol and credential-safe URL sanitization for camera ingestion."""
+"""Source protocol, credential-safe URL sanitization, and fail-closed error classification."""
 
 import re
 from typing import Protocol, runtime_checkable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
-# Matches URLs with user/password credentials (e.g., rtsp://user:pass@host:554/path)
-_CREDENTIAL_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+-.]*://)([^:@/]+)(?::([^@/]+))?@")
+# Matches scheme and full authority containing one or more '@' characters.
+# In RFC 3986, userinfo precedes the LAST '@' in the authority before host:port.
+_AUTHORITY_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+-.]*://)([^/\s?#]+@[^/\s?#]+)")
+
+# Allowlist of known-safe, non-credential camera query parameters (fail-closed design)
+_SAFE_QUERY_KEYS = frozenset(
+    {
+        "channel",
+        "ch",
+        "subtype",
+        "stream",
+        "width",
+        "height",
+        "fps",
+        "proto",
+        "resolution",
+        "transport",
+    }
+)
+
+
+def _sanitize_authority(match: re.Match[str]) -> str:
+    scheme = match.group(1)
+    authority = match.group(2)
+    # The last '@' in authority separates userinfo from host:port
+    userinfo, at, hostport = authority.rpartition("@")
+    if not at:
+        return match.group(0)
+    masked = "***:***" if ":" in userinfo else "***"
+    return f"{scheme}{masked}@{hostport}"
 
 
 def sanitize_stream_url(url: str) -> str:
-    """Sanitize stream URL to ensure passwords and usernames are never logged or displayed.
+    """Sanitize stream URL to ensure credentials, tokens, and fragments are never exposed.
+
+    Enforces fail-closed sanitization:
+    - Userinfo (username/password) is always masked, even if password contains '@' characters.
+    - URL fragments (#...) are completely stripped.
+    - Query parameters are fail-closed: only explicitly allowlisted benign keys keep values;
+      all other values (tokens, secrets, signatures, unknown keys) are masked to '***'.
 
     Examples:
         rtsp://admin:secret@10.0.0.1:554/live -> rtsp://***:***@10.0.0.1:554/live
-        rtsp://viewer@10.0.0.1:554/live -> rtsp://***@10.0.0.1:554/live
-        rtsp://10.0.0.1:554/live -> rtsp://10.0.0.1:554/live
-        /dev/video0 -> /dev/video0
+        rtsp://operator:p@ssword123@10.0.1.25/live -> rtsp://***:***@10.0.1.25/live
+        http://camera/live?token=secret123&ch=1 -> http://camera/live?token=***&ch=1
+        http://camera/live#access_token=secret -> http://camera/live
     """
     if not url or "://" not in url:
         return url
 
+    # 1. Strip fragment completely before parsing
+    clean_url = url.split("#")[0]
+
+    # 2. Mask authority (handles passwords with '@')
+    masked_url = _AUTHORITY_URL_RE.sub(_sanitize_authority, clean_url)
+
+    # 3. Fail-closed query sanitization: only allowlist keeps value
     try:
-        parsed = urlsplit(url)
-        if not parsed.username and not parsed.password:
-            return url
+        parsed = urlsplit(masked_url)
+        masked_query = ""
+        if parsed.query:
+            query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+            sanitized_pairs = []
+            for k, v in query_pairs:
+                if k.lower() in _SAFE_QUERY_KEYS:
+                    sanitized_pairs.append((k, v))
+                else:
+                    sanitized_pairs.append((k, "***"))
+            masked_query = urlencode(sanitized_pairs, safe="*")
 
-        host = parsed.hostname or ""
-        if parsed.port:
-            host = f"{host}:{parsed.port}"
-
-        if parsed.username and parsed.password:
-            masked_netloc = f"***:***@{host}"
-        elif parsed.username:
-            masked_netloc = f"***@{host}"
-        else:
-            masked_netloc = f":***@{host}"
-
-        return urlunsplit(
-            (parsed.scheme, masked_netloc, parsed.path, parsed.query, parsed.fragment)
-        )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, masked_query, ""))
     except Exception:
-        # Fallback regex redaction if URL parsing encounters non-standard formats
-        return _CREDENTIAL_URL_RE.sub(r"\1***:***@", url)
+        # Fallback query parameter masking
+        return re.sub(
+            r"([?&][^=&#\s]+)=([^&#\s]+)",
+            lambda m: (
+                m.group(0)
+                if m.group(1).lstrip("?&").lower() in _SAFE_QUERY_KEYS
+                else f"{m.group(1)}=***"
+            ),
+            masked_url,
+        )
 
 
 def sanitize_message_credentials(message: str) -> str:
-    """Sanitize any URL credentials embedded in a log or exception message."""
-    return _CREDENTIAL_URL_RE.sub(
-        lambda m: f"{m.group(1)}***:***@" if m.group(3) else f"{m.group(1)}***@",
-        message,
+    """Sanitize URL credentials (including passwords with '@') or tokens in messages."""
+    sanitized = _AUTHORITY_URL_RE.sub(_sanitize_authority, message)
+    # Strip any fragments in embedded URLs
+    sanitized = re.sub(
+        r"(https?|rtsp|rtsps)://[^\s#]+#[^\s]+", lambda m: m.group(0).split("#")[0], sanitized
+    )
+    # Mask query parameters with non-allowlisted keys
+    return re.sub(
+        r"([?&][a-zA-Z0-9_.-]+)=([^&#\s]+)",
+        lambda m: (
+            m.group(0)
+            if m.group(1).lstrip("?&").lower() in _SAFE_QUERY_KEYS
+            else f"{m.group(1)}=***"
+        ),
+        sanitized,
     )
 
 
@@ -76,6 +131,35 @@ class SourceAuthenticationError(SourceConnectionError):
 
 class SourceTimeoutError(IngestionError):
     """Raised when a camera stream operation times out."""
+
+
+class FrameIntegrityError(IngestionError):
+    """Raised when an ingested frame violates stream or camera identity invariants."""
+
+
+class SessionSequenceError(IngestionError):
+    """Raised when an ingested frame violates monotonic sequence or session invariants."""
+
+
+def classify_error_reason(exc: BaseException) -> str:
+    """Classify an exception into a safe, bounded reason string without arbitrary messages."""
+    if isinstance(exc, SourceAuthenticationError):
+        return "authentication_failed"
+    if isinstance(exc, SourceTimeoutError):
+        return "timeout"
+    if isinstance(exc, SessionSequenceError):
+        return "session_sequence_error"
+    if isinstance(exc, FrameIntegrityError):
+        return "frame_integrity_error"
+    if isinstance(exc, SourceReadError):
+        return "read_error"
+    if isinstance(exc, SourceConnectionError):
+        return "connection_error"
+    if isinstance(exc, IngestionError):
+        return "ingestion_error"
+
+    # For unknown/runtime errors: return only type name and fixed safe label; never echo message
+    return f"{type(exc).__name__}: unclassified_error"
 
 
 @runtime_checkable

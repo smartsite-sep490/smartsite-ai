@@ -1,6 +1,7 @@
-"""Deterministic fake frame source for unit testing ingestion behavior."""
+"""Deterministic fake frame sources and time/sleep utilities for testing ingestion behavior."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
@@ -18,6 +19,7 @@ class FakeFrameSource:
         fail_read_once_after: int | None = None,
         secondary_frames: list[FrameEnvelope] | None = None,
         delay_between_frames: float = 0.0,
+        is_live: bool = True,
     ) -> None:
         self._source_id = source_id
         self._frames = list(initial_frames) if initial_frames is not None else []
@@ -26,6 +28,7 @@ class FakeFrameSource:
         self._permanent_connect_failure = permanent_connect_failure
         self._fail_read_once_after = fail_read_once_after
         self.delay_between_frames = delay_between_frames
+        self.is_live = is_live
 
         self._is_connected = False
         self._is_closed = False
@@ -91,10 +94,84 @@ class FakeFrameSource:
             self._frames_yielded += 1
             return frame
 
-        # Stream exhausted / closed
+        # Stream exhausted / closed / EOF
         return None
 
     async def close(self) -> None:
         self.close_calls += 1
         self._is_connected = False
         self._is_closed = True
+
+
+class FakeBlockingSource:
+    """Frame source that blocks indefinitely on read_frame until explicitly closed.
+
+    Used to verify that cancellation / stop cleanly unblocks hung native / socket reads.
+    """
+
+    def __init__(self, source_id: str) -> None:
+        self._source_id = source_id
+        self._is_connected = False
+        self._is_closed = False
+        self._unblock_event = asyncio.Event()
+
+        self.connect_calls = 0
+        self.read_calls = 0
+        self.close_calls = 0
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    @property
+    def is_closed(self) -> bool:
+        return self._is_closed
+
+    async def connect(self) -> None:
+        self.connect_calls += 1
+        self._is_connected = True
+        self._is_closed = False
+        self._unblock_event.clear()
+
+    async def read_frame(self) -> FrameEnvelope | None:
+        if not self._is_connected:
+            raise SourceReadError(f"Source {self._source_id} is not connected")
+        self.read_calls += 1
+        # Block until close() is called
+        await self._unblock_event.wait()
+        return None
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self._is_connected = False
+        self._is_closed = True
+        self._unblock_event.set()
+
+
+class FakeSleeper:
+    """Controllable asynchronous sleeper for deterministic backoff testing without real delays."""
+
+    def __init__(self) -> None:
+        self.sleep_calls: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.sleep_calls.append(delay)
+        # Yield execution to event loop to allow other coroutines to run
+        await asyncio.sleep(0)
+
+
+class FakeClock:
+    """Controllable clock for deterministic timestamping and sampling tests."""
+
+    def __init__(self, start_time: datetime | None = None) -> None:
+        self.current_time = start_time or datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.current_time
+
+    def advance(self, seconds: float) -> None:
+        self.current_time += timedelta(seconds=seconds)

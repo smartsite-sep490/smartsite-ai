@@ -3,14 +3,18 @@
 from smartsite_ai.ingestion.backoff import ExponentialBackoff
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.ingestion.queue import BoundedFrameQueue
+from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
 from smartsite_ai.ingestion.source import (
+    FrameIntegrityError,
     FrameSource,
     IngestionError,
+    SessionSequenceError,
     SourceAuthenticationError,
     SourceConnectionError,
     SourceReadError,
     SourceTimeoutError,
+    classify_error_reason,
+    sanitize_message_credentials,
     sanitize_stream_url,
 )
 from smartsite_ai.ingestion.status import (
@@ -29,8 +33,11 @@ __all__ = [
     "CameraIngestionWorker",
     "ExponentialBackoff",
     "FrameEnvelope",
+    "FrameIntegrityError",
     "FrameSource",
     "IngestionError",
+    "QueueClosedError",
+    "SessionSequenceError",
     "SourceAuthenticationError",
     "SourceConnectionError",
     "SourceReadError",
@@ -41,5 +48,7 @@ __all__ = [
     "StreamStatus",
     "StreamWorker",
     "WorkerStatus",
+    "classify_error_reason",
+    "sanitize_message_credentials",
     "sanitize_stream_url",
 ]

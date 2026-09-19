@@ -1,9 +1,10 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
 
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.ingestion.queue import BoundedFrameQueue
+from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
 
 
 def make_frame(seq: int) -> FrameEnvelope:
@@ -98,3 +99,39 @@ def test_bounded_queue_clear() -> None:
     assert queue.empty()
     # counters are preserved
     assert queue.enqueued_count == 2
+
+
+@pytest.mark.anyio
+async def test_bounded_queue_close_wakes_up_waiting_getters() -> None:
+    queue = BoundedFrameQueue(maxsize=2)
+
+    async def getter() -> None:
+        with pytest.raises(QueueClosedError):
+            await queue.get()
+
+    getter_task = asyncio.create_task(getter())
+    # Yield control so getter reaches await queue.get()
+    await asyncio.sleep(0)
+
+    queue.close()
+    await getter_task
+    assert queue.is_closed is True
+
+
+@pytest.mark.anyio
+async def test_bounded_queue_closed_rejects_put_and_empty_get() -> None:
+    queue = BoundedFrameQueue(maxsize=2)
+    queue.put(make_frame(1))
+    queue.close()
+
+    # Draining remaining items before error
+    item = await queue.get()
+    assert item.sequence_number == 1
+
+    # Empty and closed -> raises QueueClosedError
+    with pytest.raises(QueueClosedError):
+        await queue.get()
+
+    # Put to closed queue -> raises QueueClosedError
+    with pytest.raises(QueueClosedError):
+        queue.put(make_frame(2))

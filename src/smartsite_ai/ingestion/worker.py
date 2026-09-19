@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -10,9 +11,12 @@ from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import BoundedFrameQueue
 from smartsite_ai.ingestion.source import (
+    FrameIntegrityError,
     FrameSource,
+    SessionSequenceError,
     SourceConnectionError,
     SourceReadError,
+    classify_error_reason,
 )
 from smartsite_ai.ingestion.status import (
     StreamMetrics,
@@ -25,7 +29,13 @@ from smartsite_ai.ingestion.status import (
 class StreamWorker:
     """Manages lifecycle, reconnection, backoff, and ingestion loop for a camera stream."""
 
-    def __init__(self, config: StreamConfig, source: FrameSource | None = None) -> None:
+    def __init__(
+        self,
+        config: StreamConfig,
+        source: FrameSource | None = None,
+        sleeper: Callable[[float], Awaitable[None]] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self.config = config
         self.source = source
         self.queue = BoundedFrameQueue(maxsize=config.max_queue_size)
@@ -36,12 +46,23 @@ class StreamWorker:
             jitter=config.reconnect_jitter,
         )
         self.state = StreamState.INITIALIZING
+        self._sleeper = sleeper
+        self._clock = clock or (lambda: datetime.now(UTC))
 
         self.connection_errors = 0
         self.read_errors = 0
+        self.integrity_errors = 0
+        self.sequence_errors = 0
+        self.sampled_out_frames = 0
         self.reconnect_attempts = 0
         self.consecutive_failures = 0
+        self._consecutive_successful_frames = 0
+
+        self._current_session_id: str | None = None
+        self._last_sequence_number: int | None = None
+
         self.last_frame_timestamp: datetime | None = None
+        self._last_sampled_timestamp: datetime | None = None
         self.last_error: str | None = None
         self.started_at: datetime | None = None
         self.connected_at: datetime | None = None
@@ -49,18 +70,52 @@ class StreamWorker:
 
         self._stop_event = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
+        self._source_closed = False
+        self._has_stopped = False
 
     async def start(self) -> None:
-        """Start the background ingestion loop for this stream."""
+        """Start the background ingestion loop for this stream.
+
+        Enforces single-use lifecycle: cannot restart a stopped worker.
+        Idempotent if already streaming or connecting.
+        """
+        if self._has_stopped:
+            raise RuntimeError(
+                f"StreamWorker '{self.config.stream_id}' has been stopped and cannot be restarted"
+            )
+
         if self._loop_task is not None and not self._loop_task.done():
             return
+
         self._stop_event.clear()
-        self.started_at = datetime.now(UTC)
+        self.started_at = self._clock()
         self.state = StreamState.CONNECTING
         self._loop_task = asyncio.create_task(
             self._run_loop(),
             name=f"stream-worker-{self.config.stream_id}",
         )
+
+    async def _sleep(self, delay: float) -> None:
+        """Sleep with cancellation support via custom sleeper or asyncio.wait_for."""
+        if self._stop_event.is_set():
+            return
+
+        if self._sleeper is not None:
+            await self._sleeper(delay)
+            return
+
+        # Do NOT suppress CancelledError; let cancellation propagate cleanly
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+
+    async def _close_source_safely(self) -> None:
+        """Safely close underlying source exactly once without silently swallowing errors."""
+        if self.source is not None and not self._source_closed:
+            self._source_closed = True
+            try:
+                await self.source.close()
+            except Exception as exc:
+                self.last_error = f"close_error: {type(exc).__name__}"
 
     async def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -71,33 +126,118 @@ class StreamWorker:
                         f"No FrameSource configured for stream '{self.config.stream_id}'"
                     )
 
+                self._source_closed = False
                 await self.source.connect()
-                self.connected_at = datetime.now(UTC)
+                self.connected_at = self._clock()
                 self.state = StreamState.STREAMING
-                self.consecutive_failures = 0
-                self.backoff.reset()
+                self._consecutive_successful_frames = 0
+                # Reset per-connection session tracking and sampling baseline upon new connection
+                self._current_session_id = None
+                self._last_sequence_number = None
+                self._last_sampled_timestamp = None
 
-                # Read frames in loop until disconnect or cancellation
+                # Ingestion inner loop
                 while not self._stop_event.is_set():
                     frame = await self.source.read_frame()
+
                     if frame is None:
-                        # Stream reached EOF or remote closed cleanly; back off before reconnecting
+                        # Remote stream EOF or closed
+                        if not self.config.is_live:
+                            # Finite clip has ended cleanly; stop worker
+                            self.state = StreamState.STOPPED
+                            await self._close_source_safely()
+                            return
+
+                        # Live camera disconnected unexpectedly
+                        self.consecutive_failures += 1
+                        self.connection_errors += 1
+                        self.reconnect_attempts += 1
+                        self._consecutive_successful_frames = 0
+                        self.last_error = "connection_closed_eof"
+
+                        if (
+                            self.config.max_consecutive_failures is not None
+                            and self.consecutive_failures >= self.config.max_consecutive_failures
+                        ):
+                            self.state = StreamState.ERROR
+                            await self._close_source_safely()
+                            return
+
                         self.state = StreamState.BACKOFF
                         delay = self.backoff.compute_next_delay()
-                        with contextlib.suppress(TimeoutError):
-                            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                        await self._close_source_safely()
+                        await self._sleep(delay)
                         break
 
+                    # 1. Frame Identity Validation (stream_id & camera_external_id)
+                    if frame.stream_id != self.config.stream_id:
+                        self.integrity_errors += 1
+                        self.last_error = "frame_integrity_error"
+                        continue
+
+                    if frame.camera_external_id != self.config.camera_external_id:
+                        self.integrity_errors += 1
+                        self.last_error = "frame_integrity_error"
+                        continue
+
+                    # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
+                    if self._current_session_id is None:
+                        # First frame of connection establishes session and resets sampling baseline
+                        self._current_session_id = frame.session_id
+                        self._last_sequence_number = frame.sequence_number
+                        self._last_sampled_timestamp = None
+                    else:
+                        # Within the same connection, session_id must not change
+                        if frame.session_id != self._current_session_id:
+                            self.sequence_errors += 1
+                            self.last_error = "session_sequence_error"
+                            continue
+
+                        # Within the same session, sequence_number must increase strictly
+                        if (
+                            self._last_sequence_number is not None
+                            and frame.sequence_number <= self._last_sequence_number
+                        ):
+                            self.sequence_errors += 1
+                            self.last_error = "session_sequence_error"
+                            continue
+
+                        self._last_sequence_number = frame.sequence_number
+
+                    # 3. Stable Criteria: reset backoff after min_stable_frames
+                    self._consecutive_successful_frames += 1
+                    if self._consecutive_successful_frames >= self.config.min_stable_frames:
+                        self.consecutive_failures = 0
+                        self.backoff.reset()
+
+                    # 4. Deterministic Sampling (target_fps limit)
+                    if self.config.target_fps is not None:
+                        min_interval = 1.0 / self.config.target_fps
+                        if self._last_sampled_timestamp is not None:
+                            elapsed = (
+                                frame.captured_at - self._last_sampled_timestamp
+                            ).total_seconds()
+                            if elapsed < (min_interval - 1e-6):
+                                self.sampled_out_frames += 1
+                                continue
+                        self._last_sampled_timestamp = frame.captured_at
+
+                    # 5. Enqueue frame into bounded drop-stale queue
                     self.queue.put(frame)
                     self.last_frame_timestamp = frame.captured_at
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                self.last_error = str(exc)
+                self.last_error = classify_error_reason(exc)
                 self.consecutive_failures += 1
+                self._consecutive_successful_frames = 0
                 if isinstance(exc, SourceReadError):
                     self.read_errors += 1
+                elif isinstance(exc, FrameIntegrityError):
+                    self.integrity_errors += 1
+                elif isinstance(exc, SessionSequenceError):
+                    self.sequence_errors += 1
                 else:
                     self.connection_errors += 1
                 self.reconnect_attempts += 1
@@ -111,32 +251,40 @@ class StreamWorker:
 
                 self.state = StreamState.BACKOFF
                 delay = self.backoff.compute_next_delay()
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
-            finally:
-                if self.source is not None and self.source.is_connected:
-                    with contextlib.suppress(Exception):
-                        await self.source.close()
+                await self._close_source_safely()
+                await self._sleep(delay)
 
+        await self._close_source_safely()
         if self.state != StreamState.ERROR:
             self.state = StreamState.STOPPED
-        self.stopped_at = datetime.now(UTC)
+        self.stopped_at = self._clock()
 
     async def stop(self) -> None:
-        """Cooperatively stop the ingestion loop and release stream resources."""
+        """Cooperatively stop the ingestion loop, unblock readers, and release resources."""
+        self._has_stopped = True
         self._stop_event.set()
+
+        # Unblock any downstream consumers waiting on queue.get()
+        self.queue.close()
+
+        # Actively close the source first to unblock any hung network/socket read_frame()
+        await self._close_source_safely()
+
         if self._loop_task is not None:
             self._loop_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._loop_task
+            try:
+                await asyncio.wait_for(self._loop_task, timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
+                self.last_error = "shutdown_timeout"
+            except Exception as exc:
+                self.last_error = f"shutdown_error: {type(exc).__name__}"
             self._loop_task = None
-
-        if self.source is not None:
-            with contextlib.suppress(Exception):
-                await self.source.close()
 
         if self.state != StreamState.ERROR:
             self.state = StreamState.STOPPED
+        self.stopped_at = self._clock()
 
     async def get_frame(self) -> FrameEnvelope:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""
@@ -148,6 +296,9 @@ class StreamWorker:
             frames_enqueued=self.queue.enqueued_count,
             frames_dequeued=self.queue.dequeued_count,
             frames_dropped=self.queue.dropped_count,
+            sampled_out_frames=self.sampled_out_frames,
+            integrity_errors=self.integrity_errors,
+            sequence_errors=self.sequence_errors,
             connection_errors=self.connection_errors,
             read_errors=self.read_errors,
             reconnect_attempts=self.reconnect_attempts,
@@ -180,9 +331,28 @@ class CameraIngestionWorker:
         self,
         config: StreamConfig,
         source: FrameSource | None = None,
+        sleeper: Callable[[float], Awaitable[None]] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> StreamWorker:
-        """Register a new camera stream."""
-        worker = StreamWorker(config=config, source=source)
+        """Register a new camera stream.
+
+        Immutable configuration policy: streams must be registered in 'idle' state
+        before the manager is started.
+
+        Raises:
+            RuntimeError: If manager is already running, stopping, or stopped.
+            ValueError: If stream_id is already registered.
+        """
+        if self._status != "idle":
+            raise RuntimeError(
+                f"Cannot add stream '{config.stream_id}' while manager status is '{self._status}'. "
+                "All streams must be registered before start()."
+            )
+
+        if config.stream_id in self._streams:
+            raise ValueError(f"Stream with id '{config.stream_id}' already registered")
+
+        worker = StreamWorker(config=config, source=source, sleeper=sleeper, clock=clock)
         self._streams[config.stream_id] = worker
         return worker
 
@@ -199,14 +369,12 @@ class CameraIngestionWorker:
     async def start(self) -> None:
         """Start all registered stream workers."""
         self._status = "running"
-        for worker in self._streams.values():
-            await worker.start()
+        await asyncio.gather(*(worker.start() for worker in self._streams.values()))
 
     async def stop(self) -> None:
         """Gracefully stop all stream workers and release resources."""
         self._status = "stopping"
-        for worker in self._streams.values():
-            await worker.stop()
+        await asyncio.gather(*(worker.stop() for worker in self._streams.values()))
         self._status = "stopped"
 
     async def cancel(self) -> None:

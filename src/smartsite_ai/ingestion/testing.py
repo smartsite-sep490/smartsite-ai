@@ -20,6 +20,7 @@ class FakeFrameSource:
         secondary_frames: list[FrameEnvelope] | None = None,
         delay_between_frames: float = 0.0,
         is_live: bool = True,
+        block_when_exhausted: bool = False,
     ) -> None:
         self._source_id = source_id
         self._frames = list(initial_frames) if initial_frames is not None else []
@@ -29,6 +30,8 @@ class FakeFrameSource:
         self._fail_read_once_after = fail_read_once_after
         self.delay_between_frames = delay_between_frames
         self.is_live = is_live
+        self._block_when_exhausted = block_when_exhausted
+        self._exhausted_event = asyncio.Event()
 
         self._is_connected = False
         self._is_closed = False
@@ -52,6 +55,10 @@ class FakeFrameSource:
 
     async def connect(self) -> None:
         self.connect_calls += 1
+        if self._is_connected:
+            raise SourceConnectionError(
+                f"Source {self._source_id} cannot connect while a connection is already open"
+            )
         if self._permanent_connect_failure:
             raise SourceConnectionError(
                 f"Simulated permanent connection failure for {self._source_id}"
@@ -66,6 +73,7 @@ class FakeFrameSource:
 
         self._is_connected = True
         self._is_closed = False
+        self._exhausted_event.clear()
 
     async def read_frame(self) -> FrameEnvelope | None:
         if not self._is_connected:
@@ -94,6 +102,9 @@ class FakeFrameSource:
             self._frames_yielded += 1
             return frame
 
+        if self._block_when_exhausted:
+            await self._exhausted_event.wait()
+
         # Stream exhausted / closed / EOF
         return None
 
@@ -101,6 +112,7 @@ class FakeFrameSource:
         self.close_calls += 1
         self._is_connected = False
         self._is_closed = True
+        self._exhausted_event.set()
 
 
 class FakeBlockingSource:
@@ -133,6 +145,10 @@ class FakeBlockingSource:
 
     async def connect(self) -> None:
         self.connect_calls += 1
+        if self._is_connected:
+            raise SourceConnectionError(
+                f"Source {self._source_id} cannot connect while a connection is already open"
+            )
         self._is_connected = True
         self._is_closed = False
         self._unblock_event.clear()

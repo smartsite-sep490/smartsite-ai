@@ -70,7 +70,10 @@ class StreamWorker:
 
         self._stop_event = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
-        self._source_closed = False
+        # Ownership is scoped to one connect attempt. A failed connect may have
+        # partially allocated native/network resources, so every attempt is closed
+        # exactly once before another attempt begins.
+        self._source_attempt_active = False
         self._has_stopped = False
 
     async def start(self) -> None:
@@ -126,8 +129,8 @@ class StreamWorker:
 
     async def _close_source_safely(self) -> None:
         """Safely close underlying source exactly once without silently swallowing errors."""
-        if self.source is not None and not self._source_closed:
-            self._source_closed = True
+        if self.source is not None and self._source_attempt_active:
+            self._source_attempt_active = False
             try:
                 await self.source.close()
             except Exception as exc:
@@ -143,6 +146,7 @@ class StreamWorker:
                             f"No FrameSource configured for stream '{self.config.stream_id}'"
                         )
 
+                    self._source_attempt_active = True
                     await self.source.connect()
                     self.connected_at = self._clock()
                     self.state = StreamState.STREAMING
@@ -169,6 +173,10 @@ class StreamWorker:
                             self.reconnect_attempts += 1
                             self._consecutive_successful_frames = 0
                             self.last_error = "connection_closed_eof"
+
+                            # Release the current connection before either
+                            # terminating or opening the next one.
+                            await self._close_source_safely()
 
                             max_fail = self.config.max_consecutive_failures
                             if max_fail is not None and self.consecutive_failures >= max_fail:
@@ -252,6 +260,10 @@ class StreamWorker:
                     else:
                         self.connection_errors += 1
                     self.reconnect_attempts += 1
+
+                    # This covers both established connections and connect()
+                    # attempts that raised after partially allocating resources.
+                    await self._close_source_safely()
 
                     if (
                         self.config.max_consecutive_failures is not None

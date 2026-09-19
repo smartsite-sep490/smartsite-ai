@@ -410,7 +410,8 @@ async def test_stream_worker_error_terminal_completion_lifecycle() -> None:
     assert worker.state == StreamState.ERROR
     assert worker.stopped_at is not None
     assert worker.queue.is_closed is True
-    assert source.close_calls == 1
+    # Two failed connect attempts each release their attempt-local resources.
+    assert source.close_calls == source.connect_calls == 2
 
     with pytest.raises(QueueClosedError):
         await worker.get_frame()
@@ -423,7 +424,7 @@ async def test_stream_worker_error_terminal_completion_lifecycle() -> None:
     await worker.stop()
     assert worker.state == StreamState.ERROR
     assert worker.stopped_at == err_stopped_at
-    assert source.close_calls == 1
+    assert source.close_calls == 2
 
 
 @pytest.mark.anyio
@@ -450,8 +451,8 @@ async def test_stream_worker_idempotent_start() -> None:
 
 
 @pytest.mark.anyio
-async def test_stream_worker_source_close_exactly_once() -> None:
-    """Verify that source.close() is invoked exactly once during worker teardown."""
+async def test_stream_worker_stop_before_connect_does_not_close_unowned_source() -> None:
+    """Stopping before the loop acquires a source must not invent a close operation."""
     config = StreamConfig(
         stream_id="close-once-cam",
         camera_external_id="ext-co",
@@ -466,7 +467,8 @@ async def test_stream_worker_source_close_exactly_once() -> None:
     # Second stop call
     await worker.stop()
 
-    assert source.close_calls == 1
+    assert source.connect_calls == 0
+    assert source.close_calls == 0
 
 
 @pytest.mark.anyio
@@ -835,6 +837,83 @@ async def test_stream_worker_sampling_resets_on_reconnect_with_lower_timestamp()
         assert status.metrics.sampled_out_frames == 0
     finally:
         await asyncio.wait_for(worker.stop(), timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_live_eof_closes_each_connection_before_reconnect() -> None:
+    """A live EOF must release its connection before the next connect attempt."""
+    sleeper = FakeSleeper()
+    config = StreamConfig(
+        stream_id="cam-live-eof-ownership",
+        camera_external_id="ext-live-eof-ownership",
+        source_url="rtsp://10.0.0.20/live",
+        max_consecutive_failures=2,
+        reconnect_jitter=0.0,
+    )
+    source = FakeFrameSource(
+        source_id="cam-live-eof-ownership",
+        initial_frames=[
+            make_test_frame(
+                "cam-live-eof-ownership",
+                1,
+                camera_external_id="ext-live-eof-ownership",
+            )
+        ],
+    )
+    worker = StreamWorker(config=config, source=source, sleeper=sleeper)
+
+    await worker.start()
+    await wait_until(lambda: worker.state == StreamState.ERROR)
+
+    assert source.connect_calls == 2
+    assert source.close_calls == 2
+    assert source.is_connected is False
+
+
+@pytest.mark.anyio
+async def test_read_error_closes_connection_before_successful_reconnect() -> None:
+    """A read failure must release the old connection before a new session starts."""
+    sleeper = FakeSleeper()
+    config = StreamConfig(
+        stream_id="cam-read-ownership",
+        camera_external_id="ext-read-ownership",
+        source_url="rtsp://10.0.0.21/live",
+        max_consecutive_failures=2,
+        reconnect_jitter=0.0,
+    )
+    first = make_test_frame(
+        "cam-read-ownership",
+        1,
+        session_id="session-one",
+        camera_external_id="ext-read-ownership",
+    )
+    second = make_test_frame(
+        "cam-read-ownership",
+        1,
+        session_id="session-two",
+        camera_external_id="ext-read-ownership",
+    )
+    source = FakeFrameSource(
+        source_id="cam-read-ownership",
+        initial_frames=[first],
+        fail_read_once_after=1,
+        secondary_frames=[second],
+        block_when_exhausted=True,
+    )
+    worker = StreamWorker(config=config, source=source, sleeper=sleeper)
+
+    await worker.start()
+    try:
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == "session-one"
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == "session-two"
+        assert source.connect_calls == 2
+        assert source.close_calls == 1
+        assert source.is_connected is True
+    finally:
+        await asyncio.wait_for(worker.stop(), timeout=1.0)
+
+    assert source.close_calls == 2
+    assert source.is_connected is False
 
 
 def test_import_side_effects_are_zero() -> None:

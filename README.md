@@ -4,6 +4,8 @@ SmartSite AI is the independent computer-vision and AI service for the SmartSite
 
 The service is responsible for camera ingestion, visual detection, tracking, PPE monitoring, restricted-zone monitoring, identity experiments, evidence generation, and supplementary OpenAI analysis. It does **not** own construction-site business authorization.
 
+Before contributing or using a coding assistant, read [AGENTS.md](AGENTS.md) for the mandatory AI architecture, model, privacy, testing, Git, and code-quality rules, then follow [CONTRIBUTING.md](CONTRIBUTING.md) for the team workflow.
+
 ## Responsibilities
 
 SmartSite AI is intended to provide:

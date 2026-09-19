@@ -110,7 +110,8 @@ class StreamWorker:
         """Finalize worker state on any terminal exit path exactly once."""
         self._has_stopped = True
         self._stop_event.set()
-        await self._close_source_safely()
+        if not await self._close_source_safely():
+            self.state = StreamState.ERROR
         self.queue.close()
         if self.state != StreamState.ERROR:
             self.state = StreamState.STOPPED
@@ -130,11 +131,11 @@ class StreamWorker:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
 
-    async def _close_source_safely(self) -> None:
-        """Safely close underlying source exactly once without silently swallowing errors."""
+    async def _close_source_safely(self) -> bool:
+        """Close the owned attempt, returning false when release cannot be proven."""
         async with self._source_close_lock:
             if self.source is None or not self._source_attempt_active:
-                return
+                return True
             try:
                 await self.source.close()
             except asyncio.CancelledError:
@@ -142,8 +143,10 @@ class StreamWorker:
                 raise
             except Exception as exc:
                 self.last_error = f"close_error: {type(exc).__name__}"
+                return False
             else:
                 self._source_attempt_active = False
+                return True
 
     async def _run_loop(self) -> None:
         try:
@@ -162,7 +165,8 @@ class StreamWorker:
                     # again, and the stop check below releases that late resource.
                     self._source_attempt_active = True
                     if self._stop_event.is_set():
-                        await self._close_source_safely()
+                        if not await self._close_source_safely():
+                            self.state = StreamState.ERROR
                         return
                     self.connected_at = self._clock()
                     self.state = StreamState.STREAMING
@@ -192,7 +196,9 @@ class StreamWorker:
 
                             # Release the current connection before either
                             # terminating or opening the next one.
-                            await self._close_source_safely()
+                            if not await self._close_source_safely():
+                                self.state = StreamState.ERROR
+                                return
 
                             max_fail = self.config.max_consecutive_failures
                             if max_fail is not None and self.consecutive_failures >= max_fail:
@@ -292,7 +298,9 @@ class StreamWorker:
 
                     # This covers both established connections and connect()
                     # attempts that raised after partially allocating resources.
-                    await self._close_source_safely()
+                    if not await self._close_source_safely():
+                        self.state = StreamState.ERROR
+                        break
 
                     if (
                         self.config.max_consecutive_failures is not None
@@ -316,7 +324,7 @@ class StreamWorker:
         self.queue.close()
 
         # Actively close the source first to unblock any hung network/socket read_frame()
-        await self._close_source_safely()
+        close_succeeded = await self._close_source_safely()
 
         if self._loop_task is not None:
             if not self._loop_task.done():
@@ -331,7 +339,9 @@ class StreamWorker:
                     self.last_error = f"shutdown_error: {type(exc).__name__}"
             self._loop_task = None
 
-        if self.state != StreamState.ERROR:
+        if not close_succeeded or self._source_attempt_active:
+            self.state = StreamState.ERROR
+        elif self.state != StreamState.ERROR:
             self.state = StreamState.STOPPED
         if self.stopped_at is None:
             self.stopped_at = self._clock()
@@ -344,13 +354,19 @@ class StreamWorker:
                 name=f"stream-worker-stop-{self.config.stream_id}",
             )
 
-        try:
-            await asyncio.shield(self._stop_task)
-        except asyncio.CancelledError:
-            # The caller remains cancelled, but cleanup owns the camera resource
-            # and must finish before cancellation is allowed to escape.
-            await self._stop_task
-            raise
+        cancellation_seen = False
+        while not self._stop_task.done():
+            try:
+                await asyncio.shield(self._stop_task)
+            except asyncio.CancelledError:
+                # Repeated cancellation affects only this waiter. The shared
+                # cleanup task remains shielded until resource release finishes.
+                cancellation_seen = True
+
+        # Propagate cleanup failure before reporting caller cancellation.
+        self._stop_task.result()
+        if cancellation_seen:
+            raise asyncio.CancelledError
 
     async def get_frame(self) -> FrameEnvelope:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""

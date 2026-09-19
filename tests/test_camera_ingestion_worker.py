@@ -1018,6 +1018,86 @@ async def test_cancelled_stop_finishes_close_and_preserves_resource_ownership() 
 
 
 @pytest.mark.anyio
+async def test_repeated_cancellation_cannot_cancel_shared_cleanup_task() -> None:
+    """Repeated caller cancellation must not take ownership from shared cleanup."""
+
+    class SlowCloseSource(FakeBlockingSource):
+        def __init__(self) -> None:
+            super().__init__("repeat-cancel-close")
+            self.close_started = asyncio.Event()
+            self.allow_close = asyncio.Event()
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.close_started.set()
+            await self.allow_close.wait()
+            self._is_connected = False
+            self._is_closed = True
+            self._unblock_event.set()
+
+    config = StreamConfig(
+        stream_id="repeat-cancel-close",
+        camera_external_id="ext-repeat-cancel-close",
+        source_url="rtsp://10.0.0.25/live",
+    )
+    source = SlowCloseSource()
+    worker = StreamWorker(config=config, source=source)
+    await worker.start()
+    await wait_until(lambda: source.read_calls == 1)
+
+    stop_task = asyncio.create_task(worker.stop())
+    await asyncio.wait_for(source.close_started.wait(), timeout=1.0)
+    stop_task.cancel()
+    await asyncio.sleep(0)
+    stop_task.cancel()
+    source.allow_close.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    await asyncio.wait_for(worker.stop(), timeout=1.0)
+    assert worker.state == StreamState.STOPPED
+    assert source.is_connected is False
+    assert source.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_close_failure_is_terminal_and_never_reconnects_over_open_source() -> None:
+    """A source that cannot close must enter ERROR without another connect attempt."""
+
+    class CloseFailureSource(FakeFrameSource):
+        async def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("simulated close failure")
+
+    config = StreamConfig(
+        stream_id="close-failure",
+        camera_external_id="ext-close-failure",
+        source_url="rtsp://10.0.0.26/live",
+        max_consecutive_failures=3,
+        reconnect_jitter=0.0,
+    )
+    source = CloseFailureSource(
+        source_id="close-failure",
+        initial_frames=[
+            make_test_frame(
+                "close-failure",
+                1,
+                camera_external_id="ext-close-failure",
+            )
+        ],
+    )
+    worker = StreamWorker(config=config, source=source, sleeper=FakeSleeper())
+
+    await worker.start()
+    await wait_until(lambda: worker.state == StreamState.ERROR)
+
+    assert source.connect_calls == 1
+    assert source.is_connected is True
+    assert worker.last_error == "close_error: RuntimeError"
+
+
+@pytest.mark.anyio
 async def test_reconnect_rejects_sequence_rollback_for_same_session() -> None:
     """Reconnect cannot reset sequence monotonicity when the source reuses a session ID."""
     config = StreamConfig(

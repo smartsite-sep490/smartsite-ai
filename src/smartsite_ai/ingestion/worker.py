@@ -76,6 +76,7 @@ class StreamWorker:
         # partially allocated native/network resources, so every attempt is closed
         # exactly once before another attempt begins.
         self._source_attempt_active = False
+        self._source_release_failed = False
         self._first_frame_in_connection = True
         self._has_stopped = False
 
@@ -135,17 +136,23 @@ class StreamWorker:
         """Close the owned attempt, returning false when release cannot be proven."""
         async with self._source_close_lock:
             if self.source is None or not self._source_attempt_active:
-                return True
+                return not self._source_release_failed
             try:
                 await self.source.close()
             except asyncio.CancelledError:
                 # Ownership stays active so terminal cleanup can retry.
                 raise
             except Exception as exc:
+                # A close that raises may already have partially freed a native
+                # handle. Do not retry it implicitly; mark release unresolved and
+                # make the worker terminal instead.
+                self._source_attempt_active = False
+                self._source_release_failed = True
                 self.last_error = f"close_error: {type(exc).__name__}"
                 return False
             else:
                 self._source_attempt_active = False
+                self._source_release_failed = False
                 return True
 
     async def _run_loop(self) -> None:
@@ -158,6 +165,7 @@ class StreamWorker:
                             f"No FrameSource configured for stream '{self.config.stream_id}'"
                         )
 
+                    self._source_release_failed = False
                     self._source_attempt_active = True
                     await self.source.connect()
                     # A concurrent stop may have closed the attempt while connect()

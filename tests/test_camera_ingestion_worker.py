@@ -1093,6 +1093,7 @@ async def test_close_failure_is_terminal_and_never_reconnects_over_open_source()
     await wait_until(lambda: worker.state == StreamState.ERROR)
 
     assert source.connect_calls == 1
+    assert source.close_calls == 1
     assert source.is_connected is True
     assert worker.last_error == "close_error: RuntimeError"
 

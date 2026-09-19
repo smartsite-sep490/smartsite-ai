@@ -398,7 +398,8 @@ async def test_stream_worker_error_terminal_completion_lifecycle() -> None:
         initial_frames=[],
         permanent_connect_failure=True,
     )
-    worker = StreamWorker(config=config, source=source)
+    sleeper = FakeSleeper()
+    worker = StreamWorker(config=config, source=source, sleeper=sleeper)
 
     await worker.start()
 

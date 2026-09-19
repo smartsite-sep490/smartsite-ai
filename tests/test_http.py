@@ -46,6 +46,7 @@ def test_capabilities_never_claim_inference_or_expose_external_credentials(monke
     payload = response.json()
     assert payload["inference_ready"] is False
     assert set(payload["capabilities"]) == {"camera", "detector", "zone", "identity", "openai"}
+    assert payload["capabilities"]["detector"]["provider"] == "ultralytics-yolo11s + supervision"
     for capability in payload["capabilities"].values():
         assert capability["status"] == "not_configured"
         assert capability["reason"]

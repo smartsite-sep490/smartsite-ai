@@ -81,7 +81,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             capabilities={
                 "camera": Capability(reason="No camera ingestion worker or stream is configured."),
                 "detector": Capability(
-                    provider="ultralytics-yolo26 + supervision",
+                    provider="ultralytics-yolo11s + supervision",
                     reason="Pipeline direction only; no model weights, PPE model or worker loaded.",
                 ),
                 "zone": Capability(

@@ -168,6 +168,11 @@ class StreamWorker:
                     self._source_release_failed = False
                     self._source_attempt_active = True
                     await self.source.connect()
+                    if self._source_release_failed:
+                        # A concurrent close already made this attempt's release
+                        # outcome ambiguous. Never reclaim or close it a second time.
+                        self.state = StreamState.ERROR
+                        return
                     # A concurrent stop may have closed the attempt while connect()
                     # was still completing. Successful return establishes ownership
                     # again, and the stop check below releases that late resource.

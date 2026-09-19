@@ -1099,6 +1099,62 @@ async def test_close_failure_is_terminal_and_never_reconnects_over_open_source()
 
 
 @pytest.mark.anyio
+async def test_late_connect_after_close_failure_does_not_double_close_attempt() -> None:
+    """An unresolved early close permanently seals that connect attempt."""
+
+    class LateConnectCloseFailureSource:
+        def __init__(self) -> None:
+            self.connect_started = asyncio.Event()
+            self.allow_connect = asyncio.Event()
+            self.connected = False
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        @property
+        def source_id(self) -> str:
+            return "late-connect-close-failure"
+
+        @property
+        def is_connected(self) -> bool:
+            return self.connected
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+            self.connect_started.set()
+            try:
+                await self.allow_connect.wait()
+            except asyncio.CancelledError:
+                await self.allow_connect.wait()
+            self.connected = True
+
+        async def read_frame(self) -> FrameEnvelope | None:
+            await asyncio.Future()
+            return None
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.allow_connect.set()
+            raise RuntimeError("ambiguous partial close")
+
+    config = StreamConfig(
+        stream_id="late-connect-close-failure",
+        camera_external_id="ext-late-connect-close-failure",
+        source_url="rtsp://10.0.0.27/live",
+    )
+    source = LateConnectCloseFailureSource()
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+    await asyncio.wait_for(source.connect_started.wait(), timeout=1.0)
+    await asyncio.wait_for(worker.stop(), timeout=1.0)
+
+    assert worker.state == StreamState.ERROR
+    assert source.connect_calls == 1
+    assert source.close_calls == 1
+    assert worker.last_error == "close_error: RuntimeError"
+
+
+@pytest.mark.anyio
 async def test_reconnect_rejects_sequence_rollback_for_same_session() -> None:
     """Reconnect cannot reset sequence monotonicity when the source reuses a session ID."""
     config = StreamConfig(

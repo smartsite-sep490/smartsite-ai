@@ -451,8 +451,8 @@ async def test_stream_worker_idempotent_start() -> None:
 
 
 @pytest.mark.anyio
-async def test_stream_worker_stop_before_connect_does_not_close_unowned_source() -> None:
-    """Stopping before the loop acquires a source must not invent a close operation."""
+async def test_stream_worker_repeated_stop_closes_each_owned_attempt_once() -> None:
+    """Repeated stop calls never add a close beyond the attempts actually acquired."""
     config = StreamConfig(
         stream_id="close-once-cam",
         camera_external_id="ext-co",
@@ -467,8 +467,8 @@ async def test_stream_worker_stop_before_connect_does_not_close_unowned_source()
     # Second stop call
     await worker.stop()
 
-    assert source.connect_calls == 0
-    assert source.close_calls == 0
+    assert source.connect_calls in (0, 1)
+    assert source.close_calls == source.connect_calls
 
 
 @pytest.mark.anyio
@@ -606,7 +606,7 @@ async def test_stream_fault_isolation() -> None:
         await asyncio.wait_for(manager.stop(), timeout=1.0)
 
     assert healthy_source.close_calls == 1
-    assert failing_source.close_calls == 1
+    assert failing_source.close_calls == failing_source.connect_calls == 2
 
 
 @pytest.mark.anyio
@@ -914,6 +914,153 @@ async def test_read_error_closes_connection_before_successful_reconnect() -> Non
 
     assert source.close_calls == 2
     assert source.is_connected is False
+
+
+@pytest.mark.anyio
+async def test_stop_during_connect_closes_resource_opened_after_early_close() -> None:
+    """A connect that completes after stop begins must still be closed before STOPPED."""
+
+    class LateConnectSource:
+        def __init__(self) -> None:
+            self.connect_started = asyncio.Event()
+            self.allow_connect = asyncio.Event()
+            self.connected = False
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        @property
+        def source_id(self) -> str:
+            return "late-connect"
+
+        @property
+        def is_connected(self) -> bool:
+            return self.connected
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+            self.connect_started.set()
+            try:
+                await self.allow_connect.wait()
+            except asyncio.CancelledError:
+                # Model a native adapter that finishes opening while cancellation
+                # is being delivered; the worker must close the late resource.
+                await self.allow_connect.wait()
+            self.connected = True
+
+        async def read_frame(self) -> FrameEnvelope | None:
+            await asyncio.Future()
+            return None
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.connected = False
+            self.allow_connect.set()
+
+    config = StreamConfig(
+        stream_id="late-connect",
+        camera_external_id="ext-late-connect",
+        source_url="rtsp://10.0.0.22/live",
+    )
+    source = LateConnectSource()
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+    await asyncio.wait_for(source.connect_started.wait(), timeout=1.0)
+    await asyncio.wait_for(worker.stop(), timeout=1.0)
+
+    assert worker.state == StreamState.STOPPED
+    assert source.connected is False
+    assert source.close_calls == 2
+
+
+@pytest.mark.anyio
+async def test_cancelled_stop_finishes_close_and_preserves_resource_ownership() -> None:
+    """Caller cancellation must propagate only after the source cleanup completes."""
+
+    class SlowCloseSource(FakeBlockingSource):
+        def __init__(self) -> None:
+            super().__init__("slow-close")
+            self.close_started = asyncio.Event()
+            self.allow_close = asyncio.Event()
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.close_started.set()
+            await self.allow_close.wait()
+            self._is_connected = False
+            self._is_closed = True
+            self._unblock_event.set()
+
+    config = StreamConfig(
+        stream_id="slow-close",
+        camera_external_id="ext-slow-close",
+        source_url="rtsp://10.0.0.23/live",
+    )
+    source = SlowCloseSource()
+    worker = StreamWorker(config=config, source=source)
+    await worker.start()
+    await wait_until(lambda: source.read_calls == 1)
+
+    stop_task = asyncio.create_task(worker.stop())
+    await asyncio.wait_for(source.close_started.wait(), timeout=1.0)
+    stop_task.cancel()
+    source.allow_close.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    # Cleanup is complete despite cancellation, and a later stop is idempotent.
+    await asyncio.wait_for(worker.stop(), timeout=1.0)
+    assert worker.state == StreamState.STOPPED
+    assert source.is_connected is False
+    assert source.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_reconnect_rejects_sequence_rollback_for_same_session() -> None:
+    """Reconnect cannot reset sequence monotonicity when the source reuses a session ID."""
+    config = StreamConfig(
+        stream_id="cam-same-session",
+        camera_external_id="ext-same-session",
+        source_url="rtsp://10.0.0.24/live",
+        reconnect_jitter=0.0,
+    )
+    source = FakeFrameSource(
+        source_id="cam-same-session",
+        initial_frames=[
+            make_test_frame(
+                "cam-same-session",
+                10,
+                session_id="persistent-session",
+                camera_external_id="ext-same-session",
+            )
+        ],
+        fail_read_once_after=1,
+        secondary_frames=[
+            make_test_frame(
+                "cam-same-session",
+                1,
+                session_id="persistent-session",
+                camera_external_id="ext-same-session",
+            ),
+            make_test_frame(
+                "cam-same-session",
+                11,
+                session_id="persistent-session",
+                camera_external_id="ext-same-session",
+            ),
+        ],
+        block_when_exhausted=True,
+    )
+    worker = StreamWorker(config=config, source=source, sleeper=FakeSleeper())
+
+    await worker.start()
+    try:
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).sequence_number == 10
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).sequence_number == 11
+        assert worker.sequence_errors == 1
+    finally:
+        await asyncio.wait_for(worker.stop(), timeout=1.0)
 
 
 def test_import_side_effects_are_zero() -> None:

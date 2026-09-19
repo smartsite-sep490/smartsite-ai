@@ -201,5 +201,10 @@ class FrameSource(Protocol):
         ...
 
     async def close(self) -> None:
-        """Close source and release all underlying resources."""
+        """Close source and release all underlying resources.
+
+        Implementations must tolerate cleanup after a partially completed
+        ``connect()`` and repeated calls after a completed close. Cancellation of
+        ``connect()`` must not make later ``close()`` unsafe.
+        """
         ...

@@ -70,10 +70,13 @@ class StreamWorker:
 
         self._stop_event = asyncio.Event()
         self._loop_task: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
+        self._source_close_lock = asyncio.Lock()
         # Ownership is scoped to one connect attempt. A failed connect may have
         # partially allocated native/network resources, so every attempt is closed
         # exactly once before another attempt begins.
         self._source_attempt_active = False
+        self._first_frame_in_connection = True
         self._has_stopped = False
 
     async def start(self) -> None:
@@ -129,12 +132,18 @@ class StreamWorker:
 
     async def _close_source_safely(self) -> None:
         """Safely close underlying source exactly once without silently swallowing errors."""
-        if self.source is not None and self._source_attempt_active:
-            self._source_attempt_active = False
+        async with self._source_close_lock:
+            if self.source is None or not self._source_attempt_active:
+                return
             try:
                 await self.source.close()
+            except asyncio.CancelledError:
+                # Ownership stays active so terminal cleanup can retry.
+                raise
             except Exception as exc:
                 self.last_error = f"close_error: {type(exc).__name__}"
+            else:
+                self._source_attempt_active = False
 
     async def _run_loop(self) -> None:
         try:
@@ -148,12 +157,19 @@ class StreamWorker:
 
                     self._source_attempt_active = True
                     await self.source.connect()
+                    # A concurrent stop may have closed the attempt while connect()
+                    # was still completing. Successful return establishes ownership
+                    # again, and the stop check below releases that late resource.
+                    self._source_attempt_active = True
+                    if self._stop_event.is_set():
+                        await self._close_source_safely()
+                        return
                     self.connected_at = self._clock()
                     self.state = StreamState.STREAMING
                     self._consecutive_successful_frames = 0
-                    # Reset per-connection session tracking and sampling baseline
-                    self._current_session_id = None
-                    self._last_sequence_number = None
+                    self._first_frame_in_connection = True
+                    # Sampling is connection-local, while sequence monotonicity is
+                    # session-local and therefore survives reconnects.
                     self._last_sampled_timestamp = None
 
                     # Ingestion inner loop
@@ -200,13 +216,26 @@ class StreamWorker:
                             continue
 
                         # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
-                        if self._current_session_id is None:
-                            # First frame of connection establishes session and resets baseline
+                        if self._first_frame_in_connection:
+                            if (
+                                self._current_session_id == frame.session_id
+                                and self._last_sequence_number is not None
+                                and frame.sequence_number <= self._last_sequence_number
+                            ):
+                                self.sequence_errors += 1
+                                self.last_error = "session_sequence_error"
+                                continue
+
+                            # A new session may restart its sequence; a reused session
+                            # must continue strictly after the last accepted frame.
                             self._current_session_id = frame.session_id
                             self._last_sequence_number = frame.sequence_number
-                            self._last_sampled_timestamp = None
+                            self._first_frame_in_connection = False
+                        elif self._current_session_id is None:
+                            self._current_session_id = frame.session_id
+                            self._last_sequence_number = frame.sequence_number
                         else:
-                            # Within the same connection, session_id must not change
+                            # Within one connection, session_id must not change.
                             if frame.session_id != self._current_session_id:
                                 self.sequence_errors += 1
                                 self.last_error = "session_sequence_error"
@@ -278,8 +307,8 @@ class StreamWorker:
         finally:
             await self._finalize_terminal()
 
-    async def stop(self) -> None:
-        """Cooperatively stop the ingestion loop, unblock readers, and release resources."""
+    async def _stop_impl(self) -> None:
+        """Perform cancellation-safe shutdown exactly once."""
         self._has_stopped = True
         self._stop_event.set()
 
@@ -306,6 +335,22 @@ class StreamWorker:
             self.state = StreamState.STOPPED
         if self.stopped_at is None:
             self.stopped_at = self._clock()
+
+    async def stop(self) -> None:
+        """Stop and release resources before propagating caller cancellation."""
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(
+                self._stop_impl(),
+                name=f"stream-worker-stop-{self.config.stream_id}",
+            )
+
+        try:
+            await asyncio.shield(self._stop_task)
+        except asyncio.CancelledError:
+            # The caller remains cancelled, but cleanup owns the camera resource
+            # and must finish before cancellation is allowed to escape.
+            await self._stop_task
+            raise
 
     async def get_frame(self) -> FrameEnvelope:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""

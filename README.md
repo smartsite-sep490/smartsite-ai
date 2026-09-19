@@ -124,6 +124,7 @@ Implemented:
 - strict, versioned MF05/MF06 observation models and vendored JSON Schema provenance;
 - RFC 8785 compatible hashing with cross-runtime safe-integer guards;
 - authenticated Backend ingestion client with bounded retries and strict response validation;
+- camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
 - liveness endpoint;
 - readiness endpoint;
 - capability endpoint;
@@ -136,7 +137,7 @@ Implemented:
 
 Not yet implemented:
 
-- RTSP ingestion;
+- live RTSP stream hardware decode / OpenCV adapter (hardware/network dependent);
 - GPU runtime configuration;
 - YOLO inference;
 - PPE model weights;

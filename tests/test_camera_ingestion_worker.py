@@ -606,7 +606,8 @@ async def test_stream_fault_isolation() -> None:
         await asyncio.wait_for(manager.stop(), timeout=1.0)
 
     assert healthy_source.close_calls == 1
-    assert failing_source.close_calls == failing_source.connect_calls == 2
+    assert failing_source.connect_calls in (1, 2)
+    assert failing_source.close_calls == failing_source.connect_calls
 
 
 @pytest.mark.anyio

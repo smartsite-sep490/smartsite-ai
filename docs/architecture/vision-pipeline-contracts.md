@@ -1,7 +1,9 @@
 # SmartSite Vision Pipeline Contracts v1
 
-Status: **Approved design baseline for parallel implementation**  
-Date: 2026-09-20  
+Status: **Approved design baseline for parallel implementation**
+
+Date: 2026-09-20
+
 Scope: MF05 PPE Monitoring and MF06 Restricted Zone Monitoring
 
 ## Purpose

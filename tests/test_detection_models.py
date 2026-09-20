@@ -214,6 +214,40 @@ def test_detection_batch_from_frame_locks_identity_and_deterministically_sorts()
     assert isinstance(batch.detections, tuple)
 
 
+def test_detection_batch_sorts_class_id_before_box_and_name_tie_breakers() -> None:
+    lower_class_id = make_detection(
+        class_id=2,
+        class_name="zulu",
+        confidence=0.5,
+        bounding_box=make_box(x1=0.4, y1=0.4, x2=0.9, y2=0.9),
+    )
+    higher_class_id = make_detection(
+        class_id=7,
+        class_name="alpha",
+        confidence=0.5,
+        bounding_box=make_box(x1=0.1, y1=0.1, x2=0.8, y2=0.8),
+    )
+    frame = make_frame()
+
+    lower_class_id_first = DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="model-artifact",
+        model_version="v1",
+        model_sha256=MODEL_SHA256,
+        detections=(lower_class_id, higher_class_id),
+    )
+    higher_class_id_first = DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="model-artifact",
+        model_version="v1",
+        model_sha256=MODEL_SHA256,
+        detections=(higher_class_id, lower_class_id),
+    )
+
+    assert lower_class_id_first.detections == (lower_class_id, higher_class_id)
+    assert higher_class_id_first.detections == (lower_class_id, higher_class_id)
+
+
 @pytest.mark.parametrize(
     ("lower_box", "higher_box", "lower_name", "higher_name"),
     [

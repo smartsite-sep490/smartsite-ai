@@ -22,7 +22,10 @@ from smartsite_ai.domain.observations import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "contracts/schemas/v1/technical-observation-event.json"
+REGION_SCHEMA_PATH = ROOT / "contracts/schemas/v1/camera-region-configuration.json"
+REGION_VECTORS_PATH = ROOT / "contracts/camera-region-configuration-vectors.json"
 METADATA_PATH = ROOT / "contracts/metadata.json"
+SMARTSITE_MERGE_SHA = "691b7acc9f62bf72e30805a8c0ccb3836f15ac3d"
 
 SCHEMA = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
@@ -32,6 +35,34 @@ INDEPENDENT_FORMAT_CHECKER = jsonschema.FormatChecker()
 INDEPENDENT_VALIDATOR = jsonschema.Draft202012Validator(
     SCHEMA, format_checker=INDEPENDENT_FORMAT_CHECKER
 )
+
+REGION_SCHEMA = json.loads(REGION_SCHEMA_PATH.read_text(encoding="utf-8"))
+REGION_VECTORS = json.loads(REGION_VECTORS_PATH.read_text(encoding="utf-8"))
+REGION_VALIDATOR = jsonschema.Draft202012Validator(
+    REGION_SCHEMA, format_checker=INDEPENDENT_FORMAT_CHECKER
+)
+
+
+def _valid_region_payload() -> dict[str, Any]:
+    return {
+        "schemaVersion": "1.0.0",
+        "configurationVersion": 1,
+        "cameraExternalId": "CAM-REGION-01",
+        "regions": [
+            {
+                "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+                "geometryVersion": 1,
+                "coordinateSpace": "NORMALIZED_0_1",
+                "polygon": {
+                    "coordinates": [[0, 0], [1, 0], [0, 1]],
+                },
+            }
+        ],
+    }
+
+
+def _region_errors(payload: dict[str, Any]) -> list[jsonschema.ValidationError]:
+    return list(REGION_VALIDATOR.iter_errors(payload))
 
 
 # ============================================================================
@@ -43,19 +74,36 @@ def test_contracts_provenance_and_schema_hash_integrity():
     metadata = json.loads(METADATA_PATH.read_text(encoding="utf-8"))
     schema_bytes = SCHEMA_PATH.read_bytes()
     golden_bytes = (ROOT / "contracts/golden-vectors.json").read_bytes()
+    region_schema_bytes = REGION_SCHEMA_PATH.read_bytes()
+    region_vectors_bytes = REGION_VECTORS_PATH.read_bytes()
 
     assert metadata["sourceRepository"] == "smartsite-sep490/smartsite"
-    assert re.fullmatch(r"[0-9a-f]{40}", metadata["sourceCommitSha"])
+    assert metadata["sourceCommitSha"] == SMARTSITE_MERGE_SHA
     assert metadata["schemaVersion"] == "1.0.0"
 
     computed_sha256 = hashlib.sha256(schema_bytes).hexdigest()
     assert metadata["schemaSha256"] == computed_sha256
     assert metadata["goldenVectorsSha256"] == hashlib.sha256(golden_bytes).hexdigest()
+    region_metadata = metadata["cameraRegionConfiguration"]
+    assert region_metadata["schemaVersion"] == "1.0.0"
+    assert re.fullmatch(r"[0-9a-f]{64}", region_metadata["schemaSha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", region_metadata["goldenVectorsSha256"])
+    assert region_metadata["schemaSha256"] == hashlib.sha256(region_schema_bytes).hexdigest()
+    assert (
+        region_metadata["goldenVectorsSha256"] == hashlib.sha256(region_vectors_bytes).hexdigest()
+    )
 
     # CI can check out the AI repository alone. When the source checkout is
     # present, a missing commit or blob must fail rather than skip provenance.
-    sibling_repo = ROOT.parent / "smartsite"
-    if (sibling_repo / ".git").exists():
+    source_repo_candidates = (
+        ROOT.parent / "smartsite",
+        ROOT.parents[1] / "repos/smartsite",
+    )
+    sibling_repo = next(
+        (candidate for candidate in source_repo_candidates if (candidate / ".git").exists()),
+        None,
+    )
+    if sibling_repo is not None:
         proc = subprocess.run(
             [
                 "git",
@@ -88,9 +136,145 @@ def test_contracts_provenance_and_schema_hash_integrity():
             "Vendored vectors do not match source commit blob"
         )
 
+        region_schema_proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling_repo),
+                "show",
+                f"{metadata['sourceCommitSha']}:contracts/schemas/v1/"
+                "camera-region-configuration.json",
+            ],
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+        assert region_schema_proc.returncode == 0, region_schema_proc.stderr.decode(
+            "utf-8", errors="replace"
+        )
+        assert region_schema_proc.stdout == region_schema_bytes, (
+            "Vendored region schema does not match source commit blob"
+        )
+
+        region_vectors_proc = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(sibling_repo),
+                "show",
+                f"{metadata['sourceCommitSha']}:contracts/test/"
+                "camera-region-configuration-vectors.json",
+            ],
+            capture_output=True,
+            text=False,
+            check=False,
+        )
+        assert region_vectors_proc.returncode == 0, region_vectors_proc.stderr.decode(
+            "utf-8", errors="replace"
+        )
+        assert region_vectors_proc.stdout == region_vectors_bytes, (
+            "Vendored region vectors do not match source commit blob"
+        )
+
 
 # ============================================================================
-# 2. Independent FormatChecker actively rejects invalid date-time & UUID
+# 2. Camera-region JSON Schema checks independent of future runtime models
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "vector",
+    REGION_VECTORS,
+    ids=[vector["description"] for vector in REGION_VECTORS],
+)
+def test_camera_region_golden_vectors_match_their_declared_validation_layer(
+    vector: dict[str, Any],
+):
+    errors = _region_errors(vector["payload"])
+
+    if vector["valid"]:
+        assert not errors, [(error.validator, error.message) for error in errors]
+    elif vector["expectedValidationLayer"] == "SCHEMA":
+        assert errors, "Schema-layer invalid vector was accepted"
+    else:
+        assert vector["expectedValidationLayer"] == "SEMANTIC"
+        assert not errors, "Semantic invalidity must be deferred beyond JSON Schema"
+
+
+def test_camera_region_format_checker_actively_rejects_invalid_uuid():
+    payload = _valid_region_payload()
+    payload["regions"][0]["regionId"] = "not-a-uuid"
+
+    errors = _region_errors(payload)
+
+    assert any(error.validator == "format" for error in errors)
+
+
+def test_camera_region_schema_enforces_region_and_vertex_count_boundaries():
+    payload = _valid_region_payload()
+    payload["regions"] = [
+        {
+            **payload["regions"][0],
+            "regionId": f"00000000-0000-4000-8000-{index:012d}",
+        }
+        for index in range(1, 65)
+    ]
+    assert not _region_errors(payload)
+
+    payload["regions"].append(
+        {
+            **payload["regions"][0],
+            "regionId": "00000000-0000-4000-8000-000000000065",
+        }
+    )
+    assert any(error.validator == "maxItems" for error in _region_errors(payload))
+
+    payload = _valid_region_payload()
+    coordinates = payload["regions"][0]["polygon"]["coordinates"]
+    coordinates[:] = [[index / 63, 0] for index in range(64)]
+    assert not _region_errors(payload)
+
+    coordinates.append([0.5, 0.5])
+    assert any(error.validator == "maxItems" for error in _region_errors(payload))
+
+    coordinates[:] = [[0, 0], [1, 0]]
+    assert any(error.validator == "minItems" for error in _region_errors(payload))
+
+
+def test_camera_region_schema_rejects_unknown_fields():
+    payload = _valid_region_payload()
+    payload["regions"][0]["unexpected"] = True
+
+    errors = _region_errors(payload)
+
+    assert any(error.validator == "additionalProperties" for error in errors)
+
+
+def test_camera_region_schema_enforces_javascript_safe_integer_limits():
+    maximum_safe_integer = 9_007_199_254_740_991
+    payload = _valid_region_payload()
+    payload["configurationVersion"] = maximum_safe_integer
+    payload["regions"][0]["geometryVersion"] = maximum_safe_integer
+    assert not _region_errors(payload)
+
+    payload["configurationVersion"] += 1
+    payload["regions"][0]["geometryVersion"] += 1
+    errors = _region_errors(payload)
+    assert sum(error.validator == "maximum" for error in errors) == 2
+
+
+@pytest.mark.parametrize("coordinate", [[0.5], [0.5, 0.5, 0.5]])
+def test_camera_region_schema_requires_coordinate_pairs(coordinate: list[float]):
+    payload = _valid_region_payload()
+    payload["regions"][0]["polygon"]["coordinates"][0] = coordinate
+
+    errors = _region_errors(payload)
+
+    assert any(error.validator in {"minItems", "maxItems"} for error in errors)
+
+
+# ============================================================================
+# 3. Independent FormatChecker actively rejects invalid date-time & UUID
 # ============================================================================
 
 
@@ -123,7 +307,7 @@ def test_independent_format_checker_actively_detects_malformed_formats():
 
 
 # ============================================================================
-# 3. Pydantic wire serialization & independent JSON Schema validation
+# 4. Pydantic wire serialization & independent JSON Schema validation
 #    covers all 4 observation variants + nested data
 # ============================================================================
 
@@ -417,7 +601,7 @@ def test_full_composite_event_wire_and_canonical_hash():
 
 
 # ============================================================================
-# 4. Anti-drift negative checks against JSON Schema
+# 5. Anti-drift negative checks against JSON Schema
 # ============================================================================
 
 

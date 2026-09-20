@@ -2,9 +2,29 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
+
+
+def make_test_frame(
+    stream_id: str,
+    seq: int,
+    session_id: UUID | None = None,
+    camera_external_id: str | None = None,
+    captured_at: datetime | None = None,
+) -> FrameEnvelope:
+    return FrameEnvelope(
+        stream_id=stream_id,
+        session_id=session_id or uuid5(NAMESPACE_URL, f"session-{stream_id}"),
+        camera_external_id=camera_external_id or f"ext-{stream_id}",
+        captured_at=captured_at or datetime.now(UTC),
+        width=2,
+        height=2,
+        sequence_number=seq,
+        payload=bytes(12),
+    )
 
 
 class FakeFrameSource:

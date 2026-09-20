@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
@@ -13,27 +14,9 @@ from smartsite_ai.ingestion.testing import (
     FakeBlockingSource,
     FakeFrameSource,
     FakeSleeper,
+    make_test_frame,
 )
 from smartsite_ai.ingestion.worker import CameraIngestionWorker, StreamWorker
-
-
-def make_test_frame(
-    stream_id: str,
-    seq: int,
-    session_id: str | None = None,
-    camera_external_id: str | None = None,
-    captured_at: datetime | None = None,
-) -> FrameEnvelope:
-    return FrameEnvelope(
-        stream_id=stream_id,
-        session_id=session_id or f"session-{stream_id}",
-        camera_external_id=camera_external_id or f"ext-{stream_id}",
-        captured_at=captured_at or datetime.now(UTC),
-        width=1280,
-        height=720,
-        sequence_number=seq,
-        payload=f"payload-{seq}",
-    )
 
 
 async def wait_until(predicate: Callable[[], bool], max_iterations: int = 200) -> None:
@@ -54,7 +37,7 @@ async def test_stream_worker_normal_lifecycle() -> None:
         max_queue_size=5,
         is_live=False,
     )
-    frames = [make_test_frame("cam-1", i, camera_external_id="ext-cam-1") for i in range(1, 4)]
+    frames = [make_test_frame("cam-1", i, camera_external_id="ext-cam-1") for i in range(0, 3)]
     source = FakeFrameSource(
         source_id="cam-1",
         initial_frames=frames,
@@ -68,9 +51,9 @@ async def test_stream_worker_normal_lifecycle() -> None:
         frame2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
         frame3 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
 
-        assert frame1.sequence_number == 1
-        assert frame2.sequence_number == 2
-        assert frame3.sequence_number == 3
+        assert frame1.sequence_number == 0
+        assert frame2.sequence_number == 1
+        assert frame3.sequence_number == 2
 
         status = worker.snapshot()
         assert status.metrics.frames_enqueued >= 3
@@ -99,7 +82,7 @@ async def test_stream_worker_reconnect_on_connect_failure() -> None:
         reconnect_jitter=0.0,
         is_live=False,
     )
-    frames = [make_test_frame("cam-retry", 1, camera_external_id="ext-retry")]
+    frames = [make_test_frame("cam-retry", 0, camera_external_id="ext-retry")]
     source = FakeFrameSource(
         source_id="cam-retry",
         initial_frames=frames,
@@ -111,7 +94,7 @@ async def test_stream_worker_reconnect_on_connect_failure() -> None:
     await worker.start()
     try:
         frame = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert frame.sequence_number == 1
+        assert frame.sequence_number == 0
 
         status = worker.snapshot()
         assert status.metrics.connection_errors == 2
@@ -139,7 +122,7 @@ async def test_stream_worker_reconnect_does_not_reset_backoff_on_immediate_failu
 
     source = FakeFrameSource(
         source_id="cam-flapping",
-        initial_frames=[make_test_frame("cam-flapping", 1, camera_external_id="ext-flapping")],
+        initial_frames=[make_test_frame("cam-flapping", 0, camera_external_id="ext-flapping")],
         fail_read_once_after=1,
     )
 
@@ -167,7 +150,7 @@ async def test_stream_worker_resets_backoff_after_reaching_min_stable_frames() -
     )
 
     frames = [
-        make_test_frame("cam-stable", i, camera_external_id="ext-stable") for i in range(1, 4)
+        make_test_frame("cam-stable", i, camera_external_id="ext-stable") for i in range(0, 3)
     ]
     source = FakeFrameSource(source_id="cam-stable", initial_frames=frames, is_live=False)
 
@@ -195,14 +178,14 @@ async def test_stream_worker_eof_handling_live_vs_finite() -> None:
     )
     s1 = FakeFrameSource(
         "clip-1",
-        [make_test_frame("clip-1", 1, camera_external_id="ext-clip-1")],
+        [make_test_frame("clip-1", 0, camera_external_id="ext-clip-1")],
         is_live=False,
     )
     w1 = StreamWorker(config=finite_config, source=s1)
     await w1.start()
     try:
         f1 = await asyncio.wait_for(w1.get_frame(), timeout=1.0)
-        assert f1.sequence_number == 1
+        assert f1.sequence_number == 0
         await wait_until(lambda: w1.state == StreamState.STOPPED)
         assert w1.state == StreamState.STOPPED
     finally:
@@ -219,14 +202,14 @@ async def test_stream_worker_eof_handling_live_vs_finite() -> None:
     )
     s2 = FakeFrameSource(
         "live-1",
-        [make_test_frame("live-1", 1, camera_external_id="ext-live-1")],
+        [make_test_frame("live-1", 0, camera_external_id="ext-live-1")],
         is_live=True,
     )
     w2 = StreamWorker(config=live_config, source=s2, sleeper=sleeper)
     await w2.start()
     try:
         f2 = await asyncio.wait_for(w2.get_frame(), timeout=1.0)
-        assert f2.sequence_number == 1
+        assert f2.sequence_number == 0
         await wait_until(lambda: w2.state in (StreamState.BACKOFF, StreamState.ERROR))
         assert w2.state in (StreamState.BACKOFF, StreamState.ERROR)
         assert w2.last_error == "connection_closed_eof"
@@ -244,9 +227,9 @@ async def test_stream_worker_frame_integrity_validation() -> None:
         is_live=False,
     )
 
-    bad_frame_stream = make_test_frame("wrong-stream", 1, camera_external_id="expected-cam")
-    bad_frame_cam = make_test_frame("expected-stream", 2, camera_external_id="wrong-cam")
-    good_frame = make_test_frame("expected-stream", 3, camera_external_id="expected-cam")
+    bad_frame_stream = make_test_frame("wrong-stream", 0, camera_external_id="expected-cam")
+    bad_frame_cam = make_test_frame("expected-stream", 1, camera_external_id="wrong-cam")
+    good_frame = make_test_frame("expected-stream", 0, camera_external_id="expected-cam")
 
     source = FakeFrameSource(
         source_id="expected-stream",
@@ -258,58 +241,11 @@ async def test_stream_worker_frame_integrity_validation() -> None:
     await worker.start()
     try:
         received = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert received.sequence_number == 3
+        assert received.sequence_number == 0
 
         status = worker.snapshot()
         assert status.metrics.integrity_errors == 2
         assert "frame_integrity_error" in (status.metrics.last_error or "")
-    finally:
-        await asyncio.wait_for(worker.stop(), timeout=1.0)
-
-
-@pytest.mark.anyio
-async def test_stream_worker_session_and_sequence_semantics() -> None:
-    """Verify session consistency and monotonic sequence enforcement (MF05/MF06)."""
-    config = StreamConfig(
-        stream_id="seq-cam",
-        camera_external_id="ext-seq",
-        source_url="rtsp://10.0.0.1/live",
-        is_live=False,
-    )
-
-    f1 = make_test_frame("seq-cam", 10, session_id="sess-A", camera_external_id="ext-seq")
-    f2 = make_test_frame("seq-cam", 11, session_id="sess-A", camera_external_id="ext-seq")
-    # Duplicate sequence: 11
-    f3_dup = make_test_frame("seq-cam", 11, session_id="sess-A", camera_external_id="ext-seq")
-    # Out of order sequence: 9 < 11
-    f4_ooo = make_test_frame("seq-cam", 9, session_id="sess-A", camera_external_id="ext-seq")
-    # Session switch mid-connection
-    f5_bad_sess = make_test_frame("seq-cam", 12, session_id="sess-B", camera_external_id="ext-seq")
-    # Valid next frame in same session: 12
-    f6_valid = make_test_frame("seq-cam", 12, session_id="sess-A", camera_external_id="ext-seq")
-
-    source = FakeFrameSource(
-        source_id="seq-cam",
-        initial_frames=[f1, f2, f3_dup, f4_ooo, f5_bad_sess, f6_valid],
-        is_live=False,
-    )
-
-    worker = StreamWorker(config=config, source=source)
-    await worker.start()
-    try:
-        out1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert out1.sequence_number == 10
-
-        out2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert out2.sequence_number == 11
-
-        out3 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert out3.sequence_number == 12
-
-        status = worker.snapshot()
-        # 3 violations: duplicate 11, out-of-order 9, session switch to sess-B
-        assert status.metrics.sequence_errors == 3
-        assert status.metrics.last_error == "session_sequence_error"
     finally:
         await asyncio.wait_for(worker.stop(), timeout=1.0)
 
@@ -343,8 +279,8 @@ async def test_stream_worker_eof_natural_completion_lifecycle() -> None:
         is_live=False,
     )
     frames = [
+        make_test_frame("cam-eof", 0, camera_external_id="ext-eof"),
         make_test_frame("cam-eof", 1, camera_external_id="ext-eof"),
-        make_test_frame("cam-eof", 2, camera_external_id="ext-eof"),
     ]
     source = FakeFrameSource(source_id="cam-eof", initial_frames=frames, is_live=False)
     worker = StreamWorker(config=config, source=source)
@@ -353,8 +289,8 @@ async def test_stream_worker_eof_natural_completion_lifecycle() -> None:
 
     f1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
     f2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-    assert f1.sequence_number == 1
-    assert f2.sequence_number == 2
+    assert f1.sequence_number == 0
+    assert f2.sequence_number == 1
 
     # Wait for loop to naturally reach EOF and terminate
     await wait_until(lambda: worker.state == StreamState.STOPPED)
@@ -436,7 +372,7 @@ async def test_stream_worker_idempotent_start() -> None:
         source_url="rtsp://10.0.0.1/live",
         is_live=False,
     )
-    frames = [make_test_frame("idemp-cam", 1, camera_external_id="ext-idemp")]
+    frames = [make_test_frame("idemp-cam", 0, camera_external_id="ext-idemp")]
     source = FakeFrameSource("idemp-cam", frames, is_live=False)
     worker = StreamWorker(config=config, source=source)
 
@@ -445,7 +381,7 @@ async def test_stream_worker_idempotent_start() -> None:
     await worker.start()
     try:
         f = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert f.sequence_number == 1
+        assert f.sequence_number == 0
     finally:
         await asyncio.wait_for(worker.stop(), timeout=1.0)
 
@@ -484,28 +420,28 @@ async def test_stream_worker_deterministic_fps_sampling() -> None:
 
     t0 = datetime(2026, 9, 19, 12, 0, 0, tzinfo=UTC)
     frames = [
-        make_test_frame("cam-sampling", 1, camera_external_id="ext-sampling", captured_at=t0),
+        make_test_frame("cam-sampling", 0, camera_external_id="ext-sampling", captured_at=t0),
         make_test_frame(
             "cam-sampling",
-            2,
+            1,
             camera_external_id="ext-sampling",
             captured_at=t0 + timedelta(seconds=0.1),
         ),
         make_test_frame(
             "cam-sampling",
-            3,
+            2,
             camera_external_id="ext-sampling",
             captured_at=t0 + timedelta(seconds=0.2),
         ),
         make_test_frame(
             "cam-sampling",
-            4,
+            3,
             camera_external_id="ext-sampling",
             captured_at=t0 + timedelta(seconds=0.55),
         ),
         make_test_frame(
             "cam-sampling",
-            5,
+            4,
             camera_external_id="ext-sampling",
             captured_at=t0 + timedelta(seconds=0.65),
         ),
@@ -516,10 +452,10 @@ async def test_stream_worker_deterministic_fps_sampling() -> None:
     await worker.start()
     try:
         f1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert f1.sequence_number == 1
+        assert f1.sequence_number == 0
 
         f4 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert f4.sequence_number == 4
+        assert f4.sequence_number == 3
 
         await wait_until(lambda: worker.snapshot().metrics.sampled_out_frames == 3)
         status = worker.snapshot()
@@ -571,7 +507,7 @@ async def test_stream_fault_isolation() -> None:
     )
 
     healthy_frames = [
-        make_test_frame("healthy-cam", i, camera_external_id="ext-healthy") for i in range(1, 10)
+        make_test_frame("healthy-cam", i, camera_external_id="ext-healthy") for i in range(0, 9)
     ]
     healthy_source = FakeFrameSource(
         source_id="healthy-cam",
@@ -592,8 +528,8 @@ async def test_stream_fault_isolation() -> None:
     try:
         f1 = await asyncio.wait_for(healthy_worker.get_frame(), timeout=1.0)
         f2 = await asyncio.wait_for(healthy_worker.get_frame(), timeout=1.0)
-        assert f1.sequence_number == 1
-        assert f2.sequence_number == 2
+        assert f1.sequence_number == 0
+        assert f2.sequence_number == 1
 
         await wait_until(
             lambda: manager.snapshot().streams["failing-cam"].metrics.connection_errors > 0
@@ -620,7 +556,7 @@ async def test_bounded_queue_backpressure_in_worker() -> None:
         is_live=False,
     )
     frames = [
-        make_test_frame("cam-backpressure", i, camera_external_id="ext-bp") for i in range(1, 6)
+        make_test_frame("cam-backpressure", i, camera_external_id="ext-bp") for i in range(0, 5)
     ]
     source = FakeFrameSource(
         source_id="cam-backpressure",
@@ -638,8 +574,8 @@ async def test_bounded_queue_backpressure_in_worker() -> None:
 
         f_first = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
         f_second = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert f_first.sequence_number == 4
-        assert f_second.sequence_number == 5
+        assert f_first.sequence_number == 3
+        assert f_second.sequence_number == 4
     finally:
         await asyncio.wait_for(worker.stop(), timeout=1.0)
 
@@ -658,10 +594,10 @@ async def test_camera_ingestion_worker_manager_lifecycle_and_invariants() -> Non
     )
 
     s1 = FakeFrameSource(
-        "c1", [make_test_frame("c1", 1, camera_external_id="ext-1")], is_live=False
+        "c1", [make_test_frame("c1", 0, camera_external_id="ext-1")], is_live=False
     )
     s2 = FakeFrameSource(
-        "c2", [make_test_frame("c2", 1, camera_external_id="ext-2")], is_live=False
+        "c2", [make_test_frame("c2", 0, camera_external_id="ext-2")], is_live=False
     )
 
     manager.add_stream(config1, source=s1)
@@ -701,7 +637,7 @@ async def test_camera_ingestion_worker_manager_restart_preserves_stopped_status(
     source = FakeFrameSource(
         source_id="cam-mgr-restart",
         initial_frames=[
-            make_test_frame("cam-mgr-restart", 1, camera_external_id="ext-mgr-restart")
+            make_test_frame("cam-mgr-restart", 0, camera_external_id="ext-mgr-restart")
         ],
         is_live=False,
     )
@@ -800,15 +736,15 @@ async def test_stream_worker_sampling_resets_on_reconnect_with_lower_timestamp()
 
     f1 = make_test_frame(
         "cam-resample",
-        1,
-        session_id="sess-old",
+        0,
+        session_id=UUID("00000000-0000-4000-8000-000000000001"),
         camera_external_id="ext-resample",
         captured_at=t_session1,
     )
     f2_lower = make_test_frame(
         "cam-resample",
-        1,
-        session_id="sess-new",
+        0,
+        session_id=UUID("00000000-0000-4000-8000-000000000002"),
         camera_external_id="ext-resample",
         captured_at=t_session2,
     )
@@ -825,13 +761,13 @@ async def test_stream_worker_sampling_resets_on_reconnect_with_lower_timestamp()
     await worker.start()
     try:
         got1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert got1.sequence_number == 1
-        assert got1.session_id == "sess-old"
+        assert got1.sequence_number == 0
+        assert got1.session_id == UUID("00000000-0000-4000-8000-000000000001")
 
         # Frame with lower timestamp from new session must be accepted and not sampled out
         got2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
-        assert got2.sequence_number == 1
-        assert got2.session_id == "sess-new"
+        assert got2.sequence_number == 0
+        assert got2.session_id == UUID("00000000-0000-4000-8000-000000000002")
         assert got2.captured_at == t_session2
 
         status = worker.snapshot()
@@ -856,7 +792,7 @@ async def test_live_eof_closes_each_connection_before_reconnect() -> None:
         initial_frames=[
             make_test_frame(
                 "cam-live-eof-ownership",
-                1,
+                0,
                 camera_external_id="ext-live-eof-ownership",
             )
         ],
@@ -884,14 +820,14 @@ async def test_read_error_closes_connection_before_successful_reconnect() -> Non
     )
     first = make_test_frame(
         "cam-read-ownership",
-        1,
-        session_id="session-one",
+        0,
+        session_id=UUID("00000000-0000-4000-8000-000000000003"),
         camera_external_id="ext-read-ownership",
     )
     second = make_test_frame(
         "cam-read-ownership",
-        1,
-        session_id="session-two",
+        0,
+        session_id=UUID("00000000-0000-4000-8000-000000000004"),
         camera_external_id="ext-read-ownership",
     )
     source = FakeFrameSource(
@@ -905,8 +841,12 @@ async def test_read_error_closes_connection_before_successful_reconnect() -> Non
 
     await worker.start()
     try:
-        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == "session-one"
-        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == "session-two"
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == UUID(
+            "00000000-0000-4000-8000-000000000003"
+        )
+        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).session_id == UUID(
+            "00000000-0000-4000-8000-000000000004"
+        )
         assert source.connect_calls == 2
         assert source.close_calls == 1
         assert source.is_connected is True
@@ -1082,7 +1022,7 @@ async def test_close_failure_is_terminal_and_never_reconnects_over_open_source()
         initial_frames=[
             make_test_frame(
                 "close-failure",
-                1,
+                0,
                 camera_external_id="ext-close-failure",
             )
         ],
@@ -1154,53 +1094,6 @@ async def test_late_connect_after_close_failure_does_not_double_close_attempt() 
     assert worker.last_error == "close_error: RuntimeError"
 
 
-@pytest.mark.anyio
-async def test_reconnect_rejects_sequence_rollback_for_same_session() -> None:
-    """Reconnect cannot reset sequence monotonicity when the source reuses a session ID."""
-    config = StreamConfig(
-        stream_id="cam-same-session",
-        camera_external_id="ext-same-session",
-        source_url="rtsp://10.0.0.24/live",
-        reconnect_jitter=0.0,
-    )
-    source = FakeFrameSource(
-        source_id="cam-same-session",
-        initial_frames=[
-            make_test_frame(
-                "cam-same-session",
-                10,
-                session_id="persistent-session",
-                camera_external_id="ext-same-session",
-            )
-        ],
-        fail_read_once_after=1,
-        secondary_frames=[
-            make_test_frame(
-                "cam-same-session",
-                1,
-                session_id="persistent-session",
-                camera_external_id="ext-same-session",
-            ),
-            make_test_frame(
-                "cam-same-session",
-                11,
-                session_id="persistent-session",
-                camera_external_id="ext-same-session",
-            ),
-        ],
-        block_when_exhausted=True,
-    )
-    worker = StreamWorker(config=config, source=source, sleeper=FakeSleeper())
-
-    await worker.start()
-    try:
-        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).sequence_number == 10
-        assert (await asyncio.wait_for(worker.get_frame(), timeout=1.0)).sequence_number == 11
-        assert worker.sequence_errors == 1
-    finally:
-        await asyncio.wait_for(worker.stop(), timeout=1.0)
-
-
 def test_import_side_effects_are_zero() -> None:
     import smartsite_ai.ingestion
 
@@ -1209,3 +1102,132 @@ def test_import_side_effects_are_zero() -> None:
     assert hasattr(smartsite_ai.ingestion, "QueueClosedError")
     assert hasattr(smartsite_ai.ingestion, "FrameIntegrityError")
     assert hasattr(smartsite_ai.ingestion, "SessionSequenceError")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("bad_session", "bad_sequence"), [(1, 0), (1, 9), (2, 1)])
+async def test_reconnect_rejects_invalid_session_start_and_recovers(
+    bad_session: int,
+    bad_sequence: int,
+) -> None:
+    """Reuse (even with increasing sequence) or nonzero restart closes the attempt."""
+    config = StreamConfig(
+        stream_id="session-cam",
+        camera_external_id="ext-session-cam",
+        source_url="rtsp://camera/live",
+        reconnect_jitter=0.0,
+        reconnect_initial_delay=1.0,
+        min_stable_frames=5,
+    )
+    first = make_test_frame("session-cam", 0, session_id=UUID(int=1))
+    rejected = make_test_frame("session-cam", bad_sequence, session_id=UUID(int=bad_session))
+    recovered = make_test_frame("session-cam", 0, session_id=UUID(int=3))
+    source = FakeFrameSource(
+        "session-cam",
+        [first],
+        fail_read_once_after=1,
+        secondary_frames=[rejected, recovered],
+        block_when_exhausted=True,
+    )
+    sleeper = FakeSleeper()
+    worker = StreamWorker(config, source, sleeper=sleeper)
+    await worker.start()
+    try:
+        await wait_until(lambda: source.read_calls >= 5)
+        assert source.connect_calls == 3
+        assert source.close_calls == 2
+        assert worker.sequence_errors == 1
+        assert worker.read_errors == 1
+        assert worker.reconnect_attempts == 2
+        assert worker.consecutive_failures == 2
+        assert sleeper.sleep_calls == [1.0, 2.0]
+        assert worker.last_error == "session_sequence_error"
+        assert worker.queue.qsize() == 2
+        assert await worker.get_frame() == first
+        assert await worker.get_frame() == recovered
+    finally:
+        await worker.stop()
+    assert source.close_calls == 3
+    assert not source.is_connected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("bad_session", "bad_sequence"), [(2, 6), (1, 5), (1, 4)])
+async def test_session_violation_inside_connection_closes_before_next_read(
+    bad_session: int,
+    bad_sequence: int,
+) -> None:
+    """Session changes and duplicate/decreasing sequence invalidate the connection."""
+    config = StreamConfig(
+        stream_id="session-cam",
+        camera_external_id="ext-session-cam",
+        source_url="rtsp://camera/live",
+        max_consecutive_failures=1,
+    )
+    first = make_test_frame("session-cam", 0, session_id=UUID(int=1))
+    gap = make_test_frame("session-cam", 5, session_id=UUID(int=1))
+    bad = make_test_frame("session-cam", bad_sequence, session_id=UUID(int=bad_session))
+    later = make_test_frame("session-cam", 6, session_id=UUID(int=1))
+    source = FakeFrameSource("session-cam", [first, gap, bad, later], block_when_exhausted=True)
+    worker = StreamWorker(config, source, sleeper=FakeSleeper())
+    await worker.start()
+    try:
+        await wait_until(lambda: source.read_calls >= 3)
+        assert worker.state == StreamState.ERROR
+        assert source.read_calls == 3
+        assert source.connect_calls == source.close_calls == 1
+        assert not source.is_connected
+        assert worker.queue.is_closed
+        assert worker.sequence_errors == 1
+        assert worker.reconnect_attempts == 1
+        assert worker.last_error == "session_sequence_error"
+        assert await worker.get_frame() == first
+        assert await worker.get_frame() == gap
+        with pytest.raises(QueueClosedError):
+            await worker.get_frame()
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.anyio
+async def test_initial_connection_rejects_nonzero_sequence() -> None:
+    config = StreamConfig(
+        stream_id="session-cam",
+        camera_external_id="ext-session-cam",
+        source_url="rtsp://camera/live",
+        max_consecutive_failures=1,
+    )
+    source = FakeFrameSource(
+        "session-cam",
+        [make_test_frame("session-cam", 1)],
+        block_when_exhausted=True,
+    )
+    worker = StreamWorker(config, source)
+    await worker.start()
+    try:
+        await wait_until(lambda: source.read_calls >= 1)
+        assert worker.state == StreamState.ERROR
+        assert worker.sequence_errors == 1
+        assert worker.queue.enqueued_count == 0
+        assert source.close_calls == 1
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.anyio
+async def test_sequence_gaps_are_accepted_in_one_session() -> None:
+    config = StreamConfig(
+        stream_id="session-cam",
+        camera_external_id="ext-session-cam",
+        source_url="rtsp://camera/clip",
+        is_live=False,
+    )
+    frames = [make_test_frame("session-cam", seq) for seq in (0, 3, 99)]
+    source = FakeFrameSource("session-cam", frames, is_live=False)
+    worker = StreamWorker(config, source)
+    await worker.start()
+    await wait_until(lambda: worker.state == StreamState.STOPPED)
+    assert [(await worker.get_frame()).sequence_number for _ in range(3)] == [0, 3, 99]
+    assert worker.sequence_errors == 0
+    assert worker.reconnect_attempts == 0
+    assert source.close_calls == 1

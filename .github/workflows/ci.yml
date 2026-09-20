@@ -40,8 +40,12 @@ jobs:
           git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$source_commit"
           git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1/technical-observation-event.json > "$RUNNER_TEMP/source-schema.json"
           git -C "$source_checkout" show FETCH_HEAD:contracts/test/golden-vectors.json > "$RUNNER_TEMP/source-golden-vectors.json"
+          git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1/camera-region-configuration.json > "$RUNNER_TEMP/source-camera-region-schema.json"
+          git -C "$source_checkout" show FETCH_HEAD:contracts/test/camera-region-configuration-vectors.json > "$RUNNER_TEMP/source-camera-region-vectors.json"
           cmp contracts/schemas/v1/technical-observation-event.json "$RUNNER_TEMP/source-schema.json"
           cmp contracts/golden-vectors.json "$RUNNER_TEMP/source-golden-vectors.json"
+          cmp contracts/schemas/v1/camera-region-configuration.json "$RUNNER_TEMP/source-camera-region-schema.json"
+          cmp contracts/camera-region-configuration-vectors.json "$RUNNER_TEMP/source-camera-region-vectors.json"
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .
@@ -62,6 +66,8 @@ jobs:
           assert "smartsite_ai/contracts/metadata.json" in names
           assert "smartsite_ai/contracts/schemas/v1/technical-observation-event.json" in names
           assert "smartsite_ai/contracts/golden-vectors.json" in names
+          assert "smartsite_ai/contracts/schemas/v1/camera-region-configuration.json" in names
+          assert "smartsite_ai/contracts/camera-region-configuration-vectors.json" in names
           PY
       - name: Verify minimal runtime package
         run: |

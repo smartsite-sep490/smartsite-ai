@@ -5,6 +5,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 
 from smartsite_ai.ingestion.backoff import ExponentialBackoff
 from smartsite_ai.ingestion.config import StreamConfig
@@ -58,7 +59,7 @@ class StreamWorker:
         self.consecutive_failures = 0
         self._consecutive_successful_frames = 0
 
-        self._current_session_id: str | None = None
+        self._current_session_id: UUID | None = None
         self._last_sequence_number: int | None = None
 
         self.last_frame_timestamp: datetime | None = None
@@ -185,8 +186,8 @@ class StreamWorker:
                     self.state = StreamState.STREAMING
                     self._consecutive_successful_frames = 0
                     self._first_frame_in_connection = True
-                    # Sampling is connection-local, while sequence monotonicity is
-                    # session-local and therefore survives reconnects.
+                    # Sampling resets on reconnect. Retain the preceding session UUID
+                    # until the new connection establishes a fresh session.
                     self._last_sampled_timestamp = None
 
                     # Ingestion inner loop
@@ -236,40 +237,27 @@ class StreamWorker:
 
                         # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
                         if self._first_frame_in_connection:
-                            if (
-                                self._current_session_id == frame.session_id
-                                and self._last_sequence_number is not None
-                                and frame.sequence_number <= self._last_sequence_number
-                            ):
-                                self.sequence_errors += 1
-                                self.last_error = "session_sequence_error"
-                                continue
-
-                            # A new session may restart its sequence; a reused session
-                            # must continue strictly after the last accepted frame.
+                            if frame.sequence_number != 0:
+                                raise SessionSequenceError(
+                                    "A connection must start at sequence zero"
+                                )
+                            if frame.session_id == self._current_session_id:
+                                raise SessionSequenceError(
+                                    "Reconnect must use a fresh session UUID"
+                                )
                             self._current_session_id = frame.session_id
-                            self._last_sequence_number = frame.sequence_number
                             self._first_frame_in_connection = False
-                        elif self._current_session_id is None:
-                            self._current_session_id = frame.session_id
-                            self._last_sequence_number = frame.sequence_number
                         else:
-                            # Within one connection, session_id must not change.
                             if frame.session_id != self._current_session_id:
-                                self.sequence_errors += 1
-                                self.last_error = "session_sequence_error"
-                                continue
-
-                            # Within the same session, sequence_number must increase strictly
+                                raise SessionSequenceError("Session changed within a connection")
                             if (
                                 self._last_sequence_number is not None
                                 and frame.sequence_number <= self._last_sequence_number
                             ):
-                                self.sequence_errors += 1
-                                self.last_error = "session_sequence_error"
-                                continue
-
-                            self._last_sequence_number = frame.sequence_number
+                                raise SessionSequenceError(
+                                    "Sequence must increase within a session"
+                                )
+                        self._last_sequence_number = frame.sequence_number
 
                         # 3. Stable Criteria: reset backoff after min_stable_frames
                         self._consecutive_successful_frames += 1

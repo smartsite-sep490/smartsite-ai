@@ -1,0 +1,2045 @@
+[
+  {
+    "description": "empty active snapshot",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 1,
+      "cameraExternalId": "CAM-EMPTY-01",
+      "regions": []
+    },
+    "expectedSha256": "fb1c4d930949bcd0241db153da0bb566196ba29b8760ce783462ec6e9ea87f33"
+  },
+  {
+    "description": "one valid polygon",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "16013b8b14afe9f9871a0f9aab8a4484597fce6f1f1c839b7d5749faf8d61ca6"
+  },
+  {
+    "description": "64-vertex valid polygon",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 64,
+      "cameraExternalId": "CAM-PERIMETER-64",
+      "regions": [
+        {
+          "regionId": "00000000-0000-4000-8000-000000000064",
+          "geometryVersion": 9,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [0.0625, 0],
+              [0.125, 0],
+              [0.1875, 0],
+              [0.25, 0],
+              [0.3125, 0],
+              [0.375, 0],
+              [0.4375, 0],
+              [0.5, 0],
+              [0.5625, 0],
+              [0.625, 0],
+              [0.6875, 0],
+              [0.75, 0],
+              [0.8125, 0],
+              [0.875, 0],
+              [0.9375, 0],
+              [1, 0],
+              [1, 0.0625],
+              [1, 0.125],
+              [1, 0.1875],
+              [1, 0.25],
+              [1, 0.3125],
+              [1, 0.375],
+              [1, 0.4375],
+              [1, 0.5],
+              [1, 0.5625],
+              [1, 0.625],
+              [1, 0.6875],
+              [1, 0.75],
+              [1, 0.8125],
+              [1, 0.875],
+              [1, 0.9375],
+              [1, 1],
+              [0.9375, 1],
+              [0.875, 1],
+              [0.8125, 1],
+              [0.75, 1],
+              [0.6875, 1],
+              [0.625, 1],
+              [0.5625, 1],
+              [0.5, 1],
+              [0.4375, 1],
+              [0.375, 1],
+              [0.3125, 1],
+              [0.25, 1],
+              [0.1875, 1],
+              [0.125, 1],
+              [0.0625, 1],
+              [0, 1],
+              [0, 0.9375],
+              [0, 0.875],
+              [0, 0.8125],
+              [0, 0.75],
+              [0, 0.6875],
+              [0, 0.625],
+              [0, 0.5625],
+              [0, 0.5],
+              [0, 0.4375],
+              [0, 0.375],
+              [0, 0.3125],
+              [0, 0.25],
+              [0, 0.1875],
+              [0, 0.125],
+              [0, 0.0625]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "cc3da3b4344d3bd5ef1f9fbb839e58070c47ca6a7c1d0a00d7ae10226575ebfc"
+  },
+  {
+    "description": "same valid polygon with different object-key insertion order",
+    "valid": true,
+    "payload": {
+      "regions": [
+        {
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          },
+          "coordinateSpace": "NORMALIZED_0_1",
+          "geometryVersion": 3,
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+        }
+      ],
+      "cameraExternalId": "CAM-GATE-01",
+      "configurationVersion": 42,
+      "schemaVersion": "1.0.0"
+    },
+    "expectedSha256": "16013b8b14afe9f9871a0f9aab8a4484597fce6f1f1c839b7d5749faf8d61ca6"
+  },
+  {
+    "description": "extra root property",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ],
+      "unexpected": true
+    },
+    "expectedIssueCode": "SCHEMA_VIOLATION",
+    "expectedValidationLayer": "SCHEMA"
+  },
+  {
+    "description": "duplicate region ID",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        },
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 4,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "DUPLICATE_REGION_ID",
+    "expectedValidationLayer": "SEMANTIC"
+  },
+  {
+    "description": "repeated closing point",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1],
+              [0, 0]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "SCHEMA_VIOLATION",
+    "expectedValidationLayer": "SCHEMA"
+  },
+  {
+    "description": "zero-area polygon",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [0.5, 0.5],
+              [1, 1]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "INVALID_GEOMETRY",
+    "expectedValidationLayer": "SEMANTIC"
+  },
+  {
+    "description": "self-intersecting polygon",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 1],
+              [0, 1],
+              [1, 0]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "INVALID_GEOMETRY",
+    "expectedValidationLayer": "SEMANTIC"
+  },
+  {
+    "description": "65 regions",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 65,
+      "cameraExternalId": "CAM-REGION-LIMIT",
+      "regions": [
+        {
+          "regionId": "00000000-0000-4000-8000-000000000001",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000002",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000003",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000004",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000005",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000006",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000007",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000008",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000009",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000010",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000011",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000012",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000013",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000014",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000015",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000016",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000017",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000018",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000019",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000020",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000021",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000022",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000023",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000024",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000025",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000026",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000027",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000028",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000029",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000030",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000031",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000032",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000033",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000034",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000035",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000036",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000037",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000038",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000039",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000040",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000041",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000042",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000043",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000044",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000045",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000046",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000047",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000048",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000049",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000050",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000051",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000052",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000053",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000054",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000055",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000056",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000057",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000058",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000059",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000060",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000061",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000062",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000063",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000064",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000065",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "SCHEMA_VIOLATION",
+    "expectedValidationLayer": "SCHEMA"
+  },
+  {
+    "description": "nonzero-area self-intersection below floating-point product range",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 1e-200],
+              [2e-200, 1e-200],
+              [1e-200, 0],
+              [1e-200, 3e-200]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "INVALID_GEOMETRY",
+    "expectedValidationLayer": "SEMANTIC"
+  },
+  {
+    "description": "valid parallelogram below floating-point product range",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [3e-200, 2e-200],
+              [3e-200, 3e-200],
+              [0, 1e-200]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "f3c0981005d9b8080100baf813f78256a4151b741a3f7bec8dcb32fb880acc69"
+  },
+  {
+    "description": "mixed-case duplicate region ID",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        },
+        {
+          "regionId": "F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "DUPLICATE_REGION_ID",
+    "expectedValidationLayer": "SEMANTIC"
+  },
+  {
+    "description": "lone high surrogate camera ID",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-\ud800",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "SCHEMA_VIOLATION",
+    "expectedValidationLayer": "SCHEMA"
+  },
+  {
+    "description": "lone low surrogate camera ID",
+    "valid": false,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-\udfff",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedIssueCode": "SCHEMA_VIOLATION",
+    "expectedValidationLayer": "SCHEMA"
+  },
+  {
+    "description": "supplementary Unicode camera ID",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-📷",
+      "regions": [
+        {
+          "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "5e8bc4b4c64b47a956fd848428c44077e3972422a37c024d896282e7d21c1b68"
+  },
+  {
+    "description": "uppercase region ID spelling",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 42,
+      "cameraExternalId": "CAM-GATE-01",
+      "regions": [
+        {
+          "regionId": "F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6",
+          "geometryVersion": 3,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0.1, 0.1],
+              [0.9, 0.1],
+              [0.5, 0.9]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "d208f61cdc1f3d2ef787370dfad943071d7a65f1ecbb676c8b9df09bba0548fd"
+  },
+  {
+    "description": "64 regions",
+    "valid": true,
+    "payload": {
+      "schemaVersion": "1.0.0",
+      "configurationVersion": 64,
+      "cameraExternalId": "CAM-REGION-LIMIT",
+      "regions": [
+        {
+          "regionId": "00000000-0000-4000-8000-000000000001",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000002",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000003",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000004",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000005",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000006",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000007",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000008",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000009",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000010",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000011",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000012",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000013",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000014",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000015",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000016",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000017",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000018",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000019",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000020",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000021",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000022",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000023",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000024",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000025",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000026",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000027",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000028",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000029",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000030",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000031",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000032",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000033",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000034",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000035",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000036",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000037",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000038",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000039",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000040",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000041",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000042",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000043",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000044",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000045",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000046",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000047",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000048",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000049",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000050",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000051",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000052",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000053",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000054",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000055",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000056",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000057",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000058",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000059",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000060",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000061",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000062",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000063",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        },
+        {
+          "regionId": "00000000-0000-4000-8000-000000000064",
+          "geometryVersion": 1,
+          "coordinateSpace": "NORMALIZED_0_1",
+          "polygon": {
+            "coordinates": [
+              [0, 0],
+              [1, 0],
+              [0, 1]
+            ]
+          }
+        }
+      ]
+    },
+    "expectedSha256": "1e74e11111727f27b0f64774a1fc30cc4e5d65240eb2e3d43a2f344ff43be8fb"
+  }
+]

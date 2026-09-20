@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from uuid import UUID
 
 import pytest
 
@@ -10,13 +11,13 @@ from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
 def make_frame(seq: int) -> FrameEnvelope:
     return FrameEnvelope(
         stream_id="s1",
-        session_id="sess1",
+        session_id=UUID("00000000-0000-4000-8000-000000000001"),
         camera_external_id="cam1",
         captured_at=datetime.now(UTC),
-        width=640,
-        height=480,
+        width=2,
+        height=2,
         sequence_number=seq,
-        payload=f"frame-{seq}",
+        payload=bytes(12),
     )
 
 

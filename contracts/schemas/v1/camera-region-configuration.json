@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.local/contracts/v1/camera-region-configuration.json",
+  "title": "CameraRegionConfiguration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "configurationVersion", "cameraExternalId", "regions"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "configurationVersion": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "cameraExternalId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[^\\u0000\\uD800-\\uDFFF]+$"
+    },
+    "regions": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/region" }
+    }
+  },
+  "$defs": {
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["regionId", "geometryVersion", "coordinateSpace", "polygon"],
+      "properties": {
+        "regionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+        },
+        "geometryVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "coordinateSpace": { "const": "NORMALIZED_0_1" },
+        "polygon": { "$ref": "#/$defs/polygon" }
+      }
+    },
+    "polygon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["coordinates"],
+      "properties": {
+        "coordinates": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/coordinate" }
+        }
+      }
+    },
+    "coordinate": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    }
+  }
+}

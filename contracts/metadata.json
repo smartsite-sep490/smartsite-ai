@@ -1,7 +1,12 @@
 {
   "sourceRepository": "smartsite-sep490/smartsite",
-  "sourceCommitSha": "1a4d3cabde4c4da0a1a51de05fcda6cacc5907e8",
+  "sourceCommitSha": "691b7acc9f62bf72e30805a8c0ccb3836f15ac3d",
   "schemaVersion": "1.0.0",
   "schemaSha256": "1a751fd50a30310bfa626a2b65c018d7e5ff620aae678d0ea5c16160435bf1b0",
-  "goldenVectorsSha256": "3178145861a86008149e4e7a52c374d4beb8827478fa6174c8c4999289349102"
+  "goldenVectorsSha256": "3178145861a86008149e4e7a52c374d4beb8827478fa6174c8c4999289349102",
+  "cameraRegionConfiguration": {
+    "schemaVersion": "1.0.0",
+    "schemaSha256": "36e165aa755cc66be45ef06486ecaf0635b5d1db7ad492f3665ac6f5f8c69fd2",
+    "goldenVectorsSha256": "7b16024bd8c85e754567f1a39c9a1e578fa80af1963a853ca9f68dbf0cc435f5"
+  }
 }

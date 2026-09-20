@@ -214,6 +214,75 @@ def test_detection_batch_from_frame_locks_identity_and_deterministically_sorts()
     assert isinstance(batch.detections, tuple)
 
 
+@pytest.mark.parametrize(
+    ("lower_box", "higher_box", "lower_name", "higher_name"),
+    [
+        (
+            {"x1": 0.1, "y1": 0.1, "x2": 0.8, "y2": 0.9},
+            {"x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9},
+            "same-class",
+            "same-class",
+        ),
+        (
+            {"x1": 0.1, "y1": 0.2, "x2": 0.7, "y2": 0.9},
+            {"x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9},
+            "same-class",
+            "same-class",
+        ),
+        (
+            {"x1": 0.1, "y1": 0.2, "x2": 0.7, "y2": 0.8},
+            {"x1": 0.1, "y1": 0.2, "x2": 0.7, "y2": 0.9},
+            "same-class",
+            "same-class",
+        ),
+        (
+            {"x1": 0.1, "y1": 0.2, "x2": 0.7, "y2": 0.9},
+            {"x1": 0.1, "y1": 0.2, "x2": 0.7, "y2": 0.9},
+            "alpha",
+            "bravo",
+        ),
+    ],
+    ids=["y1", "x2", "y2", "class_name"],
+)
+def test_detection_batch_sorting_pins_each_remaining_tie_breaker(
+    lower_box: dict[str, float],
+    higher_box: dict[str, float],
+    lower_name: str,
+    higher_name: str,
+) -> None:
+    lower = make_detection(
+        class_id=3,
+        class_name=lower_name,
+        confidence=0.5,
+        bounding_box=make_box(**lower_box),
+    )
+    higher = make_detection(
+        class_id=3,
+        class_name=higher_name,
+        confidence=0.5,
+        bounding_box=make_box(**higher_box),
+    )
+    frame = make_frame()
+
+    lower_first = DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="model-artifact",
+        model_version="v1",
+        model_sha256=MODEL_SHA256,
+        detections=(lower, higher),
+    )
+    higher_first = DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="model-artifact",
+        model_version="v1",
+        model_sha256=MODEL_SHA256,
+        detections=(higher, lower),
+    )
+
+    assert lower_first.detections == (lower, higher)
+    assert higher_first.detections == (lower, higher)
+
+
 def test_detection_batch_exposes_approved_frame_dimension_field_names() -> None:
     frame = make_frame(width=3, height=1, payload=bytes(9))
 

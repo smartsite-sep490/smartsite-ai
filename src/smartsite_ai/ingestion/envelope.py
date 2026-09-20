@@ -1,58 +1,56 @@
-"""Typed frame envelope capturing frame metadata and opaque immutable payload."""
+"""Immutable, packed BGR24 frames at the ingestion consumer boundary."""
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal, Self
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FrameEnvelope(BaseModel):
-    """Immutable envelope encapsulating ingested video frame and metadata.
+    """A packed frame whose immutable payload owns its storage."""
 
-    Enforces strict immutability:
-    If a mutable buffer (e.g. bytearray, mutable memoryview) is passed as payload,
-    it is copied into an immutable bytes instance to transfer ownership and prevent
-    downstream decoders or reused frame buffers from overwriting queued frames.
-    """
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    model_config = ConfigDict(frozen=True)
-
-    stream_id: str = Field(..., description="Unique identifier for the video stream")
-    session_id: str = Field(..., description="Ingestion session identifier")
-    camera_external_id: str = Field(..., description="Associated camera external ID")
-    captured_at: datetime = Field(..., description="Timezone-aware timestamp of frame capture")
-    width: int = Field(..., gt=0, description="Frame width in pixels")
-    height: int = Field(..., gt=0, description="Frame height in pixels")
-    sequence_number: int = Field(..., ge=0, description="Monotonically increasing sequence number")
-    payload: bytes | str = Field(
-        ...,
-        description="Opaque immutable frame buffer (bytes) or descriptor handle",
-    )
+    stream_id: str = Field(min_length=1, max_length=128)
+    session_id: UUID
+    camera_external_id: str = Field(min_length=1, max_length=128)
+    captured_at: datetime
+    width: int = Field(ge=1, le=16_384)
+    height: int = Field(ge=1, le=16_384)
+    sequence_number: int = Field(ge=0, le=9_223_372_036_854_775_807)
+    pixel_format: Literal["BGR24"] = "BGR24"
+    payload: bytes
 
     @field_validator("captured_at")
     @classmethod
     def validate_timezone_aware(cls, v: datetime) -> datetime:
         if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
             raise ValueError("captured_at must be timezone-aware")
-        return v
+        return v.astimezone(UTC)
 
     @field_validator("payload", mode="before")
     @classmethod
-    def ensure_immutable_payload(cls, v: object) -> bytes | str:
-        """Transfer ownership by creating an immutable copy if input is a mutable buffer."""
+    def ensure_immutable_payload(cls, v: object) -> object:
+        """Copy reusable source buffers before transferring a frame to consumers."""
         if isinstance(v, (bytearray, memoryview)):
             return bytes(v)
-        if isinstance(v, (bytes, str)):
-            return v
-        raise TypeError(f"payload must be bytes, str, or buffer object, got {type(v).__name__}")
+        if isinstance(v, str):
+            raise ValueError("payload must be bytes, not str")
+        return v
+
+    @model_validator(mode="after")
+    def validate_packed_payload(self) -> Self:
+        if len(self.payload) != self.width * self.height * 3:
+            raise ValueError("payload length must equal width * height * 3 for BGR24")
+        return self
 
     @property
     def captured_at_iso(self) -> str:
-        """Return RFC 3339 / ISO 8601 string representation of captured_at."""
+        """Return the UTC RFC 3339 / ISO 8601 capture timestamp."""
         return self.captured_at.isoformat()
 
     @property
     def buffer(self) -> memoryview:
-        """Return a read-only memoryview over payload bytes."""
-        if isinstance(self.payload, bytes):
-            return memoryview(self.payload)
-        return memoryview(self.payload.encode("utf-8"))
+        """Return a read-only memoryview over packed BGR24 bytes."""
+        return memoryview(self.payload)

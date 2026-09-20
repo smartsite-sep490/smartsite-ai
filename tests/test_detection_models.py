@@ -61,8 +61,8 @@ def batch_data(**overrides: object) -> dict[str, object]:
         "session_id": SESSION,
         "camera_external_id": "cam-01",
         "captured_at": datetime(2026, 9, 20, 12, tzinfo=UTC),
-        "width": 2,
-        "height": 2,
+        "frame_width": 2,
+        "frame_height": 2,
         "sequence_number": 7,
         "model_artifact_id": "detector-model",
         "model_version": "2026.09.20",
@@ -206,12 +206,30 @@ def test_detection_batch_from_frame_locks_identity_and_deterministically_sorts()
     assert batch.session_id == frame.session_id
     assert batch.camera_external_id == frame.camera_external_id
     assert batch.captured_at == frame.captured_at
-    assert batch.width == frame.width
-    assert batch.height == frame.height
+    assert batch.frame_width == frame.width
+    assert batch.frame_height == frame.height
     assert batch.sequence_number == frame.sequence_number
     assert batch.detections == (first, second, third)
     assert reversed_batch.detections == batch.detections
     assert isinstance(batch.detections, tuple)
+
+
+def test_detection_batch_exposes_approved_frame_dimension_field_names() -> None:
+    frame = make_frame(width=3, height=1, payload=bytes(9))
+
+    batch = DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="model-artifact",
+        model_version="v1",
+        model_sha256=MODEL_SHA256,
+        detections=(),
+    )
+
+    assert batch.frame_width == 3
+    assert batch.frame_height == 1
+    assert set(batch.model_dump()) >= {"frame_width", "frame_height"}
+    assert "width" not in batch.model_dump()
+    assert "height" not in batch.model_dump()
 
 
 def test_detection_batch_accepts_model_and_collection_boundaries() -> None:
@@ -228,7 +246,23 @@ def test_detection_batch_accepts_model_and_collection_boundaries() -> None:
     assert len(batch.detections) == 1024
     assert batch.detections[0].class_id == 0
     with pytest.raises(ValidationError, match="frozen"):
-        batch.width = 1
+        batch.frame_width = 1
+
+
+def test_detection_batch_bounds_iterable_consumption_before_rejecting_oversize_result() -> None:
+    def oversize_detections():
+        for index in range(1025):
+            yield make_detection(class_id=index)
+        raise AssertionError("from_frame consumed beyond the rejection boundary")
+
+    with pytest.raises(ValidationError):
+        DetectionBatch.from_frame(
+            make_frame(),
+            model_artifact_id="model-artifact",
+            model_version="v1",
+            model_sha256=MODEL_SHA256,
+            detections=oversize_detections(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -240,10 +274,10 @@ def test_detection_batch_accepts_model_and_collection_boundaries() -> None:
         ("camera_external_id", ""),
         ("camera_external_id", "c" * 129),
         ("camera_external_id", "camera\x00id"),
-        ("width", 0),
-        ("width", 16_385),
-        ("height", 0),
-        ("height", 16_385),
+        ("frame_width", 0),
+        ("frame_width", 16_385),
+        ("frame_height", 0),
+        ("frame_height", 16_385),
         ("sequence_number", -1),
         ("sequence_number", 2**63),
         ("model_artifact_id", ""),
@@ -264,7 +298,7 @@ def test_detection_batch_rejects_invalid_boundaries(field: str, value: object) -
         DetectionBatch.model_validate(batch_data(**{field: value}))
 
 
-@pytest.mark.parametrize("field", ["width", "height", "sequence_number"])
+@pytest.mark.parametrize("field", ["frame_width", "frame_height", "sequence_number"])
 def test_detection_batch_rejects_python_integer_string_coercion(field: str) -> None:
     with pytest.raises(ValidationError):
         DetectionBatch.model_validate(batch_data(**{field: "2"}))
@@ -283,7 +317,7 @@ def test_detection_batch_json_deserializes_uuid_and_datetime_without_numeric_coe
     assert restored.session_id == SESSION
     assert restored.captured_at == datetime(2026, 9, 20, 12, tzinfo=UTC)
 
-    payload["width"] = "2"
+    payload["frame_width"] = "2"
     with pytest.raises(ValidationError):
         DetectionBatch.model_validate_json(json.dumps(payload))
 

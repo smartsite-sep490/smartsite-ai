@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from itertools import islice
 from typing import Literal, Self
 from uuid import UUID
 
@@ -56,8 +57,8 @@ class DetectionBatch(_StrictFrozenModel):
     session_id: UUID
     camera_external_id: str = Field(min_length=1, max_length=128, pattern=_NO_NUL_PATTERN)
     captured_at: datetime
-    width: int = Field(ge=1, le=16_384)
-    height: int = Field(ge=1, le=16_384)
+    frame_width: int = Field(ge=1, le=16_384)
+    frame_height: int = Field(ge=1, le=16_384)
     sequence_number: int = Field(ge=0, le=9_223_372_036_854_775_807)
     model_artifact_id: str = Field(min_length=1, max_length=128, pattern=_NO_NUL_PATTERN)
     model_version: str = Field(min_length=1, max_length=64, pattern=_NO_NUL_PATTERN)
@@ -107,11 +108,11 @@ class DetectionBatch(_StrictFrozenModel):
             session_id=frame.session_id,
             camera_external_id=frame.camera_external_id,
             captured_at=frame.captured_at,
-            width=frame.width,
-            height=frame.height,
+            frame_width=frame.width,
+            frame_height=frame.height,
             sequence_number=frame.sequence_number,
             model_artifact_id=model_artifact_id,
             model_version=model_version,
             model_sha256=model_sha256,
-            detections=tuple(detections),
+            detections=tuple(islice(detections, 1025)),
         )

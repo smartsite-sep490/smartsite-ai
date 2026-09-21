@@ -94,6 +94,24 @@ class FakeModel:
         return self._results
 
 
+class FakeImageFlags:
+    writeable = False
+
+
+class FakeImage:
+    def __init__(self, frame: FrameEnvelope) -> None:
+        self.shape = (frame.height, frame.width, 3)
+        self._buffer = frame.buffer
+        self.flags = FakeImageFlags()
+
+    def tobytes(self) -> bytes:
+        return self._buffer
+
+
+def fake_bgr_image(frame: FrameEnvelope) -> FakeImage:
+    return FakeImage(frame)
+
+
 def make_result(*, names: dict[int, str] | None = None) -> FakeResult:
     return FakeResult(
         FakeBoxes(
@@ -139,7 +157,7 @@ def test_load_is_explicit_and_prediction_uses_verified_path_and_frame_configurat
         constructed_paths.append(path)
         return model
 
-    runner = UltralyticsYoloRunner(model_factory=factory)
+    runner = UltralyticsYoloRunner(model_factory=factory, image_factory=fake_bgr_image)
 
     assert constructed_paths == []
 
@@ -166,7 +184,8 @@ def test_load_is_explicit_and_prediction_uses_verified_path_and_frame_configurat
 
 def test_predict_rejects_a_provider_class_name_that_disagrees_with_the_artifact() -> None:
     runner = UltralyticsYoloRunner(
-        model_factory=lambda _: FakeModel([make_result(names={0: "person", 1: "helmet"})])
+        model_factory=lambda _: FakeModel([make_result(names={0: "person", 1: "helmet"})]),
+        image_factory=fake_bgr_image,
     )
     runner.load(make_artifact())
 
@@ -194,7 +213,9 @@ def test_provider_prediction_exception_is_translated() -> None:
         def predict(self, source: object, **kwargs: object) -> list[FakeResult]:
             raise RuntimeError("CUDA unavailable")
 
-    runner = UltralyticsYoloRunner(model_factory=lambda _: FailingModel())
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: FailingModel(), image_factory=fake_bgr_image
+    )
     runner.load(make_artifact())
 
     with pytest.raises(DetectorUnavailableError, match="provider prediction failed") as exc_info:

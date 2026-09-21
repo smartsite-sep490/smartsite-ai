@@ -16,13 +16,20 @@ _MAX_RAW_DETECTIONS = 1_024
 _RAW_RESULT_LIMIT = _MAX_RAW_DETECTIONS + 1
 
 ModelFactory = Callable[[Path], object]
+ImageFactory = Callable[[FrameEnvelope], object]
 
 
 class UltralyticsYoloRunner:
     """Run a verified local Ultralytics model only after explicit loading."""
 
-    def __init__(self, *, model_factory: ModelFactory | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        model_factory: ModelFactory | None = None,
+        image_factory: ImageFactory | None = None,
+    ) -> None:
         self._model_factory = model_factory or _default_model_factory
+        self._image_factory = image_factory or _bgr_image
         self._model: object | None = None
         self._artifact: VerifiedModelArtifact | None = None
 
@@ -48,7 +55,7 @@ class UltralyticsYoloRunner:
         if frame.pixel_format != "BGR24":
             raise DetectorUnavailableError("Ultralytics runner requires BGR24 frames")
 
-        image = _bgr_image(frame)
+        image = self._image_factory(frame)
         try:
             results = model.predict(
                 source=image,

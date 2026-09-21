@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -80,6 +81,39 @@ class OpenCvFrameSource:
         if release is not None:
             release()
 
+    def _frame_to_envelope(self, frame: Any) -> FrameEnvelope:
+        shape = getattr(frame, "shape", None)
+        dtype = getattr(frame, "dtype", None)
+        if len(shape or ()) != 3:
+            raise SourceReadError("OpenCV frame must be a height x width x 3 BGR image")
+
+        height, width, channels = shape
+        if channels != 3 or width <= 0 or height <= 0:
+            raise SourceReadError("OpenCV frame must be a non-empty 3-channel BGR image")
+
+        if str(dtype) != "uint8":
+            raise SourceReadError("OpenCV frame must use uint8 BGR24 pixels")
+
+        if not getattr(frame, "flags", {}).get("C_CONTIGUOUS", False):
+            frame = frame.copy(order="C")
+
+        payload = frame.tobytes()
+        if self._session_id is None:
+            raise SourceReadError("OpenCV source is missing an active session")
+
+        envelope = FrameEnvelope(
+            stream_id=self.config.stream_id,
+            session_id=self._session_id,
+            camera_external_id=self.config.camera_external_id,
+            captured_at=datetime.now(UTC),
+            width=int(width),
+            height=int(height),
+            sequence_number=self._sequence_number,
+            payload=payload,
+        )
+        self._sequence_number += 1
+        return envelope
+
     async def connect(self) -> None:
         """Open the configured video source and start a fresh stream session."""
         await self.close()
@@ -92,8 +126,19 @@ class OpenCvFrameSource:
         self._is_connected = True
 
     async def read_frame(self) -> FrameEnvelope | None:
-        """Read one frame from the connected source."""
-        raise SourceReadError("OpenCV frame reading is not implemented yet")
+        """Read one decoded BGR24 frame from the connected source."""
+        if not self._is_connected or self._capture is None:
+            raise SourceReadError("OpenCV source is not connected")
+
+        try:
+            ok, frame = await asyncio.to_thread(self._capture.read)
+        except Exception as exc:
+            raise SourceReadError(f"OpenCV failed to read frame: {type(exc).__name__}") from exc
+
+        if not ok or frame is None:
+            return None
+
+        return self._frame_to_envelope(frame)
 
     async def close(self) -> None:
         """Release the source if it has been connected."""

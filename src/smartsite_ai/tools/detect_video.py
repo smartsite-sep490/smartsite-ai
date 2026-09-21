@@ -12,6 +12,7 @@ import asyncio
 import importlib.metadata
 import json
 import math
+import os
 import platform
 import sys
 from collections import Counter
@@ -21,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from smartsite_ai.inference.artifacts import (
@@ -109,6 +111,8 @@ def run_video_validation(
     if not class_map:
         raise VideoValidationError("class map must contain at least one class")
     _validate_class_map(class_map)
+    if dict(artifact.class_map) != dict(class_map):
+        raise VideoValidationError("class map does not match verified artifact")
 
     capture: CaptureProtocol | None = None
     writer: WriterProtocol | None = None
@@ -186,7 +190,7 @@ def run_video_validation(
                 raise VideoValidationError("detector inference failed") from error
             if not isinstance(batch, DetectionBatch):
                 raise VideoValidationError("detector returned an invalid detection batch")
-            _validate_batch_class_map(batch, class_map)
+            _validate_batch(batch, frame, artifact, class_map)
             try:
                 annotated_frame = renderer(source_frame, batch)
             except Exception as error:
@@ -244,22 +248,39 @@ def run_video_validation(
     except Exception as error:
         raise VideoValidationError("video validation failed") from error
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_errors: list[BaseException] = []
         if event_loop is not None:
-            event_loop.close()
+            try:
+                event_loop.close()
+            except BaseException as error:
+                cleanup_errors.append(error)
         if metadata_temp is not None:
-            _remove_if_exists(metadata_temp)
+            try:
+                _remove_if_exists(metadata_temp)
+            except BaseException as error:
+                cleanup_errors.append(error)
         if writer is not None and not writer_released:
             try:
                 _release_writer(writer)
+            except BaseException as error:
+                cleanup_errors.append(error)
             finally:
                 writer_released = True
         if capture is not None and not capture_released:
             try:
                 _release_capture(capture)
+            except BaseException as error:
+                cleanup_errors.append(error)
             finally:
                 capture_released = True
         if not completed and output_started:
-            _remove_if_exists(output_path)
+            try:
+                _remove_if_exists(output_path)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        if cleanup_errors and active_error is None:
+            raise VideoValidationError("video resource cleanup failed") from cleanup_errors[0]
 
 
 def validate_video(**kwargs: object) -> dict[str, object]:
@@ -285,17 +306,30 @@ def _validate_paths(
     input_resolved = input_path.resolve()
     output_resolved = output_path.resolve()
     metadata_resolved = metadata_output.resolve()
-    if input_resolved == output_resolved:
+    if input_resolved == output_resolved or _same_existing_file(input_path, output_path):
         raise VideoValidationError("input and output paths must differ")
-    if output_resolved == metadata_resolved:
+    if output_resolved == metadata_resolved or _same_existing_file(output_path, metadata_output):
         raise VideoValidationError("metadata and output paths must differ")
-    if input_resolved == metadata_resolved:
+    if input_resolved == metadata_resolved or _same_existing_file(input_path, metadata_output):
         raise VideoValidationError("metadata and input paths must differ")
+    if metadata_output.suffix.lower() != ".json":
+        raise VideoValidationError("metadata output extension must be .json")
+    if output_path.exists():
+        raise VideoValidationError("output video already exists")
     if not output_path.parent.exists() or not output_path.parent.is_dir():
         raise VideoValidationError("output directory does not exist")
     if not metadata_output.parent.exists() or not metadata_output.parent.is_dir():
         raise VideoValidationError("metadata directory does not exist")
     return input_path, output_path, metadata_output
+
+
+def _same_existing_file(first: Path, second: Path) -> bool:
+    if not first.exists() or not second.exists():
+        return False
+    try:
+        return os.path.samefile(first, second)
+    except (OSError, ValueError):
+        return False
 
 
 def _validate_class_map(class_map: Mapping[int, str]) -> None:
@@ -306,7 +340,38 @@ def _validate_class_map(class_map: Mapping[int, str]) -> None:
             raise VideoValidationError("class map names must be non-empty strings")
 
 
-def _validate_batch_class_map(batch: DetectionBatch, class_map: Mapping[int, str]) -> None:
+def _validate_batch(
+    batch: DetectionBatch,
+    frame: FrameEnvelope,
+    artifact: VerifiedModelArtifact,
+    class_map: Mapping[int, str],
+) -> None:
+    frame_identity = (
+        batch.stream_id,
+        batch.session_id,
+        batch.camera_external_id,
+        batch.captured_at,
+        batch.frame_width,
+        batch.frame_height,
+        batch.sequence_number,
+    )
+    expected_identity = (
+        frame.stream_id,
+        frame.session_id,
+        frame.camera_external_id,
+        frame.captured_at,
+        frame.width,
+        frame.height,
+        frame.sequence_number,
+    )
+    if frame_identity != expected_identity:
+        raise VideoValidationError("detector batch identity does not match frame")
+    if (
+        batch.model_artifact_id != artifact.artifact_id
+        or batch.model_version != artifact.version
+        or batch.model_sha256 != artifact.actual_sha256
+    ):
+        raise VideoValidationError("detector batch artifact does not match verified artifact")
     for detection in batch.detections:
         expected_name = class_map.get(detection.class_id)
         if expected_name != detection.class_name:
@@ -572,14 +637,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-source-url",
         "--source-url",
         dest="model_source_url",
-        default="https://local.invalid/model",
+        required=True,
         help="HTTPS provenance URL recorded in metadata",
     )
     parser.add_argument(
         "--model-license",
         "--license",
         dest="model_license",
-        default="UNSPECIFIED",
+        required=True,
         help="declared model license recorded in metadata",
     )
     parser.add_argument("--confidence-threshold", type=float, default=0.25)
@@ -598,6 +663,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     runner: UltralyticsYoloRunner | None = None
     try:
+        _validate_cli_provenance(args.model_source_url, args.model_license)
         class_map = _parse_class_map(args.class_map)
         spec = ModelArtifactSpec(
             artifact_id=args.model_artifact_id,
@@ -641,6 +707,14 @@ def run(argv: Sequence[str] | None = None) -> int:
     finally:
         if runner is not None:
             runner.close()
+
+
+def _validate_cli_provenance(source_url: str, license_name: str) -> None:
+    parsed_url = urlsplit(source_url)
+    if parsed_url.hostname is not None and parsed_url.hostname.endswith(".invalid"):
+        raise VideoValidationError("model provenance URL must identify a real source")
+    if license_name.strip().upper() in {"N/A", "TBD", "UNKNOWN", "UNSPECIFIED"}:
+        raise VideoValidationError("model license must be explicitly declared")
 
 
 __all__ = [

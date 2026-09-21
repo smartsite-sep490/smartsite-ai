@@ -94,7 +94,12 @@ class OpenCvFrameSource:
         if str(dtype) != "uint8":
             raise SourceReadError("OpenCV frame must use uint8 BGR24 pixels")
 
-        if not getattr(frame, "flags", {}).get("C_CONTIGUOUS", False):
+        flags = getattr(frame, "flags", None)
+        is_contiguous = getattr(flags, "c_contiguous", False)
+        if not is_contiguous and hasattr(flags, "get"):
+            is_contiguous = flags.get("C_CONTIGUOUS", False)
+
+        if not is_contiguous:
             frame = frame.copy(order="C")
 
         payload = frame.tobytes()

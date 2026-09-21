@@ -55,6 +55,32 @@ def test_verifies_two_byte_local_artifact_and_preserves_immutable_metadata(tmp_p
         verified.device = "cpu"
 
 
+def test_artifact_spec_is_frozen(tmp_path: Path) -> None:
+    spec = make_spec(tmp_path)
+
+    with pytest.raises(ValidationError, match="frozen"):
+        spec.device = "cpu"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("confidence_threshold", "0.25"),
+        ("image_size", ("640", 640)),
+    ],
+)
+def test_artifact_spec_rejects_coercible_python_values(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    artifact_path = tmp_path / "model.pt"
+    artifact_path.write_bytes(b"\x00\x01")
+
+    with pytest.raises(ValidationError) as exc_info:
+        ModelArtifactSpec.model_validate(artifact_data(artifact_path, **{field: value}))
+
+    assert any(error["loc"][0] == field for error in exc_info.value.errors())
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

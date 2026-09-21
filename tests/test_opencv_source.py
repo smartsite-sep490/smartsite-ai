@@ -328,3 +328,144 @@ def test_read_frame_copies_non_contiguous_frames(monkeypatch: pytest.MonkeyPatch
     assert envelope.width == 3
     assert envelope.height == 2
     assert envelope.payload == packed
+
+
+async def wait_until(predicate: Callable[[], bool], max_iterations: int = 2000) -> None:
+    for _ in range(max_iterations):
+        if predicate():
+            return
+        await asyncio.sleep(0)
+    raise TimeoutError("Predicate condition not met within bounded cooperative iterations")
+
+
+@pytest.mark.anyio
+async def test_stream_worker_stops_cleanly_after_finite_opencv_clip_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+    from smartsite_ai.ingestion.queue import QueueClosedError
+    from smartsite_ai.ingestion.status import StreamState
+    from smartsite_ai.ingestion.worker import StreamWorker
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[make_bgr_frame(2, 2, fill=1), make_bgr_frame(2, 2, fill=2)],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+    config = StreamConfig(
+        stream_id="clip-1",
+        camera_external_id="ext-clip-1",
+        source_url=r"D:\data\clip.mp4",
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+    frame1 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+    frame2 = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+    await wait_until(lambda: capture.release_calls == 1)
+
+    assert worker.state == StreamState.STOPPED
+    assert frame1.sequence_number == 0
+    assert frame2.sequence_number == 1
+    assert frame1.session_id == frame2.session_id
+    assert frame1.payload == bytes([1]) * 12
+    assert frame2.payload == bytes([2]) * 12
+    assert worker.snapshot().metrics.frames_enqueued == 2
+    assert worker.snapshot().metrics.reconnect_attempts == 0
+    with pytest.raises(QueueClosedError):
+        await worker.get_frame()
+
+
+@pytest.mark.anyio
+async def test_stream_worker_reconnects_live_opencv_source_after_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+    from smartsite_ai.ingestion.status import StreamState
+    from smartsite_ai.ingestion.testing import FakeSleeper
+    from smartsite_ai.ingestion.worker import StreamWorker
+
+    captures = [
+        FakeCapture(opened=True, frames=[make_bgr_frame(1, 1, fill=1)]),
+        FakeCapture(opened=True, frames=[make_bgr_frame(1, 1, fill=2)]),
+    ]
+
+    def capture_factory(_source: int | str) -> FakeCapture:
+        return captures.pop(0)
+
+    cv2 = FakeCv2(capture_factory)
+    install_fake_cv2(monkeypatch, cv2)
+    sleeper = FakeSleeper()
+    config = StreamConfig(
+        stream_id="live-1",
+        camera_external_id="ext-live-1",
+        source_url="rtsp://camera.local/live",
+        reconnect_initial_delay=1.0,
+        reconnect_backoff_factor=2.0,
+        reconnect_jitter=0.0,
+        max_consecutive_failures=2,
+    )
+    source = OpenCvFrameSource(config)
+    worker = StreamWorker(config=config, source=source, sleeper=sleeper)
+
+    await worker.start()
+    try:
+        first = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+        second = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+        await wait_until(lambda: worker.state == StreamState.ERROR)
+
+        assert first.sequence_number == 0
+        assert second.sequence_number == 0
+        assert first.session_id != second.session_id
+        assert worker.snapshot().metrics.connection_errors == 2
+        assert worker.snapshot().metrics.reconnect_attempts == 2
+        assert worker.snapshot().metrics.last_error == "connection_closed_eof"
+        assert sleeper.sleep_calls == [1.0]
+        assert cv2.video_capture_inputs == [
+            "rtsp://camera.local/live",
+            "rtsp://camera.local/live",
+        ]
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.anyio
+async def test_stream_worker_applies_sampling_to_opencv_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+    from smartsite_ai.ingestion.status import StreamState
+    from smartsite_ai.ingestion.worker import StreamWorker
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[
+            make_bgr_frame(1, 1, fill=1),
+            make_bgr_frame(1, 1, fill=2),
+            make_bgr_frame(1, 1, fill=3),
+        ],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+    config = StreamConfig(
+        stream_id="sampled-clip",
+        camera_external_id="ext-sampled-clip",
+        source_url=r"D:\data\clip.mp4",
+        target_fps=1.0,
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    worker = StreamWorker(config=config, source=source)
+
+    await worker.start()
+    received = await asyncio.wait_for(worker.get_frame(), timeout=1.0)
+    await wait_until(lambda: worker.state == StreamState.STOPPED)
+
+    status = worker.snapshot()
+    assert received.sequence_number == 0
+    assert status.metrics.frames_enqueued == 1
+    assert status.metrics.sampled_out_frames == 2
+    assert capture.read_calls == 4

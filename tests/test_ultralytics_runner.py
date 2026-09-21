@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 
 from smartsite_ai.inference.artifacts import VerifiedModelArtifact
-from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
+from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner, _bgr_image
 from smartsite_ai.inference.yolo import (
     DetectorUnavailableError,
     InferenceResultError,
@@ -146,6 +146,25 @@ def test_importing_runner_does_not_load_provider_runtime() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_bgr_image_returns_a_read_only_bgr24_view() -> None:
+    numpy = pytest.importorskip("numpy")
+    frame = make_frame()
+
+    image = _bgr_image(frame)
+
+    assert image.dtype == numpy.uint8
+    assert image.shape == (2, 4, 3)
+    assert image.tobytes() == bytes(range(24))
+    assert image.tolist() == [
+        [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]],
+        [[12, 13, 14], [15, 16, 17], [18, 19, 20], [21, 22, 23]],
+    ]
+    assert not image.flags.writeable
+    with pytest.raises(ValueError):
+        image[0, 0, 0] = 255
+    assert frame.buffer == bytes(range(24))
 
 
 def test_load_is_explicit_and_prediction_uses_verified_path_and_frame_configuration() -> None:

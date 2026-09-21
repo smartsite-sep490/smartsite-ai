@@ -1,0 +1,364 @@
+import json
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+import pytest
+
+from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
+from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.tools.detect_video import (
+    CAP_PROP_FPS,
+    CAP_PROP_FRAME_HEIGHT,
+    CAP_PROP_FRAME_WIDTH,
+    CAP_PROP_POS_MSEC,
+    VideoValidationError,
+    run_video_validation,
+)
+
+
+class FakeFrame:
+    def __init__(
+        self, width: int, height: int, value: int = 0, *, shape: tuple[int, ...] | None = None
+    ) -> None:
+        self.shape = shape or (height, width, 3)
+        self._payload = bytes([value]) * (width * height * 3)
+
+    def tobytes(self) -> bytes:
+        return self._payload
+
+
+class FakeCapture:
+    def __init__(
+        self,
+        frames: Iterable[tuple[float, FakeFrame]],
+        *,
+        opened: bool = True,
+        fps: float = 25.0,
+        width: float = 4.0,
+        height: float = 2.0,
+    ) -> None:
+        self.frames = list(frames)
+        self.opened = opened
+        self.properties = {
+            CAP_PROP_FPS: fps,
+            CAP_PROP_FRAME_WIDTH: width,
+            CAP_PROP_FRAME_HEIGHT: height,
+        }
+        self.current_timestamp = 0.0
+        self.release_count = 0
+
+    def isOpened(self) -> bool:
+        return self.opened
+
+    def get(self, prop: int) -> float:
+        if prop == CAP_PROP_POS_MSEC:
+            return self.current_timestamp
+        return self.properties[prop]
+
+    def read(self) -> tuple[bool, FakeFrame | None]:
+        if not self.frames:
+            return False, None
+        self.current_timestamp, frame = self.frames.pop(0)
+        return True, frame
+
+    def release(self) -> None:
+        self.release_count += 1
+
+
+class FakeWriter:
+    def __init__(self, *, opened: bool = True, output_path: Path | None = None) -> None:
+        self.opened = opened
+        self.output_path = output_path
+        self.frames: list[object] = []
+        self.release_count = 0
+        if output_path is not None:
+            output_path.write_bytes(b"incomplete video")
+
+    def isOpened(self) -> bool:
+        return self.opened
+
+    def write(self, frame: object) -> None:
+        self.frames.append(frame)
+
+    def release(self) -> None:
+        self.release_count += 1
+
+
+class FakeDetector:
+    def __init__(
+        self, batches: Iterable[DetectionBatch] | None = None, error: Exception | None = None
+    ) -> None:
+        self.batches = iter(batches or ())
+        self.error = error
+        self.frames: list[FrameEnvelope] = []
+
+    async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+        self.frames.append(frame)
+        if self.error is not None:
+            raise self.error
+        return next(self.batches)
+
+
+def make_batch(frame: FrameEnvelope, *names: str) -> DetectionBatch:
+    detections = tuple(
+        NormalizedDetection(
+            class_id=index,
+            class_name=name,
+            confidence=0.8 + index / 100,
+            bounding_box=NormalizedBoundingBox(x1=0.1, y1=0.2, x2=0.5, y2=0.8),
+        )
+        for index, name in enumerate(names)
+    )
+    return DetectionBatch.from_frame(
+        frame,
+        model_artifact_id="demo-model",
+        model_version="1.0",
+        model_sha256="a" * 64,
+        detections=detections,
+    )
+
+
+def make_frame_envelope(sequence: int, captured_at: datetime) -> FrameEnvelope:
+    return FrameEnvelope(
+        stream_id="video-validation",
+        session_id=UUID("00000000-0000-4000-8000-000000000001"),
+        camera_external_id="local-video",
+        captured_at=captured_at,
+        width=4,
+        height=2,
+        sequence_number=sequence,
+        payload=bytes(24),
+    )
+
+
+def make_artifact() -> Any:
+    from smartsite_ai.inference.artifacts import VerifiedModelArtifact
+
+    return VerifiedModelArtifact.model_validate(
+        {
+            "artifact_id": "demo-model",
+            "version": "2026.09.21",
+            "artifact_path": Path("C:/models/demo.pt"),
+            "sha256": "a" * 64,
+            "source_url": "https://models.example.test/demo.pt",
+            "license": "AGPL-3.0",
+            "class_map": ((0, "person"), (1, "helmet")),
+            "confidence_threshold": 0.25,
+            "iou_threshold": 0.45,
+            "image_size": (640, 640),
+            "device": "cpu",
+            "resolved_path": Path("C:/models/demo.pt"),
+            "actual_sha256": "a" * 64,
+        }
+    )
+
+
+def run_success(
+    tmp_path: Path,
+    *,
+    frames: Iterable[tuple[float, FakeFrame]] | None = None,
+    detector: FakeDetector | None = None,
+    capture: FakeCapture | None = None,
+    writer: FakeWriter | None = None,
+    renderer: Callable[[object, DetectionBatch], object] | None = None,
+) -> tuple[
+    dict[str, object], FakeCapture, FakeWriter, FakeDetector, list[tuple[object, DetectionBatch]]
+]:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "annotated.mp4"
+    metadata_path = tmp_path / "run.json"
+    input_path.write_bytes(b"input")
+    capture = capture or FakeCapture(
+        frames or ((0.0, FakeFrame(4, 2, 1)), (1_250.0, FakeFrame(4, 2, 2)))
+    )
+    detector = detector or FakeDetector()
+    render_calls: list[tuple[object, DetectionBatch]] = []
+    renderer = renderer or (lambda frame, batch: render_calls.append((frame, batch)) or frame)
+    writer = writer or FakeWriter(output_path=output_path)
+    result = run_video_validation(
+        input_path=input_path,
+        output_path=output_path,
+        metadata_output=metadata_path,
+        artifact=make_artifact(),
+        class_map={0: "person", 1: "helmet"},
+        detector=detector,
+        capture_factory=lambda _: capture,
+        writer_factory=lambda path, codec, fps, size: writer,
+        renderer=renderer,
+        monotonic_clock=iter((10.0, 12.5)).__next__,
+        utc_now_factory=lambda: datetime(2026, 9, 21, 12, tzinfo=UTC),
+    )
+    return result, capture, writer, detector, render_calls
+
+
+def test_success_builds_sequential_envelopes_renders_and_replaces_metadata_atomically(
+    tmp_path: Path,
+) -> None:
+    frames = [
+        (0.0, FakeFrame(4, 2, 1)),
+        (1_250.0, FakeFrame(4, 2, 2)),
+    ]
+    base = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    seed_frames = [
+        make_frame_envelope(0, base),
+        make_frame_envelope(1, base + timedelta(seconds=1.25)),
+    ]
+    detector = FakeDetector(
+        [make_batch(seed_frames[0], "person"), make_batch(seed_frames[1], "person", "helmet")]
+    )
+
+    result, capture, writer, seen_detector, render_calls = run_success(
+        tmp_path, frames=frames, detector=detector
+    )
+
+    assert [frame.sequence_number for frame in seen_detector.frames] == [0, 1]
+    assert len({frame.session_id for frame in seen_detector.frames}) == 1
+    assert all(frame.session_id != seed_frames[0].session_id for frame in seen_detector.frames)
+    assert [frame.captured_at for frame in seen_detector.frames] == [
+        base,
+        base + timedelta(seconds=1.25),
+    ]
+    assert [frame.payload for frame in seen_detector.frames] == [bytes([1]) * 24, bytes([2]) * 24]
+    assert [batch.frame_width for _, batch in render_calls] == [4, 4]
+    assert len(render_calls) == 2
+    assert writer.frames == [frame for frame, _ in render_calls]
+    assert result["frame_count"] == 2
+    assert result["detection_count"] == 3
+    assert result["detections_by_class"] == {"person": 2, "helmet": 1}
+    assert result["processing_fps"] == pytest.approx(0.8)
+    assert capture.release_count == 1
+    assert writer.release_count == 1
+    assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8")) == result
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing", "input video does not exist"),
+        ("directory", "input video must be a regular file"),
+        ("extension", "unsupported input video extension"),
+        ("input_output", "input and output paths must differ"),
+        ("metadata_output", "metadata and output paths must differ"),
+    ],
+)
+def test_invalid_paths_are_rejected_before_media_open(
+    tmp_path: Path, case: str, message: str
+) -> None:
+    input_path = tmp_path / "input.mp4"
+    input_path.write_bytes(b"input")
+    output_path = tmp_path / "annotated.mp4"
+    metadata_path = tmp_path / "run.json"
+    if case == "missing":
+        input_path.unlink()
+    elif case == "directory":
+        input_path.unlink()
+        input_path.mkdir()
+    elif case == "extension":
+        input_path.rename(tmp_path / "input.txt")
+        input_path = tmp_path / "input.txt"
+    elif case == "input_output":
+        output_path = input_path
+    elif case == "metadata_output":
+        metadata_path = output_path
+
+    opened = False
+
+    def capture_factory(_: Path) -> FakeCapture:
+        nonlocal opened
+        opened = True
+        return FakeCapture([])
+
+    with pytest.raises(VideoValidationError, match=message):
+        run_video_validation(
+            input_path=input_path,
+            output_path=output_path,
+            metadata_output=metadata_path,
+            artifact=make_artifact(),
+            class_map={0: "person"},
+            detector=FakeDetector(),
+            capture_factory=capture_factory,
+            writer_factory=lambda *_: FakeWriter(),
+            renderer=lambda frame, batch: frame,
+        )
+    assert opened is False
+
+
+@pytest.mark.parametrize(
+    "failure", ["capture", "fps", "dimensions", "writer", "shape", "inference", "empty"]
+)
+def test_all_media_and_processing_failures_release_resources_and_leave_no_metadata(
+    tmp_path: Path, failure: str
+) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "annotated.mp4"
+    metadata_path = tmp_path / "run.json"
+    input_path.write_bytes(b"input")
+    capture = FakeCapture(
+        [] if failure in {"capture", "empty"} else [(0.0, FakeFrame(4, 2))],
+        opened=failure != "capture",
+        fps=0.0 if failure == "fps" else 25.0,
+        width=0.0 if failure == "dimensions" else 4.0,
+    )
+    writer = FakeWriter(opened=failure != "writer")
+    detector = FakeDetector(error=RuntimeError("inference failed"))
+    if failure == "shape":
+        capture.frames = [(0.0, FakeFrame(4, 2, shape=(2, 4)))]
+    if failure == "empty":
+        capture.frames = []
+
+    def capture_factory(_: Path) -> FakeCapture:
+        return capture
+
+    def writer_factory(path: Path, codec: str, fps: float, size: tuple[int, int]) -> FakeWriter:
+        path.write_bytes(b"incomplete video")
+        writer.output_path = path
+        return writer
+
+    with pytest.raises(VideoValidationError):
+        run_video_validation(
+            input_path=input_path,
+            output_path=output_path,
+            metadata_output=metadata_path,
+            artifact=make_artifact(),
+            class_map={0: "person"},
+            detector=detector,
+            capture_factory=capture_factory,
+            writer_factory=writer_factory,
+            renderer=lambda frame, batch: frame,
+            monotonic_clock=lambda: 1.0,
+            utc_now_factory=lambda: datetime(2026, 9, 21, 12, tzinfo=UTC),
+        )
+
+    assert capture.release_count == 1
+    if failure in {"writer", "shape", "inference", "empty"}:
+        assert writer.release_count == 1
+    else:
+        assert writer.release_count == 0
+    assert not metadata_path.exists()
+    assert not output_path.exists()
+
+
+def test_existing_metadata_is_preserved_when_run_fails(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.mp4"
+    input_path.write_bytes(b"input")
+    metadata_path = tmp_path / "run.json"
+    metadata_path.write_text('{"status":"previous"}', encoding="utf-8")
+    capture = FakeCapture([(0.0, FakeFrame(4, 2))])
+
+    with pytest.raises(VideoValidationError):
+        run_video_validation(
+            input_path=input_path,
+            output_path=(tmp_path / "annotated.mp4"),
+            metadata_output=metadata_path,
+            artifact=make_artifact(),
+            class_map={0: "person"},
+            detector=FakeDetector(error=RuntimeError("boom")),
+            capture_factory=lambda _: capture,
+            writer_factory=lambda path, codec, fps, size: FakeWriter(output_path=path),
+            renderer=lambda frame, batch: frame,
+        )
+
+    assert metadata_path.read_text(encoding="utf-8") == '{"status":"previous"}'

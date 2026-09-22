@@ -20,6 +20,7 @@ from smartsite_ai.ingestion.envelope import FrameEnvelope
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 MODEL_SHA256 = "a" * 64
+FAKE_MODEL_PATH = Path("/models/yolo11s-ppe.pt").resolve()
 
 
 def make_frame(**overrides: object) -> FrameEnvelope:
@@ -43,7 +44,7 @@ def make_artifact(**overrides: object) -> VerifiedModelArtifact:
             "artifact_id": "yolo11s-ppe",
             "version": "2026.09.21",
             "model_family": "yolo11s",
-            "artifact_path": Path("C:/models/yolo11s-ppe.pt"),
+            "artifact_path": FAKE_MODEL_PATH,
             "sha256": MODEL_SHA256,
             "source_url": "https://models.example.test/yolo11s-ppe.pt",
             "license": "AGPL-3.0",
@@ -52,7 +53,7 @@ def make_artifact(**overrides: object) -> VerifiedModelArtifact:
             "iou_threshold": 0.45,
             "image_size": (640, 640),
             "device": "cuda:0",
-            "resolved_path": Path("C:/models/yolo11s-ppe.pt"),
+            "resolved_path": FAKE_MODEL_PATH,
             "actual_sha256": MODEL_SHA256,
             **overrides,
         }

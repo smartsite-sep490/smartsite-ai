@@ -177,12 +177,13 @@ def make_frame_envelope(sequence: int, captured_at: datetime) -> FrameEnvelope:
 def make_artifact() -> Any:
     from smartsite_ai.inference.artifacts import VerifiedModelArtifact
 
+    fake_model_path = (Path(__file__).resolve().parents[1] / "models" / "demo.pt").resolve()
     return VerifiedModelArtifact.model_validate(
         {
             "artifact_id": "demo-model",
             "version": "2026.09.21",
             "model_family": "yolo11s",
-            "artifact_path": Path("C:/models/demo.pt"),
+            "artifact_path": fake_model_path,
             "sha256": "a" * 64,
             "source_url": "https://models.example.test/demo.pt",
             "license": "AGPL-3.0",
@@ -191,7 +192,7 @@ def make_artifact() -> Any:
             "iou_threshold": 0.45,
             "image_size": (640, 640),
             "device": "cpu",
-            "resolved_path": Path("C:/models/demo.pt"),
+            "resolved_path": fake_model_path,
             "actual_sha256": "a" * 64,
         }
     )

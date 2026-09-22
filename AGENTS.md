@@ -56,7 +56,7 @@ Dependencies point inward. Domain models and protocols must not import FastAPI, 
 
 ## 5. Model and artifact rules
 
-- Model artifacts are configured by local/runtime path with version, source, checksum, license, class map, and evaluation reference.
+- Model artifacts are configured by local/runtime path with version, model family, source, checksum, license, class map, and evaluation reference.
 - Do not commit `.pt`, `.onnx`, `.engine`, embeddings, or other generated model artifacts.
 - Do not rely on implicit network downloads. Missing or mismatched artifacts make the inference worker/capability unavailable with a safe actionable reason. Base API readiness remains independent, unless a deployment profile explicitly declares that worker as a required dependency and exposes that requirement through a reviewed readiness contract.
 - Keep preprocessing, image size, thresholds, class mapping, and postprocessing versioned with the model configuration.

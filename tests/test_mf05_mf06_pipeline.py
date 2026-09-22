@@ -90,11 +90,9 @@ def test_pipeline_builds_technical_observations_without_authorization_decisions(
     assert [observation.type for observation in first.observations] == [
         "PERSON",
         "PPE",
-        "PPE",
     ]
     assert {observation.type for observation in second.observations} == {
         "PERSON",
-        "PPE",
         "ZONE_ENTRY",
     }
     wire = second.to_wire_dict()

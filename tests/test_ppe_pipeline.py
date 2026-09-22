@@ -98,12 +98,17 @@ def test_ppe_pipeline_accepts_the_reference_checkpoint_hardhat_class_name() -> N
 
     assert [(observation.ppe_item, observation.status) for observation in observations] == [
         ("HARD_HAT", "PRESENT"),
-        ("SAFETY_VEST", "MISSING"),
     ]
 
 
-def test_ppe_pipeline_emits_missing_only_for_an_observable_person() -> None:
-    visible = IoUPersonTracker().update(batch(detection("person", (0.20, 0.10, 0.40, 0.80))))
+def test_ppe_pipeline_requires_an_explicit_negative_class_for_missing() -> None:
+    visible = IoUPersonTracker().update(
+        batch(
+            detection("person", (0.20, 0.10, 0.40, 0.80)),
+            detection("NO-Hardhat", (0.24, 0.12, 0.34, 0.25)),
+            detection("NO-Safety Vest", (0.23, 0.34, 0.38, 0.70)),
+        )
+    )
     clipped = IoUPersonTracker().update(batch(detection("person", (0.00, 0.10, 0.20, 0.80))))
 
     visible_observations = PpePipeline().process(visible, region())

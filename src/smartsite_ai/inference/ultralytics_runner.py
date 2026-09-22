@@ -1,5 +1,6 @@
 """Explicit-lifecycle Ultralytics adapter for packed BGR24 frames."""
 
+import os
 from collections.abc import Callable, Mapping
 from math import isfinite
 from pathlib import Path
@@ -40,6 +41,8 @@ class UltralyticsYoloRunner:
 
         try:
             model = self._model_factory(artifact.resolved_path)
+        except DetectorUnavailableError:
+            raise
         except Exception as error:
             raise DetectorUnavailableError("Ultralytics model construction failed") from error
 
@@ -61,7 +64,7 @@ class UltralyticsYoloRunner:
                 source=image,
                 conf=artifact.confidence_threshold,
                 iou=artifact.iou_threshold,
-                imgsz=artifact.image_size,
+                imgsz=_provider_image_size(artifact.image_size),
                 device=artifact.device,
                 verbose=False,
             )
@@ -83,11 +86,92 @@ class UltralyticsYoloRunner:
         self._artifact = None
 
 
+def _provider_image_size(image_size: tuple[int, int]) -> tuple[int, int]:
+    """Convert a declared `(width, height)` pair into Ultralytics `[height, width]`."""
+
+    width, height = image_size
+    return (height, width)
+
+
 def _default_model_factory(path: Path) -> object:
-    """Create the provider model without allowing implicit import-time loading."""
+    """Load one verified checkpoint without provider path rewrite, download, or install."""
+
+    _require_exact_local_file(path)
+    try:
+        return _load_exact_ultralytics_model(path)
+    except DetectorUnavailableError:
+        raise
+    except Exception as error:
+        raise DetectorUnavailableError("Ultralytics model construction failed") from error
+
+
+def _require_exact_local_file(path: Path) -> None:
+    """Reject a verified path that is no longer the exact regular file that was checked."""
+
+    if not path.is_absolute():
+        raise DetectorUnavailableError("verified model artifact path must be absolute")
+    if path.is_symlink() or not path.is_file():
+        raise DetectorUnavailableError("verified model artifact is unavailable")
+
+
+def _load_exact_ultralytics_model(path: Path) -> object:
+    """Construct YOLO from the exact local path with network and auto-install closed."""
+
+    import ultralytics.nn.tasks as tasks
+    import ultralytics.utils as ultralytics_utils
+    import ultralytics.utils.checks as checks
+    import ultralytics.utils.downloads as downloads
     from ultralytics import YOLO
 
-    return YOLO(path)
+    exact = Path(path)
+
+    def exact_asset(file: str | Path, *_args: object, **_kwargs: object) -> str:
+        if _path_key(file) != _path_key(exact):
+            raise DetectorUnavailableError("provider requested a different model file")
+        _require_exact_local_file(exact)
+        return str(exact)
+
+    original_requirements = checks.check_requirements
+
+    def offline_requirements(*args: object, **kwargs: object) -> bool:
+        install = bool(kwargs.get("install", True))
+        satisfied = original_requirements(*args, **{**kwargs, "install": False})
+        if install and satisfied is False:
+            raise DetectorUnavailableError(
+                "verified model requires a missing dependency and auto-install is disabled"
+            )
+        return bool(satisfied)
+
+    previous_autoinstall = os.environ.get("YOLO_AUTOINSTALL")
+    original_download = downloads.attempt_download_asset
+    original_tasks_requirements = tasks.check_requirements
+    original_utils_autoinstall = ultralytics_utils.AUTOINSTALL
+    original_checks_autoinstall = checks.AUTOINSTALL
+    os.environ["YOLO_AUTOINSTALL"] = "false"
+    downloads.attempt_download_asset = exact_asset
+    checks.check_requirements = offline_requirements
+    tasks.check_requirements = offline_requirements
+    ultralytics_utils.AUTOINSTALL = False
+    checks.AUTOINSTALL = False
+    try:
+        _require_exact_local_file(exact)
+        return YOLO(exact)
+    finally:
+        downloads.attempt_download_asset = original_download
+        checks.check_requirements = original_requirements
+        tasks.check_requirements = original_tasks_requirements
+        ultralytics_utils.AUTOINSTALL = original_utils_autoinstall
+        checks.AUTOINSTALL = original_checks_autoinstall
+        if previous_autoinstall is None:
+            os.environ.pop("YOLO_AUTOINSTALL", None)
+        else:
+            os.environ["YOLO_AUTOINSTALL"] = previous_autoinstall
+
+
+def _path_key(path: str | Path) -> str:
+    """Compare provider paths without resolving links or removing characters."""
+
+    return os.path.normcase(os.path.normpath(str(path)))
 
 
 def _bgr_image(frame: FrameEnvelope) -> object:

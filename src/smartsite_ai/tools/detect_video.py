@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
 import importlib.metadata
 import json
 import math
 import os
 import platform
+import re
 import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
@@ -46,6 +48,7 @@ CAP_PROP_FPS = 5
 
 SUPPORTED_INPUT_EXTENSIONS = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4"})
 OUTPUT_CODEC = "mp4v"
+_CLASS_ID_TEXT = re.compile(r"0|[1-9][0-9]*")
 
 
 class VideoValidationError(RuntimeError):
@@ -93,6 +96,7 @@ def run_video_validation(
     utc_now_factory: UtcNowFactory = lambda: datetime.now(UTC),
     session_id_factory: SessionIdFactory = uuid4,
     runtime_versions: Mapping[str, str] | None = None,
+    configuration_paths: Sequence[Path] = (),
 ) -> dict[str, object]:
     """Validate one local video through an injected detector and media boundary.
 
@@ -107,6 +111,7 @@ def run_video_validation(
         input_path=input_path,
         output_path=output_path,
         metadata_output=metadata_output,
+        configuration_paths=configuration_paths,
     )
     if not class_map:
         raise VideoValidationError("class map must contain at least one class")
@@ -117,6 +122,7 @@ def run_video_validation(
     capture: CaptureProtocol | None = None
     writer: WriterProtocol | None = None
     event_loop: asyncio.AbstractEventLoop | None = None
+    executor: concurrent.futures.ThreadPoolExecutor | None = None
     metadata_temp: Path | None = None
     output_started = False
     capture_released = False
@@ -157,8 +163,14 @@ def run_video_validation(
         if not _is_opened(writer):
             raise VideoValidationError("could not open output video writer")
 
-        # One loop is owned by this synchronous command, rather than one loop per frame.
+        # One loop and one inference executor are owned by this synchronous command.
+        # Ctrl+C must drain that executor before the caller releases the model.
         event_loop = asyncio.new_event_loop()
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="smartsite-video-validation"
+        )
+        if setter := getattr(event_loop, "set_default_executor", None):
+            setter(executor)
         while True:
             try:
                 has_frame, source_frame = capture.read()
@@ -250,11 +262,7 @@ def run_video_validation(
     finally:
         active_error = sys.exc_info()[1]
         cleanup_errors: list[BaseException] = []
-        if event_loop is not None:
-            try:
-                event_loop.close()
-            except BaseException as error:
-                cleanup_errors.append(error)
+        cleanup_errors.extend(_shutdown_inference(event_loop, executor))
         if metadata_temp is not None:
             try:
                 _remove_if_exists(metadata_temp)
@@ -289,8 +297,53 @@ def validate_video(**kwargs: object) -> dict[str, object]:
     return run_video_validation(**cast(dict[str, Any], kwargs))
 
 
+def _shutdown_inference(
+    event_loop: asyncio.AbstractEventLoop | None,
+    executor: concurrent.futures.Executor | None,
+) -> list[BaseException]:
+    """Cancel pending inference work and join its thread before the loop closes."""
+
+    errors: list[BaseException] = []
+    if event_loop is not None:
+        try:
+            is_closed = getattr(event_loop, "is_closed", None)
+            closed = bool(is_closed()) if callable(is_closed) else False
+            if not closed:
+                pending: list[asyncio.Task[object]] = []
+                try:
+                    pending = [task for task in asyncio.all_tasks(event_loop) if not task.done()]
+                except (RuntimeError, TypeError):
+                    pending = []
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    event_loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                shutdown_executor = getattr(event_loop, "shutdown_default_executor", None)
+                if shutdown_executor is not None:
+                    event_loop.run_until_complete(shutdown_executor())
+                shutdown_generators = getattr(event_loop, "shutdown_asyncgens", None)
+                if shutdown_generators is not None:
+                    event_loop.run_until_complete(shutdown_generators())
+        except BaseException as error:
+            errors.append(error)
+        try:
+            event_loop.close()
+        except BaseException as error:
+            errors.append(error)
+    if executor is not None:
+        try:
+            executor.shutdown(wait=True, cancel_futures=True)
+        except BaseException as error:
+            errors.append(error)
+    return errors
+
+
 def _validate_paths(
-    *, input_path: Path, output_path: Path, metadata_output: Path
+    *,
+    input_path: Path,
+    output_path: Path,
+    metadata_output: Path,
+    configuration_paths: Sequence[Path] = (),
 ) -> tuple[Path, Path, Path]:
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -312,6 +365,11 @@ def _validate_paths(
         raise VideoValidationError("metadata and output paths must differ")
     if input_resolved == metadata_resolved or _same_existing_file(input_path, metadata_output):
         raise VideoValidationError("metadata and input paths must differ")
+    _reject_configuration_overwrites(
+        output_path=output_path,
+        metadata_output=metadata_output,
+        configuration_paths=configuration_paths,
+    )
     if metadata_output.suffix.lower() != ".json":
         raise VideoValidationError("metadata output extension must be .json")
     if output_path.exists():
@@ -321,6 +379,43 @@ def _validate_paths(
     if not metadata_output.parent.exists() or not metadata_output.parent.is_dir():
         raise VideoValidationError("metadata directory does not exist")
     return input_path, output_path, metadata_output
+
+
+def _reject_configuration_overwrites(
+    *,
+    output_path: Path,
+    metadata_output: Path,
+    configuration_paths: Sequence[Path],
+) -> None:
+    """Reject a destination that would replace the class map, model, or input."""
+
+    for configuration_path in configuration_paths:
+        if _identifies_same_path(configuration_path, metadata_output) or _identifies_same_path(
+            configuration_path, output_path
+        ):
+            raise VideoValidationError("output path must not replace an input configuration file")
+
+
+def _absolute_cli_path(path: Path) -> Path:
+    """Make a CLI path absolute without resolving a symlink away."""
+
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return Path.cwd() / path
+
+
+def _identifies_same_path(first: Path, second: Path) -> bool:
+    """Return whether two paths name the same file, including unresolved aliases."""
+
+    if _same_existing_file(first, second):
+        return True
+    try:
+        return os.path.normcase(str(first.resolve())) == os.path.normcase(str(second.resolve()))
+    except OSError:
+        left = os.path.normcase(os.path.normpath(str(_absolute_cli_path(first))))
+        right = os.path.normcase(os.path.normpath(str(_absolute_cli_path(second))))
+        return left == right
 
 
 def _same_existing_file(first: Path, second: Path) -> bool:
@@ -500,6 +595,7 @@ def _build_metadata(
         "artifact": {
             "artifact_id": artifact.artifact_id,
             "version": artifact.version,
+            "model_family": artifact.model_family,
             "sha256": artifact.actual_sha256,
             "license": artifact.license,
             "source_url": artifact.source_url,
@@ -575,18 +671,46 @@ def _make_renderer() -> Renderer:
     return render
 
 
+class _JsonObject(list[tuple[object, object]]):
+    """JSON object pairs, including duplicates that ``json.loads`` would otherwise drop."""
+
+
+def _json_object_pairs(pairs: list[tuple[object, object]]) -> _JsonObject:
+    keys = [key for key, _value in pairs]
+    if len(keys) != len(set(keys)):
+        raise VideoValidationError("class map IDs must be unique")
+    return _JsonObject(pairs)
+
+
+def _strict_class_id(raw_id: object) -> int:
+    """Accept a JSON integer or a canonical decimal string, never a bool or fraction."""
+
+    if isinstance(raw_id, bool | float):
+        raise VideoValidationError("class map IDs must be integers")
+    if isinstance(raw_id, int):
+        return raw_id
+    if isinstance(raw_id, str) and _CLASS_ID_TEXT.fullmatch(raw_id):
+        return int(raw_id)
+    raise VideoValidationError("class map IDs must be integers")
+
+
 def _parse_class_map(path: Path) -> dict[int, str]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_json_object_pairs)
+    except VideoValidationError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise VideoValidationError("class map JSON could not be read") from error
-    if isinstance(value, Mapping):
-        pairs = value.items()
+    if isinstance(value, _JsonObject):
+        pairs = list(value)
     elif isinstance(value, list):
         pairs = []
         for item in value:
-            if isinstance(item, Mapping) and set(item) == {"id", "name"}:
-                pairs.append((item["id"], item["name"]))
+            if isinstance(item, _JsonObject):
+                mapping = dict(item)
+                if set(mapping) != {"id", "name"}:
+                    raise VideoValidationError("class map JSON must contain id/name pairs")
+                pairs.append((mapping["id"], mapping["name"]))
             elif isinstance(item, (list, tuple)) and len(item) == 2:
                 pairs.append((item[0], item[1]))
             else:
@@ -595,10 +719,7 @@ def _parse_class_map(path: Path) -> dict[int, str]:
         raise VideoValidationError("class map JSON must be an object or list")
     result: dict[int, str] = {}
     for raw_id, raw_name in pairs:
-        try:
-            class_id = int(raw_id)
-        except (TypeError, ValueError) as error:
-            raise VideoValidationError("class map IDs must be integers") from error
+        class_id = _strict_class_id(raw_id)
         if class_id in result:
             raise VideoValidationError("class map IDs must be unique")
         if not isinstance(raw_name, str):
@@ -627,6 +748,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, required=True, help="local model weight file")
     parser.add_argument("--model-artifact-id", required=True, help="stable model artifact ID")
     parser.add_argument("--model-version", required=True, help="model version")
+    parser.add_argument(
+        "--model-family",
+        required=True,
+        help="artifact family recorded in metadata, such as yolo11s or yolov8",
+    )
     parser.add_argument("--model-sha256", required=True, help="expected lowercase SHA-256")
     parser.add_argument("--class-map", type=Path, required=True, help="JSON class map")
     parser.add_argument("--output", type=Path, required=True, help="annotated .mp4 output")
@@ -650,7 +776,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence-threshold", type=float, default=0.25)
     parser.add_argument("--iou-threshold", type=float, default=0.45)
     parser.add_argument(
-        "--image-size", type=int, nargs=2, default=(640, 640), metavar=("WIDTH", "HEIGHT")
+        "--image-size",
+        type=int,
+        nargs=2,
+        default=(640, 640),
+        metavar=("WIDTH", "HEIGHT"),
+        help="inference width then height; the provider receives height then width",
     )
     parser.add_argument("--device", default="cpu", help="inference device passed to Ultralytics")
     return parser
@@ -665,10 +796,17 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_cli_provenance(args.model_source_url, args.model_license)
         class_map = _parse_class_map(args.class_map)
+        model_path = _absolute_cli_path(args.model)
+        _reject_configuration_overwrites(
+            output_path=args.output,
+            metadata_output=args.metadata_output,
+            configuration_paths=(args.class_map, model_path, args.input),
+        )
         spec = ModelArtifactSpec(
             artifact_id=args.model_artifact_id,
             version=args.model_version,
-            artifact_path=args.model.resolve(),
+            model_family=args.model_family,
+            artifact_path=model_path,
             sha256=args.model_sha256,
             source_url=args.model_source_url,
             license=args.model_license,
@@ -693,6 +831,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             writer_factory=_make_writer,
             renderer=_make_renderer(),
             runtime_versions=_runtime_versions(),
+            configuration_paths=(args.class_map, model_path, args.input),
         )
         return 0
     except (ArtifactValidationError, VideoValidationError, OSError, ValueError) as error:

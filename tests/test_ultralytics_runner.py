@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import sys
@@ -8,11 +9,16 @@ from uuid import UUID
 import pytest
 
 from smartsite_ai.inference.artifacts import VerifiedModelArtifact
-from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner, _bgr_image
+from smartsite_ai.inference.ultralytics_runner import (
+    UltralyticsYoloRunner,
+    _bgr_image,
+    _default_model_factory,
+)
 from smartsite_ai.inference.yolo import (
     DetectorUnavailableError,
     InferenceResultError,
     RawYoloDetection,
+    Yolo11Detector,
 )
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
@@ -26,6 +32,7 @@ def make_artifact(**overrides: object) -> VerifiedModelArtifact:
         {
             "artifact_id": "yolo11s-ppe",
             "version": "2026.09.21",
+            "model_family": "yolo11s",
             "artifact_path": Path("C:/models/yolo11s-ppe.pt"),
             "sha256": MODEL_SHA256,
             "source_url": "https://models.example.test/yolo11s-ppe.pt",
@@ -254,3 +261,110 @@ def test_close_releases_references_and_allows_a_new_explicit_load() -> None:
     with pytest.raises(DetectorUnavailableError, match="not loaded"):
         runner.predict(make_frame())
     runner.load(artifact)
+
+
+def test_rectangular_image_size_is_passed_as_provider_height_then_width() -> None:
+    artifact = make_artifact(image_size=(1280, 736))
+    model = FakeModel([make_result()])
+    runner = UltralyticsYoloRunner(model_factory=lambda _: model, image_factory=fake_bgr_image)
+
+    runner.load(artifact)
+    runner.predict(make_frame())
+
+    assert model.calls[0][1]["imgsz"] == (736, 1280)
+
+
+def test_composed_detector_preserves_provider_result_errors() -> None:
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(
+                    xyxy=[[1.0, 1.0, 2.0, 2.0]],
+                    confidence=[float("nan")],
+                    class_ids=[0.0],
+                ),
+                {0: "person", 1: "hard_hat"},
+            )
+        ]
+    )
+    runner = UltralyticsYoloRunner(model_factory=lambda _: model, image_factory=fake_bgr_image)
+    runner.load(make_artifact())
+    detector = Yolo11Detector(make_artifact(), runner)
+
+    with pytest.raises(InferenceResultError, match="finite"):
+        asyncio.run(detector.detect(make_frame()))
+
+
+def test_removed_verified_file_fails_without_opening_the_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "model.pt"
+    artifact.write_bytes(b"weights")
+    artifact.unlink()
+
+    def refuse_network(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider opened the network")
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse_network)
+
+    with pytest.raises(DetectorUnavailableError, match="unavailable"):
+        _default_model_factory(artifact)
+
+
+def test_apostrophe_path_reaches_the_provider_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("ultralytics")
+    real_dir = tmp_path / "O'Brien"
+    real_dir.mkdir()
+    real = real_dir / "model.pt"
+    real.write_bytes(b"exact-bytes")
+    decoy_dir = tmp_path / "OBrien"
+    decoy_dir.mkdir()
+    decoy = decoy_dir / "model.pt"
+    decoy.write_bytes(b"decoy-bytes")
+    import ultralytics.nn.tasks as tasks
+    import ultralytics.utils.downloads as downloads
+
+    loaded: list[Path] = []
+
+    def record_load(file: object, *_args: object, **_kwargs: object) -> None:
+        loaded.append(Path(str(file)))
+        raise RuntimeError("stop after the exact path is selected")
+
+    def refuse_download(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider attempted a download")
+
+    monkeypatch.setattr(tasks, "torch_load", record_load)
+    monkeypatch.setattr(downloads, "safe_download", refuse_download)
+
+    with pytest.raises(DetectorUnavailableError, match="construction failed"):
+        _default_model_factory(real)
+
+    assert len(loaded) == 1
+    assert os.path.normcase(str(loaded[0])) == os.path.normcase(str(real))
+    assert decoy.read_bytes() == b"decoy-bytes"
+
+
+def test_missing_checkpoint_dependency_does_not_autoinstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("ultralytics")
+    artifact = tmp_path / "model.pt"
+    artifact.write_bytes(b"placeholder")
+    import ultralytics.nn.tasks as tasks
+
+    def missing_dependency(*_args: object, **_kwargs: object) -> None:
+        raise ModuleNotFoundError(
+            "No module named 'smartsite_missing_provider_dep'",
+            name="smartsite_missing_provider_dep",
+        )
+
+    def refuse_install(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("provider attempted to install a package")
+
+    monkeypatch.setattr(tasks, "torch_load", missing_dependency)
+    monkeypatch.setattr(subprocess, "check_output", refuse_install)
+
+    with pytest.raises(DetectorUnavailableError, match="auto-install"):
+        _default_model_factory(artifact)

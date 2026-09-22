@@ -1,7 +1,7 @@
 # Model artifacts
 
 Do not commit weights. Keep every runtime artifact local and record its source, exact version,
-SHA-256, license status, class map, configuration, and evaluation evidence. The selected
+SHA-256, model family, license status, class map, configuration, and evaluation evidence. The selected
 implementation baseline for MF05/MF06 is YOLO11s. No validated PPE checkpoint has been selected,
 trained, or acquired for SmartSite. RF-DETR Nano/Small and YOLO26s are optional benchmark
 challengers. InsightFace remains an identity candidate without a selected model or enrollment

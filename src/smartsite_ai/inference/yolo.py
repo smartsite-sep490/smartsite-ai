@@ -63,6 +63,8 @@ class Yolo11Detector:
 
         try:
             raw_detections = await asyncio.to_thread(self._predict_rows, frame)
+        except InferenceResultError:
+            raise
         except Exception as error:
             raise DetectorUnavailableError("YOLO runner prediction failed") from error
 

@@ -35,6 +35,14 @@ class ArtifactNotFoundError(ArtifactValidationError):
 class ArtifactChecksumMismatchError(ArtifactValidationError):
     """The local model artifact does not match its declared checksum."""
 
+    def __init__(self, expected_sha256: str, actual_sha256: str) -> None:
+        self.expected_sha256 = expected_sha256
+        self.actual_sha256 = actual_sha256
+        super().__init__(
+            "model artifact checksum does not match declared SHA-256: "
+            f"expected {expected_sha256}, actual {actual_sha256}"
+        )
+
 
 class _StrictFrozenModel(BaseModel):
     model_config = ConfigDict(
@@ -50,6 +58,7 @@ class ModelArtifactSpec(_StrictFrozenModel):
 
     artifact_id: str = Field(min_length=1, max_length=128, pattern=_NO_NUL_PATTERN)
     version: str = Field(min_length=1, max_length=64, pattern=_NO_NUL_PATTERN)
+    model_family: str = Field(min_length=1, max_length=64, pattern=_NO_NUL_PATTERN)
     artifact_path: Path
     sha256: str = Field(pattern=_SHA256_PATTERN)
     source_url: str = Field(min_length=1, max_length=2048, pattern=_NO_NUL_PATTERN)
@@ -108,9 +117,7 @@ def verify_model_artifact(spec: ModelArtifactSpec) -> VerifiedModelArtifact:
     resolved_path = artifact_path.resolve(strict=True)
     actual_sha256 = _sha256_file(resolved_path)
     if not hmac.compare_digest(spec.sha256, actual_sha256):
-        raise ArtifactChecksumMismatchError(
-            "model artifact checksum does not match declared SHA-256"
-        )
+        raise ArtifactChecksumMismatchError(spec.sha256, actual_sha256)
 
     return VerifiedModelArtifact.model_validate(
         {

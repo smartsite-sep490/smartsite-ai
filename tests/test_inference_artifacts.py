@@ -22,6 +22,7 @@ def artifact_data(artifact_path: Path, **overrides: object) -> dict[str, object]
     return {
         "artifact_id": "yolo11s-ppe",
         "version": "2026.09.21",
+        "model_family": "yolo11s",
         "artifact_path": artifact_path,
         "sha256": sha256,
         "source_url": "https://models.example.test/yolo11s-ppe.pt",
@@ -48,6 +49,7 @@ def test_verifies_two_byte_local_artifact_and_preserves_immutable_metadata(tmp_p
 
     assert verified.artifact_id == "yolo11s-ppe"
     assert verified.version == "2026.09.21"
+    assert verified.model_family == "yolo11s"
     assert verified.resolved_path == (tmp_path / "model.pt").resolve()
     assert verified.actual_sha256 == hashlib.sha256(b"\x00\x01").hexdigest()
     assert verified.class_map == ((0, "person"), (1, "hard_hat"))
@@ -88,6 +90,8 @@ def test_artifact_spec_rejects_coercible_python_values(
         ("artifact_id", "artifact\x00id"),
         ("version", ""),
         ("version", "version\x00one"),
+        ("model_family", ""),
+        ("model_family", "yolo\x0011s"),
         ("sha256", "A" * 64),
         ("sha256", "a" * 63),
         ("sha256", "g" * 64),
@@ -156,6 +160,12 @@ def test_verification_rejects_checksum_mismatch_without_exposing_file_content(
     with pytest.raises(ArtifactChecksumMismatchError) as exc_info:
         verify_model_artifact(spec)
 
+    expected = "a" * 64
+    actual = hashlib.sha256(b"\x00\x01").hexdigest()
+    assert exc_info.value.expected_sha256 == expected
+    assert exc_info.value.actual_sha256 == actual
+    assert expected in str(exc_info.value)
+    assert actual in str(exc_info.value)
     assert "\x00\x01" not in str(exc_info.value)
 
 

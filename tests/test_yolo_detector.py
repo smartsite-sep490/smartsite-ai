@@ -42,6 +42,7 @@ def make_artifact(**overrides: object) -> VerifiedModelArtifact:
         {
             "artifact_id": "yolo11s-ppe",
             "version": "2026.09.21",
+            "model_family": "yolo11s",
             "artifact_path": Path("C:/models/yolo11s-ppe.pt"),
             "sha256": MODEL_SHA256,
             "source_url": "https://models.example.test/yolo11s-ppe.pt",

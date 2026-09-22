@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import threading
+import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -179,6 +181,7 @@ def make_artifact() -> Any:
         {
             "artifact_id": "demo-model",
             "version": "2026.09.21",
+            "model_family": "yolo11s",
             "artifact_path": Path("C:/models/demo.pt"),
             "sha256": "a" * 64,
             "source_url": "https://models.example.test/demo.pt",
@@ -604,6 +607,8 @@ def _required_cli_args(tmp_path: Path) -> list[str]:
         "demo-model",
         "--model-version",
         "2026.09.21",
+        "--model-family",
+        "yolo11s",
         "--model-sha256",
         "a" * 64,
         "--class-map",
@@ -650,3 +655,179 @@ def test_cli_rejects_placeholder_provenance_before_model_or_video_work(
 
     assert detect_video.run(args) == 1
     assert "provenance" in capsys.readouterr().err
+
+
+def test_cli_rejects_a_symlink_model_before_provider_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "model.pt"
+    target.write_bytes(b"weight")
+    link = tmp_path / "model-link.pt"
+    try:
+        link.symlink_to(target)
+    except OSError as error:
+        pytest.skip(f"symlinks are unavailable on this platform: {error}")
+    (tmp_path / "classes.json").write_text('{"0": "person"}\n', encoding="utf-8")
+    constructed: list[str] = []
+
+    class RecordingRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            constructed.append("init")
+
+        def load(self, _artifact: object) -> None:
+            constructed.append("load")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(detect_video, "UltralyticsYoloRunner", RecordingRunner)
+    monkeypatch.chdir(tmp_path)
+    args = [
+        "--input",
+        "input.mp4",
+        "--model",
+        "model-link.pt",
+        "--model-artifact-id",
+        "demo-model",
+        "--model-version",
+        "2026.09.21",
+        "--model-family",
+        "yolo11s",
+        "--model-sha256",
+        "a" * 64,
+        "--class-map",
+        "classes.json",
+        "--output",
+        "annotated.mp4",
+        "--metadata-output",
+        "run.json",
+        "--model-source-url",
+        "https://models.example.test/demo.pt",
+        "--model-license",
+        "AGPL-3.0",
+    ]
+
+    assert detect_video.run(args) == 1
+    assert constructed == []
+    assert "symlink" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"0": "person", "0": "helmet"}\n',
+        '[[true, "helmet"]]\n',
+        '[[0.9, "person"]]\n',
+        '[[1.0, "person"]]\n',
+    ],
+)
+def test_cli_rejects_ambiguous_class_map_values(
+    tmp_path: Path, payload: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "classes.json").write_text(payload, encoding="utf-8")
+    args = _required_cli_args(tmp_path) + [
+        "--model-source-url",
+        "https://models.example.test/demo.pt",
+        "--model-license",
+        "AGPL-3.0",
+    ]
+
+    assert detect_video.run(args) == 1
+    assert "class map" in capsys.readouterr().err
+
+
+def test_class_map_parser_accepts_only_canonical_integer_ids(tmp_path: Path) -> None:
+    path = tmp_path / "classes.json"
+    path.write_text('{"0": "person", "1": "helmet"}\n', encoding="utf-8")
+
+    assert detect_video._parse_class_map(path) == {0: "person", 1: "helmet"}
+
+    path.write_text('[[0, "person"], ["1", "helmet"]]\n', encoding="utf-8")
+
+    assert detect_video._parse_class_map(path) == {0: "person", 1: "helmet"}
+
+
+def test_cli_does_not_replace_the_class_map_with_run_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class_map = tmp_path / "classes.json"
+    original = b'{"0": "person"}\n'
+    class_map.write_bytes(original)
+    constructed: list[str] = []
+
+    class RecordingRunner:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            constructed.append("init")
+
+        def load(self, _artifact: object) -> None:
+            constructed.append("load")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(detect_video, "UltralyticsYoloRunner", RecordingRunner)
+    args = [
+        item if item != str(tmp_path / "run.json") else str(class_map)
+        for item in _required_cli_args(tmp_path)
+    ]
+    args += [
+        "--model-source-url",
+        "https://models.example.test/demo.pt",
+        "--model-license",
+        "AGPL-3.0",
+    ]
+
+    assert detect_video.run(args) == 1
+    assert class_map.read_bytes() == original
+    assert constructed == []
+    assert "configuration" in capsys.readouterr().err
+
+
+def test_keyboard_interrupt_during_inference_joins_the_worker_before_returning(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "input.mp4"
+    output_path = tmp_path / "annotated.mp4"
+    input_path.write_bytes(b"input")
+    capture = FakeCapture([(0.0, FakeFrame(4, 2))])
+    writer = FakeWriter()
+
+    class BlockingDetector:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.finished = threading.Event()
+
+        async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+            asyncio.ensure_future(asyncio.to_thread(self._block))
+            while not self.started.is_set():
+                await asyncio.sleep(0.01)
+            raise KeyboardInterrupt
+
+        def _block(self) -> None:
+            self.started.set()
+            time.sleep(0.2)
+            self.finished.set()
+
+    detector = BlockingDetector()
+
+    def writer_factory(path: Path, codec: str, fps: float, size: tuple[int, int]) -> FakeWriter:
+        path.write_bytes(b"incomplete video")
+        return writer
+
+    with pytest.raises(KeyboardInterrupt):
+        run_video_validation(
+            input_path=input_path,
+            output_path=output_path,
+            metadata_output=tmp_path / "run.json",
+            artifact=make_artifact(),
+            class_map={0: "person", 1: "helmet"},
+            detector=detector,
+            capture_factory=lambda _: capture,
+            writer_factory=writer_factory,
+            renderer=lambda frame, batch: frame,
+        )
+
+    assert detector.finished.is_set()
+    assert capture.release_count == 1
+    assert writer.release_count == 1
+    assert not output_path.exists()

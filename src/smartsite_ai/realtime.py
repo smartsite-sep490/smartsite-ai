@@ -29,7 +29,26 @@ def _inside(point: tuple[float, float], person: dict[str, float]) -> bool:
     )
 
 
-def _read_frame(model: Any, capture: Any, confidence: float) -> dict[str, Any] | None:
+def _inside_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        if (current[1] > point[1]) != (previous[1] > point[1]):
+            crossing = (previous[0] - current[0]) * (point[1] - current[1]) / (
+                previous[1] - current[1]
+            ) + current[0]
+            if point[0] < crossing:
+                inside = not inside
+        previous = current
+    return inside
+
+
+def _read_frame(
+    model: Any,
+    capture: Any,
+    confidence: float,
+    zone_polygon: list[tuple[float, float]],
+) -> dict[str, Any] | None:
     ok, frame = capture.read()
     if not ok or frame is None:
         return None
@@ -58,6 +77,7 @@ def _read_frame(model: Any, capture: Any, confidence: float) -> dict[str, Any] |
     ]
     equipment = [item for item in raw if item not in persons]
     detections = []
+    zone_detections = []
     for person in persons:
         status = {"HARD_HAT": "UNKNOWN", "SAFETY_VEST": "UNKNOWN"}
         for item in equipment:
@@ -81,12 +101,22 @@ def _read_frame(model: Any, capture: Any, confidence: float) -> dict[str, Any] |
             "active": bool(missing),
             "label": f"MISSING {missing[0].replace('_', ' ')}" if missing else "PPE OK",
         })
+        feet = (person["boundingBox"]["x1"] + person["boundingBox"]["x2"]) / 2, person["boundingBox"]["y2"]
+        zone_active = _inside_polygon(feet, zone_polygon)
+        zone_detections.append({
+            "trackId": person["trackId"],
+            "confidence": person["confidence"],
+            "boundingBox": person["boundingBox"],
+            "active": zone_active,
+            "label": "ZONE ENTRY" if zone_active else "OUTSIDE ZONE",
+        })
 
     return {
         "type": "frame",
         "width": width,
         "height": height,
         "detections": detections,
+        "zoneDetections": zone_detections,
     }
 
 
@@ -96,6 +126,7 @@ async def stream_realtime(
     model_path: str,
     source: str,
     confidence: float,
+    zone_polygon: list[tuple[float, float]],
 ) -> None:
     """Stream one local MP4/RTSP source until the client disconnects."""
     await websocket.accept()
@@ -109,7 +140,9 @@ async def stream_realtime(
             return
         try:
             while True:
-                payload = await asyncio.to_thread(_read_frame, model, capture, confidence)
+                payload = await asyncio.to_thread(
+                    _read_frame, model, capture, confidence, zone_polygon
+                )
                 if payload is None:
                     capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue

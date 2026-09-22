@@ -11,6 +11,16 @@ from smartsite_ai.config import Settings
 from smartsite_ai.realtime import stream_realtime
 
 
+def _parse_zone_polygon(raw: str) -> list[tuple[float, float]]:
+    points = []
+    for item in raw.split(";"):
+        x, y = item.split(",", maxsplit=1)
+        points.append((max(0.0, min(1.0, float(x))), max(0.0, min(1.0, float(y)))))
+    if len(points) < 3:
+        raise ValueError("SMARTSITE_AI_REALTIME_ZONE_POLYGON needs at least 3 points")
+    return points
+
+
 class LiveHealth(BaseModel):
     status: Literal["ok"] = "ok"
     service: Literal["smartsite-ai"] = "smartsite-ai"
@@ -115,6 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             model_path=settings.realtime_model_path,
             source=settings.realtime_source,
             confidence=settings.realtime_confidence,
+            zone_polygon=_parse_zone_polygon(settings.realtime_zone_polygon),
         )
 
     return app

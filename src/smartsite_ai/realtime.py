@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +102,10 @@ def _read_frame(
             "active": bool(missing),
             "label": f"MISSING {missing[0].replace('_', ' ')}" if missing else "PPE OK",
         })
-        feet = (person["boundingBox"]["x1"] + person["boundingBox"]["x2"]) / 2, person["boundingBox"]["y2"]
+        feet = (
+            (person["boundingBox"]["x1"] + person["boundingBox"]["x2"]) / 2,
+            person["boundingBox"]["y2"],
+        )
         zone_active = _inside_polygon(feet, zone_polygon)
         zone_detections.append({
             "trackId": person["trackId"],
@@ -153,12 +157,10 @@ async def stream_realtime(
     except WebSocketDisconnect:
         return
     except Exception as exc:
-        try:
+        with suppress(Exception):
             await websocket.send_json(
                 {
                     "type": "error",
                     "message": f"Realtime inference failed: {type(exc).__name__}",
                 }
             )
-        except Exception:
-            pass

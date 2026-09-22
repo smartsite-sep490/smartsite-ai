@@ -4,10 +4,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, WebSocket
 from pydantic import BaseModel
 
 from smartsite_ai.config import Settings
+from smartsite_ai.realtime import stream_realtime
 
 
 class LiveHealth(BaseModel):
@@ -97,6 +98,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     reason="Supplementary evidence analysis planned; no API adapter configured.",
                 ),
             }
+        )
+
+    @app.websocket("/ws/realtime")
+    async def realtime(websocket: WebSocket) -> None:
+        if not settings.realtime_model_path or not settings.realtime_source:
+            await websocket.accept()
+            await websocket.send_json({
+                "type": "error",
+                "message": "Set SMARTSITE_AI_REALTIME_MODEL_PATH and SMARTSITE_AI_REALTIME_SOURCE",
+            })
+            await websocket.close(code=1011)
+            return
+        await stream_realtime(
+            websocket,
+            model_path=settings.realtime_model_path,
+            source=settings.realtime_source,
+            confidence=settings.realtime_confidence,
         )
 
     return app

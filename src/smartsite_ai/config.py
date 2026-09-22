@@ -21,3 +21,9 @@ class Settings(BaseSettings):
 
     backend_ingestion_url: str | None = None
     backend_service_token: SecretStr | None = None
+
+    # Local realtime demo settings. Keep these opt-in so the API foundation
+    # remains safe when no model/runtime is installed.
+    realtime_model_path: str | None = None
+    realtime_source: str | None = None
+    realtime_confidence: float = Field(default=0.25, ge=0.0, le=1.0)

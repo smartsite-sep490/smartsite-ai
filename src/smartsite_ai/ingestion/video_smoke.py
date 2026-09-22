@@ -55,10 +55,7 @@ async def _run(args: argparse.Namespace) -> int:
                 break
             consumed += 1
             if consumed == 1:
-                print(
-                    f"first frame: {frame.width}x{frame.height} "
-                    f"format={frame.pixel_format}"
-                )
+                print(f"first frame: {frame.width}x{frame.height} format={frame.pixel_format}")
     finally:
         await worker.stop()
 

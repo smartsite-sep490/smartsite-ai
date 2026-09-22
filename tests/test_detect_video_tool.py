@@ -206,6 +206,7 @@ def run_success(
     capture: FakeCapture | None = None,
     writer: FakeWriter | None = None,
     renderer: Callable[[object, DetectionBatch], object] | None = None,
+    batch_observer: Callable[[DetectionBatch, float], None] | None = None,
 ) -> tuple[
     dict[str, object], FakeCapture, FakeWriter, FakeDetector, list[tuple[object, DetectionBatch]]
 ]:
@@ -238,6 +239,7 @@ def run_success(
         renderer=renderer,
         monotonic_clock=iter((10.0, 12.5)).__next__,
         utc_now_factory=lambda: datetime(2026, 9, 21, 12, tzinfo=UTC),
+        batch_observer=batch_observer,
     )
     return result, capture, writer, detector, render_calls
 
@@ -278,6 +280,19 @@ def test_success_builds_sequential_envelopes_renders_and_replaces_metadata_atomi
     assert capture.release_count == 1
     assert writer.release_count == 1
     assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8")) == result
+
+
+def test_success_passes_validated_batches_to_the_optional_pipeline_observer(tmp_path: Path) -> None:
+    observed: list[tuple[int, float]] = []
+
+    run_success(
+        tmp_path,
+        batch_observer=lambda batch, video_time: observed.append(
+            (batch.sequence_number, video_time)
+        ),
+    )
+
+    assert observed == [(0, 0.0), (1, 1.25)]
 
 
 @pytest.mark.parametrize(

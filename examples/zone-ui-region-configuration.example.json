@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0.0",
+  "configurationVersion": 2,
+  "cameraExternalId": "zone-demo",
+  "regions": [
+    {
+      "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+      "geometryVersion": 2,
+      "coordinateSpace": "NORMALIZED_0_1",
+      "polygon": {
+        "coordinates": [[0.65, 0.4], [0.72, 0.4], [0.72, 0.55], [0.65, 0.55]]
+      }
+    }
+  ]
+}

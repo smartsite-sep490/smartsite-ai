@@ -86,6 +86,22 @@ def test_ppe_pipeline_associates_items_with_the_correct_person() -> None:
     assert all(observation.geometry_version == 7 for observation in observations)
 
 
+def test_ppe_pipeline_accepts_the_reference_checkpoint_hardhat_class_name() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.35, 0.80), 0.9),
+            detection("Hardhat", (0.14, 0.12, 0.24, 0.25), 0.95),
+        )
+    )
+
+    observations = PpePipeline().process(tracked, region())
+
+    assert [(observation.ppe_item, observation.status) for observation in observations] == [
+        ("HARD_HAT", "PRESENT"),
+        ("SAFETY_VEST", "MISSING"),
+    ]
+
+
 def test_ppe_pipeline_emits_missing_only_for_an_observable_person() -> None:
     visible = IoUPersonTracker().update(batch(detection("person", (0.20, 0.10, 0.40, 0.80))))
     clipped = IoUPersonTracker().update(batch(detection("person", (0.00, 0.10, 0.20, 0.80))))

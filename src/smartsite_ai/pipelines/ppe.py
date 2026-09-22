@@ -16,7 +16,9 @@ from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 PpeItem = Literal["HARD_HAT", "SAFETY_VEST"]
 PPE_ITEMS: Final[tuple[PpeItem, ...]] = ("HARD_HAT", "SAFETY_VEST")
 DEFAULT_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
-    "HARD_HAT": frozenset({"hard_hat", "hard hat", "helmet", "safety helmet"}),
+    "HARD_HAT": frozenset(
+        {"hard_hat", "hard hat", "hardhat", "helmet", "safety helmet"}
+    ),
     "SAFETY_VEST": frozenset({"safety_vest", "safety vest", "high visibility vest", "vest"}),
 }
 

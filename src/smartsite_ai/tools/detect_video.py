@@ -20,13 +20,15 @@ import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from time import monotonic
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.artifacts import (
     ArtifactValidationError,
     ModelArtifactSpec,
@@ -38,6 +40,8 @@ from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.pipelines import Mf05Mf06Pipeline, PpePipeline, RestrictedZonePipeline
+from smartsite_ai.tracking import IoUPersonTracker
 
 # OpenCV property identifiers are stable public constants.  Keeping these numeric values here
 # lets the orchestration layer use deterministic fakes without importing cv2.
@@ -53,6 +57,73 @@ _CLASS_ID_TEXT = re.compile(r"0|[1-9][0-9]*")
 
 class VideoValidationError(RuntimeError):
     """The local validation run could not produce a complete result."""
+
+
+@dataclass(slots=True)
+class _UiTimelineCollector:
+    """Collect local UI records from the real MF05/MF06 technical pipeline."""
+
+    configuration: CameraRegionConfiguration
+    ppe_region_id: str
+    pipeline: Mf05Mf06Pipeline = field(init=False)
+    entries: list[dict[str, object]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.pipeline = Mf05Mf06Pipeline(
+            tracker=IoUPersonTracker(),
+            ppe=PpePipeline(),
+            zones=RestrictedZonePipeline(),
+            ppe_region_id=self.ppe_region_id,
+        )
+
+    def observe(self, batch: DetectionBatch, video_time_seconds: float) -> None:
+        event = self.pipeline.process(
+            batch,
+            region_configuration=self.configuration,
+            event_id=str(
+                uuid5(
+                    NAMESPACE_URL,
+                    f"smartsite-ui-test:{batch.stream_id}:{batch.session_id}:{batch.sequence_number}",
+                )
+            ),
+        )
+        if event is None:
+            return
+
+        event_payload = event.to_wire_dict()
+        observations = event_payload["observations"]
+        if not any(
+            observation["type"] == "ZONE_ENTRY"
+            or (observation["type"] == "PPE" and observation["status"] == "MISSING")
+            for observation in observations
+        ):
+            return
+
+        self.entries.append(
+            {
+                "videoTimeSeconds": round(video_time_seconds, 3),
+                "event": event_payload,
+            }
+        )
+
+    def write(self, path: Path) -> None:
+        if path.suffix.lower() != ".json":
+            raise VideoValidationError("UI timeline output extension must be .json")
+        if path.exists():
+            raise VideoValidationError("UI timeline output already exists")
+        if not path.parent.is_dir():
+            raise VideoValidationError("UI timeline output directory does not exist")
+        payload = {
+            "schemaVersion": "1.0.0",
+            "cameraExternalId": self.configuration.camera_external_id,
+            "entries": self.entries,
+        }
+        temp_path = _write_metadata_temp(path, payload)
+        try:
+            temp_path.replace(path)
+        except OSError as error:
+            _remove_if_exists(temp_path)
+            raise VideoValidationError("could not finalize UI timeline output") from error
 
 
 class CaptureProtocol(Protocol):
@@ -76,6 +147,7 @@ class WriterProtocol(Protocol):
 CaptureFactory = Callable[[Path], CaptureProtocol]
 WriterFactory = Callable[[Path, str, float, tuple[int, int]], WriterProtocol]
 Renderer = Callable[[object, DetectionBatch], object]
+BatchObserver = Callable[[DetectionBatch, float], None]
 Clock = Callable[[], float]
 UtcNowFactory = Callable[[], datetime]
 SessionIdFactory = Callable[[], UUID]
@@ -97,6 +169,8 @@ def run_video_validation(
     session_id_factory: SessionIdFactory = uuid4,
     runtime_versions: Mapping[str, str] | None = None,
     configuration_paths: Sequence[Path] = (),
+    camera_external_id: str | None = None,
+    batch_observer: BatchObserver | None = None,
 ) -> dict[str, object]:
     """Validate one local video through an injected detector and media boundary.
 
@@ -133,6 +207,11 @@ def run_video_validation(
     if not isinstance(session_id, UUID):
         raise VideoValidationError("session ID factory must return a UUID")
     capture_started_at = _ensure_utc(utc_now_factory(), "UTC clock")
+    resolved_camera_external_id = camera_external_id or _camera_external_id(input_path)
+    if not resolved_camera_external_id or len(resolved_camera_external_id) > 128:
+        raise VideoValidationError("camera external ID must contain 1 to 128 characters")
+    if "\x00" in resolved_camera_external_id:
+        raise VideoValidationError("camera external ID contains a forbidden character")
     elapsed_started = monotonic_clock()
     frame_count = 0
     detection_count = 0
@@ -189,7 +268,7 @@ def run_video_validation(
             frame = FrameEnvelope(
                 stream_id="video-validation",
                 session_id=session_id,
-                camera_external_id=_camera_external_id(input_path),
+                camera_external_id=resolved_camera_external_id,
                 captured_at=captured_at,
                 width=width,
                 height=height,
@@ -203,6 +282,13 @@ def run_video_validation(
             if not isinstance(batch, DetectionBatch):
                 raise VideoValidationError("detector returned an invalid detection batch")
             _validate_batch(batch, frame, artifact, class_map)
+            if batch_observer is not None:
+                try:
+                    batch_observer(batch, timestamp_msec / 1_000.0)
+                except VideoValidationError:
+                    raise
+                except Exception as error:
+                    raise VideoValidationError("could not record pipeline observations") from error
             try:
                 annotated_frame = renderer(source_frame, batch)
             except Exception as error:
@@ -645,8 +731,34 @@ def _make_writer(
 def _make_renderer() -> Renderer:
     import cv2
 
+    tracker = IoUPersonTracker()
+    first_captured_at: datetime | None = None
+
     def render(source_frame: object, batch: DetectionBatch) -> object:
+        nonlocal first_captured_at
         image = source_frame
+        first_captured_at = first_captured_at or batch.captured_at
+        elapsed_seconds = max((batch.captured_at - first_captured_at).total_seconds(), 0.0)
+        tracked_frame = tracker.update(batch)
+        track_ids = {
+            person.detection: person.track_id
+            for person in tracked_frame.persons
+        }
+
+        overlay = image.copy()
+        cv2.rectangle(overlay, (0, 0), (min(image.shape[1], 330), 34), (17, 24, 39), -1)
+        cv2.addWeighted(overlay, 0.88, image, 0.12, 0, image)
+        elapsed_minutes, elapsed_remainder = divmod(round(elapsed_seconds), 60)
+        cv2.putText(
+            image,
+            f"LOCAL YOLO  T+{elapsed_minutes:02d}:{elapsed_remainder:02d}",
+            (12, 23),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.56,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
         for detection in batch.detections:
             box = detection.bounding_box
             height, width = image.shape[:2]
@@ -654,15 +766,22 @@ def _make_renderer() -> Renderer:
             y1 = max(0, min(height - 1, round(box.y1 * height)))
             x2 = max(0, min(width - 1, round(box.x2 * width)))
             y2 = max(0, min(height - 1, round(box.y2 * height)))
-            cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            label = f"{detection.class_name} {detection.confidence:.2f}"
+            track_id = track_ids.get(detection)
+            is_person = track_id is not None
+            color = (0, 220, 120) if is_person else (255, 190, 0)
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+            label = (
+                f"Track #{track_id} Person {detection.confidence:.2f}"
+                if is_person
+                else f"{detection.class_name} {detection.confidence:.2f}"
+            )
             cv2.putText(
                 image,
                 label,
                 (x1, max(0, y1 - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
-                (0, 255, 0),
+                color,
                 1,
                 cv2.LINE_AA,
             )
@@ -755,9 +874,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--model-sha256", required=True, help="expected lowercase SHA-256")
     parser.add_argument("--class-map", type=Path, required=True, help="JSON class map")
+    parser.add_argument(
+        "--camera-external-id",
+        help="camera ID used for the technical pipeline; defaults to the input filename stem",
+    )
     parser.add_argument("--output", type=Path, required=True, help="annotated .mp4 output")
     parser.add_argument(
         "--metadata-output", type=Path, required=True, help="atomic JSON run metadata output"
+    )
+    parser.add_argument(
+        "--region-configuration",
+        type=Path,
+        help="camera-region configuration required together with --ui-timeline-output",
+    )
+    parser.add_argument(
+        "--ppe-region-id",
+        help="configured observation region UUID required together with --ui-timeline-output",
+    )
+    parser.add_argument(
+        "--ui-timeline-output",
+        type=Path,
+        help="write MF05/MF06 UI timeline JSON from the real technical pipeline",
     )
     parser.add_argument(
         "--model-source-url",
@@ -797,10 +934,57 @@ def run(argv: Sequence[str] | None = None) -> int:
         _validate_cli_provenance(args.model_source_url, args.model_license)
         class_map = _parse_class_map(args.class_map)
         model_path = _absolute_cli_path(args.model)
+        input_path = _absolute_cli_path(args.input)
+        camera_external_id = args.camera_external_id or _camera_external_id(input_path)
+        timeline_collector: _UiTimelineCollector | None = None
+        timeline_output: Path | None = None
+        configuration_paths: list[Path] = [args.class_map, model_path, args.input]
+        timeline_options = (
+            args.ui_timeline_output,
+            args.region_configuration,
+            args.ppe_region_id,
+        )
+        if any(option is not None for option in timeline_options):
+            if not all(option is not None for option in timeline_options):
+                raise VideoValidationError(
+                    "--ui-timeline-output, --region-configuration and --ppe-region-id "
+                    "must be used together"
+                )
+            region_configuration_path = _absolute_cli_path(args.region_configuration)
+            configuration_paths.append(region_configuration_path)
+            try:
+                configuration = CameraRegionConfiguration.from_wire_bytes(
+                    region_configuration_path.read_bytes()
+                )
+            except (OSError, ValueError) as error:
+                raise VideoValidationError(
+                    "camera region configuration could not be read"
+                ) from error
+            if configuration.camera_external_id != camera_external_id:
+                raise VideoValidationError(
+                    "camera external ID does not match the camera region configuration"
+                )
+            timeline_output = _absolute_cli_path(args.ui_timeline_output)
+            protected_paths = (
+                input_path,
+                model_path,
+                _absolute_cli_path(args.class_map),
+                region_configuration_path,
+                _absolute_cli_path(args.output),
+                _absolute_cli_path(args.metadata_output),
+            )
+            if any(_identifies_same_path(timeline_output, path) for path in protected_paths):
+                raise VideoValidationError(
+                    "UI timeline output must not replace an input or run output"
+                )
+            timeline_collector = _UiTimelineCollector(
+                configuration=configuration,
+                ppe_region_id=args.ppe_region_id,
+            )
         _reject_configuration_overwrites(
             output_path=args.output,
             metadata_output=args.metadata_output,
-            configuration_paths=(args.class_map, model_path, args.input),
+            configuration_paths=configuration_paths,
         )
         spec = ModelArtifactSpec(
             artifact_id=args.model_artifact_id,
@@ -821,7 +1005,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         runner.load(artifact)
         detector = Yolo11Detector(artifact, runner)
         run_video_validation(
-            input_path=args.input,
+            input_path=input_path,
             output_path=args.output,
             metadata_output=args.metadata_output,
             artifact=artifact,
@@ -831,14 +1015,18 @@ def run(argv: Sequence[str] | None = None) -> int:
             writer_factory=_make_writer,
             renderer=_make_renderer(),
             runtime_versions=_runtime_versions(),
-            configuration_paths=(args.class_map, model_path, args.input),
+            configuration_paths=configuration_paths,
+            camera_external_id=camera_external_id,
+            batch_observer=timeline_collector.observe if timeline_collector is not None else None,
         )
+        if timeline_collector is not None and timeline_output is not None:
+            timeline_collector.write(timeline_output)
         return 0
     except (ArtifactValidationError, VideoValidationError, OSError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    except Exception:
-        print("error: video validation failed", file=sys.stderr)
+    except Exception as error:
+        print(f"error: video validation failed: {type(error).__name__}: {error}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("error: video validation interrupted", file=sys.stderr)
@@ -846,6 +1034,12 @@ def run(argv: Sequence[str] | None = None) -> int:
     finally:
         if runner is not None:
             runner.close()
+
+
+def main() -> None:
+    """Console-script entry point for local annotated-video validation."""
+
+    raise SystemExit(run())
 
 
 def _validate_cli_provenance(source_url: str, license_name: str) -> None:
@@ -867,6 +1061,7 @@ __all__ = [
     "VideoValidationError",
     "WriterFactory",
     "build_parser",
+    "main",
     "run",
     "run_video_validation",
     "validate_video",

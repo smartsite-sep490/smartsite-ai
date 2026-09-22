@@ -126,6 +126,8 @@ Implemented:
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
 - optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;
+- verified local model-artifact metadata, a lazy Ultralytics YOLO runner, and normalized `DetectionBatch` output;
+- local annotated-video validation with an optional MF05/MF06 UI timeline export;
 - deterministic IoU person tracking with stream/session-scoped track IDs;
 - PPE-to-person association with technical `PRESENT`/observable `MISSING` observations;
 - configured polygon restricted-zone transition detection with geometry-version handling;
@@ -144,7 +146,6 @@ Not yet implemented:
 
 - live RTSP hardware/network validation;
 - GPU runtime configuration;
-- YOLO inference;
 - PPE model weights;
 - production detector-to-pipeline worker wiring;
 - production tracker/model calibration and evaluation on representative site data;
@@ -153,7 +154,9 @@ Not yet implemented:
 - OpenAI adapter;
 - benchmark results.
 
-The API explicitly reports `inference_ready: false` until inference capabilities actually exist.
+The API explicitly reports `inference_ready: false` until a configured worker has a verified local
+artifact, active camera source, and tested runtime; the local video command does not change API
+readiness.
 
 ## Requirements
 
@@ -251,6 +254,18 @@ video command. It does not establish the checkpoint's training-data provenance, 
 accuracy, PPE-policy validity, production suitability, YOLO11s performance, or GPU support. Run
 with a GPU device only after `torch.cuda.is_available()` is true in the installed vision
 environment, and record the resulting hardware/runtime evidence separately.
+
+### Local MF05/MF06 UI test export
+
+The local command can pass normalized YOLO batches through the technical MF05/MF06 pipeline and
+write a timeline file consumed by the web UI. It stays local, does not call the Backend, and does
+not decide an authorized/unauthorized result. The output paths below are ignored by Git.
+
+```powershell
+uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\morteza_ppe_test_video.mp4 --camera-external-id ppe-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\ppe-ui.annotated.mp4 --metadata-output runs\ppe-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\ppe-ai.timeline.json --region-configuration examples\ppe-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
+
+uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\hazard_restricted_zone_test.mp4 --camera-external-id zone-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\zone-ui.annotated.mp4 --metadata-output runs\zone-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\zone-ai.timeline.json --region-configuration examples\zone-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
+```
 
 ## Testing
 

@@ -67,7 +67,7 @@ SmartSite Backend
 | --- | --- |
 | API | Python, FastAPI |
 | Detection | YOLO11s baseline |
-| Tracking | Supervision + tracker |
+| Tracking | Deterministic IoU tracker at the provider-neutral pipeline boundary |
 | PPE monitoring | Trained PPE detection weights |
 | Zone monitoring | Tracking + configured geometry |
 | Identity experiment | InsightFace / ArcFace |
@@ -115,7 +115,7 @@ The AI service does not own Site/Zone authorization rules.
 
 ## Current Status
 
-**Current phase: FastAPI foundation.**
+**Current phase: FastAPI and technical MF05/MF06 pipeline foundation.**
 
 Implemented:
 
@@ -125,6 +125,11 @@ Implemented:
 - RFC 8785 compatible hashing with cross-runtime safe-integer guards;
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
+- optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;
+- deterministic IoU person tracking with stream/session-scoped track IDs;
+- PPE-to-person association with technical `PRESENT`/observable `MISSING` observations;
+- configured polygon restricted-zone transition detection with geometry-version handling;
+- MF05/MF06 orchestration into the locked technical observation event, with synthetic fixtures and behavior tests;
 - liveness endpoint;
 - readiness endpoint;
 - capability endpoint;
@@ -137,12 +142,12 @@ Implemented:
 
 Not yet implemented:
 
-- live RTSP stream hardware decode / OpenCV adapter (hardware/network dependent);
+- live RTSP hardware/network validation;
 - GPU runtime configuration;
 - YOLO inference;
 - PPE model weights;
-- tracking pipeline;
-- Zone geometry processing;
+- production detector-to-pipeline worker wiring;
+- production tracker/model calibration and evaluation on representative site data;
 - InsightFace integration;
 - camera/inference event producer loop;
 - OpenAI adapter;
@@ -167,6 +172,26 @@ Run the service:
 ```sh
 uv run --frozen smartsite-ai
 ```
+
+### Video source smoke test
+
+The video files used for local validation must stay outside Git. Install the
+optional vision dependencies, then pass an absolute path from Downloads:
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen --extra vision python -m smartsite_ai.ingestion.video_smoke `
+  "$env:USERPROFILE\Downloads\hazard_restricted_zone_test.mp4" `
+  --stream-id hazard-demo --camera-external-id hazard-demo --max-frames 120
+
+uv run --frozen --extra vision python -m smartsite_ai.ingestion.video_smoke `
+  "$env:USERPROFILE\Downloads\morteza_ppe_test_video.mp4" `
+  --stream-id ppe-demo --camera-external-id ppe-demo --max-frames 120
+```
+
+The command validates OpenCV open/decode, BGR24 frame envelope creation, EOF,
+worker queue delivery, and cleanup. It does not run YOLO inference or claim PPE
+or zone accuracy.
 
 Default development address: `http://127.0.0.1:8000`.
 

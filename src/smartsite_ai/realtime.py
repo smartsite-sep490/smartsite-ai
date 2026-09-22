@@ -24,10 +24,7 @@ def _center(box: dict[str, float]) -> tuple[float, float]:
 
 
 def _inside(point: tuple[float, float], person: dict[str, float]) -> bool:
-    return (
-        person["x1"] <= point[0] <= person["x2"]
-        and person["y1"] <= point[1] <= person["y2"]
-    )
+    return person["x1"] <= point[0] <= person["x2"] and person["y1"] <= point[1] <= person["y2"]
 
 
 def _inside_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
@@ -65,17 +62,16 @@ def _read_frame(
         class_name = str(names[class_id])
         track_id = int(boxes.id[index].item()) if boxes.id is not None else index + 1
         normalized = _box(xyxy, width, height)
-        raw.append({
-            "trackId": track_id,
-            "className": class_name,
-            "confidence": float(boxes.conf[index].item()),
-            "boundingBox": normalized,
-        })
+        raw.append(
+            {
+                "trackId": track_id,
+                "className": class_name,
+                "confidence": float(boxes.conf[index].item()),
+                "boundingBox": normalized,
+            }
+        )
 
-    persons = [
-        item for item in raw
-        if item["className"].casefold() in {"person", "worker"}
-    ]
+    persons = [item for item in raw if item["className"].casefold() in {"person", "worker"}]
     equipment = [item for item in raw if item not in persons]
     detections = []
     zone_detections = []
@@ -86,34 +82,34 @@ def _read_frame(
                 continue
             name = item["className"].casefold().replace("_", "-")
             if "hardhat" in name or "hard-hat" in name or "helmet" in name:
-                status["HARD_HAT"] = (
-                    "MISSING" if name.startswith(("no-", "no ")) else "PRESENT"
-                )
+                status["HARD_HAT"] = "MISSING" if name.startswith(("no-", "no ")) else "PRESENT"
             if "safety vest" in name or "safety-vest" in name or name in {"vest", "no-vest"}:
-                status["SAFETY_VEST"] = (
-                    "MISSING" if name.startswith(("no-", "no ")) else "PRESENT"
-                )
+                status["SAFETY_VEST"] = "MISSING" if name.startswith(("no-", "no ")) else "PRESENT"
         missing = [item for item, value in status.items() if value == "MISSING"]
-        detections.append({
-            "trackId": person["trackId"],
-            "confidence": person["confidence"],
-            "boundingBox": person["boundingBox"],
-            "ppeStatus": status,
-            "active": bool(missing),
-            "label": f"MISSING {missing[0].replace('_', ' ')}" if missing else "PPE OK",
-        })
+        detections.append(
+            {
+                "trackId": person["trackId"],
+                "confidence": person["confidence"],
+                "boundingBox": person["boundingBox"],
+                "ppeStatus": status,
+                "active": bool(missing),
+                "label": f"MISSING {missing[0].replace('_', ' ')}" if missing else "PPE OK",
+            }
+        )
         feet = (
             (person["boundingBox"]["x1"] + person["boundingBox"]["x2"]) / 2,
             person["boundingBox"]["y2"],
         )
         zone_active = _inside_polygon(feet, zone_polygon)
-        zone_detections.append({
-            "trackId": person["trackId"],
-            "confidence": person["confidence"],
-            "boundingBox": person["boundingBox"],
-            "active": zone_active,
-            "label": "ZONE ENTRY" if zone_active else "OUTSIDE ZONE",
-        })
+        zone_detections.append(
+            {
+                "trackId": person["trackId"],
+                "confidence": person["confidence"],
+                "boundingBox": person["boundingBox"],
+                "active": zone_active,
+                "label": "ZONE ENTRY" if zone_active else "OUTSIDE ZONE",
+            }
+        )
 
     return {
         "type": "frame",

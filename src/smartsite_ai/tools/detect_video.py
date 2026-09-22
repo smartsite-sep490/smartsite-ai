@@ -740,10 +740,7 @@ def _make_renderer() -> Renderer:
         first_captured_at = first_captured_at or batch.captured_at
         elapsed_seconds = max((batch.captured_at - first_captured_at).total_seconds(), 0.0)
         tracked_frame = tracker.update(batch)
-        track_ids = {
-            person.detection: person.track_id
-            for person in tracked_frame.persons
-        }
+        track_ids = {person.detection: person.track_id for person in tracked_frame.persons}
 
         overlay = image.copy()
         cv2.rectangle(overlay, (0, 0), (min(image.shape[1], 330), 34), (17, 24, 39), -1)

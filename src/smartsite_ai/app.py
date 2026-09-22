@@ -114,10 +114,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def realtime(websocket: WebSocket) -> None:
         if not settings.realtime_model_path or not settings.realtime_source:
             await websocket.accept()
-            await websocket.send_json({
-                "type": "error",
-                "message": "Set SMARTSITE_AI_REALTIME_MODEL_PATH and SMARTSITE_AI_REALTIME_SOURCE",
-            })
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "message": (
+                        "Set SMARTSITE_AI_REALTIME_MODEL_PATH and SMARTSITE_AI_REALTIME_SOURCE"
+                    ),
+                }
+            )
             await websocket.close(code=1011)
             return
         await stream_realtime(

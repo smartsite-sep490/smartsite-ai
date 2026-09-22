@@ -21,6 +21,7 @@ vision = ["ultralytics==8.4.155", "supervision==0.30.4"]
 
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
+smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:run"
 
 [dependency-groups]
 dev = [

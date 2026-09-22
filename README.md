@@ -207,6 +207,26 @@ uv sync --frozen --extra vision
 
 The optional vision group currently pins Ultralytics and Supervision. YOLO11s selects the detector architecture/size, not a validated PPE checkpoint. GPU support must be validated against the selected PyTorch, CUDA, hardware, and trained weights before it is treated as a supported runtime. Ultralytics artifacts are AGPL-3.0 by default; a proprietary or commercial deployment must complete a license review before release.
 
+## Local PPE reference-video validation
+
+The annotated-video command provides a local, explicit validation path. It does not download a
+model or video, and it requires an existing local model, exact SHA-256, HTTPS source URL, declared
+license, and JSON class map. Acquire and verify the two smoke-only reference inputs as described in
+[models/README.md](models/README.md), then install the optional dependencies and run:
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen smartsite-ai-detect-video --input recordings/ppe-reference.mp4 --model models/ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache/ppe-yolov8-reference.class-map.json --output runs/ppe-reference.annotated.mp4 --metadata-output runs/ppe-reference.run.json --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --confidence-threshold 0.25 --iou-threshold 0.45 --image-size 640 640 --device cpu
+```
+
+The command writes an annotated MP4 to `runs/ppe-reference.annotated.mp4` and atomic run metadata
+to `runs/ppe-reference.run.json`. Both paths are ignored and must remain local. A successful local
+run proves only that this checkpoint, class map, local clip, and runtime completed the bounded
+video command. It does not establish the checkpoint's training-data provenance, license,
+accuracy, PPE-policy validity, production suitability, YOLO11s performance, or GPU support. Run
+with a GPU device only after `torch.cuda.is_available()` is true in the installed vision
+environment, and record the resulting hardware/runtime evidence separately.
+
 ## Testing
 
 Run the validation suite:

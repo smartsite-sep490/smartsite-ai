@@ -1,14 +1,12 @@
 """Local realtime stream: verified YOLO detector, MF05/MF06 pipeline, optional backend post."""
 
 import asyncio
-import importlib
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
@@ -18,7 +16,9 @@ from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.artifacts import ModelArtifactSpec, verify_model_artifact
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
-from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.config import StreamConfig
+from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
@@ -176,7 +176,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
 
     await websocket.accept()
     source = settings.realtime_source or ""
-    capture = None
+    frame_source: OpenCvFrameSource | None = None
     runner: UltralyticsYoloRunner | None = None
     backend: BackendClient | None = None
     try:
@@ -191,22 +191,39 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 timeout=httpx.Timeout(2.0),
                 max_retries=0,
             )
-        cv2 = importlib.import_module("cv2")
-        capture = cv2.VideoCapture(int(source) if source.isdecimal() else source)
-        if not capture.isOpened():
+        replay_file = Path(source).is_file()
+        frame_source = OpenCvFrameSource(
+            StreamConfig(
+                stream_id="realtime",
+                camera_external_id=settings.realtime_camera_external_id,
+                source_url=source,
+                is_live=not replay_file,
+                max_consecutive_failures=3,
+            )
+        )
+        try:
+            await frame_source.connect()
+        except SourceConnectionError:
             await websocket.send_json(
                 {"type": "error", "message": f"Cannot open {safe_source_label(source)}"}
             )
             return
-        replay_file = Path(source).is_file()
         failures = 0
-        session_id = uuid4()
-        sequence = 0
         while True:
-            ok, frame = await asyncio.to_thread(capture.read)
-            if not ok or frame is None:
+            try:
+                envelope = await frame_source.read_frame()
+            except SourceReadError:
+                failures += 1
+                if failures >= 3:
+                    await websocket.send_json(
+                        {"type": "error", "message": "Realtime source stopped producing frames"}
+                    )
+                    return
+                await asyncio.sleep(0.2)
+                continue
+            if envelope is None:
                 if replay_file:
-                    await asyncio.to_thread(capture.set, cv2.CAP_PROP_POS_FRAMES, 0)
+                    await frame_source.connect()
                     await asyncio.sleep(0.05)
                     continue
                 failures += 1
@@ -218,29 +235,21 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 await asyncio.sleep(0.2)
                 continue
             failures = 0
-            height, width = frame.shape[:2]
-            contiguous = frame if frame.flags["C_CONTIGUOUS"] else frame.copy()
-            envelope = FrameEnvelope(
-                stream_id="realtime",
-                session_id=session_id,
-                camera_external_id=settings.realtime_camera_external_id,
-                captured_at=datetime.now(UTC),
-                width=width,
-                height=height,
-                sequence_number=sequence,
-                payload=contiguous.tobytes(),
-            )
             batch = await detector.detect(envelope)
             event = pipeline.process(
                 batch,
                 region_configuration=configuration,
-                event_id=str(uuid5(NAMESPACE_URL, f"smartsite-realtime:{session_id}:{sequence}")),
+                event_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"smartsite-realtime:{envelope.session_id}:{envelope.sequence_number}",
+                    )
+                ),
             )
-            await websocket.send_json(_ui_frame(event, width, height))
+            await websocket.send_json(_ui_frame(event, envelope.width, envelope.height))
             if backend is not None and event is not None and _should_post(event):
                 with suppress(Exception):
                     await backend.post_event(event)
-            sequence += 1
             await asyncio.sleep(0)
     except WebSocketDisconnect:
         return
@@ -258,8 +267,8 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
         if backend is not None:
             with suppress(Exception):
                 await backend.aclose()
-        if capture is not None:
+        if frame_source is not None:
             with suppress(Exception):
-                capture.release()
+                await frame_source.close()
         with suppress(Exception):
             await websocket.close()

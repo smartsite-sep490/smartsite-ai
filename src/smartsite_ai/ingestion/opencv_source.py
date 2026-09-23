@@ -24,6 +24,7 @@ class OpenCvFrameSource:
         self._session_id: UUID | None = None
         self._sequence_number = 0
         self._is_connected = False
+        self._io_lock = asyncio.Lock()
 
     @property
     def source_id(self) -> str:
@@ -124,32 +125,39 @@ class OpenCvFrameSource:
         await self.close()
         cv2 = await asyncio.to_thread(self._load_cv2)
         capture = await asyncio.to_thread(self._open_capture, cv2)
-
-        self._capture = capture
-        self._session_id = uuid4()
-        self._sequence_number = 0
-        self._is_connected = True
+        try:
+            async with self._io_lock:
+                self._capture = capture
+                self._session_id = uuid4()
+                self._sequence_number = 0
+                self._is_connected = True
+                capture = None
+        finally:
+            if capture is not None:
+                await asyncio.to_thread(self._release_capture, capture)
 
     async def read_frame(self) -> FrameEnvelope | None:
         """Read one decoded BGR24 frame from the connected source."""
-        if not self._is_connected or self._capture is None:
-            raise SourceReadError("OpenCV source is not connected")
+        async with self._io_lock:
+            if not self._is_connected or self._capture is None:
+                raise SourceReadError("OpenCV source is not connected")
 
-        try:
-            ok, frame = await asyncio.to_thread(self._capture.read)
-        except Exception as exc:
-            raise SourceReadError(f"OpenCV failed to read frame: {type(exc).__name__}") from exc
+            try:
+                ok, frame = await asyncio.to_thread(self._capture.read)
+            except Exception as exc:
+                raise SourceReadError(f"OpenCV failed to read frame: {type(exc).__name__}") from exc
 
-        if not ok or frame is None:
-            return None
+            if not ok or frame is None:
+                return None
 
-        return self._frame_to_envelope(frame)
+            return self._frame_to_envelope(frame)
 
     async def close(self) -> None:
         """Release the source if it has been connected."""
-        capture = self._capture
-        self._capture = None
-        self._is_connected = False
+        async with self._io_lock:
+            capture = self._capture
+            self._capture = None
+            self._is_connected = False
         if capture is not None:
             try:
                 await asyncio.to_thread(self._release_capture, capture)

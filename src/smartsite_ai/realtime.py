@@ -5,8 +5,11 @@ import importlib
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+from smartsite_ai.inference.ultralytics_runner import _default_model_factory
 
 
 def _box(values: Any, width: int, height: int) -> dict[str, float]:
@@ -56,6 +59,14 @@ def _read_frame(
     names = result.names
     boxes = result.boxes
     raw = []
+    if boxes is None:
+        return {
+            "type": "frame",
+            "width": width,
+            "height": height,
+            "detections": [],
+            "zoneDetections": [],
+        }
     for index in range(len(boxes)):
         xyxy = boxes.xyxy[index].tolist()
         class_id = int(boxes.cls[index].item())
@@ -120,6 +131,35 @@ def _read_frame(
     }
 
 
+def parse_zone_polygon(raw: str) -> list[tuple[float, float]]:
+    """Parse `x,y;x,y` points. Out-of-range values are rejected, not clamped."""
+
+    points: list[tuple[float, float]] = []
+    for item in raw.split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        x_text, y_text = item.split(",", maxsplit=1)
+        x = float(x_text)
+        y = float(y_text)
+        if x < 0.0 or x > 1.0 or y < 0.0 or y > 1.0:
+            raise ValueError("zone polygon coordinates must be within 0 and 1")
+        points.append((x, y))
+    if len(points) < 3:
+        raise ValueError("zone polygon needs at least 3 points")
+    return points
+
+
+def safe_source_label(source: str) -> str:
+    """Hide credentials and local paths from websocket errors."""
+
+    if "://" not in source:
+        return "configured source"
+    parts = urlsplit(source)
+    host = parts.hostname or "source"
+    return f"{parts.scheme}://{host}"
+
+
 async def stream_realtime(
     websocket: WebSocket,
     *,
@@ -130,26 +170,36 @@ async def stream_realtime(
 ) -> None:
     """Stream one local MP4/RTSP source until the client disconnects."""
     await websocket.accept()
+    capture = None
     try:
+        model_file = Path(model_path)
+        try:
+            model = _default_model_factory(model_file)
+        except Exception:
+            await websocket.send_json({"type": "error", "message": "Realtime model is unavailable"})
+            return
         cv2 = importlib.import_module("cv2")
-        ultralytics = importlib.import_module("ultralytics")
-        model = ultralytics.YOLO(str(Path(model_path)))
         capture = cv2.VideoCapture(int(source) if source.isdecimal() else source)
         if not capture.isOpened():
-            await websocket.send_json({"type": "error", "message": f"Cannot open source: {source}"})
+            await websocket.send_json(
+                {"type": "error", "message": f"Cannot open {safe_source_label(source)}"}
+            )
             return
-        try:
-            while True:
-                payload = await asyncio.to_thread(
-                    _read_frame, model, capture, confidence, zone_polygon
-                )
-                if payload is None:
-                    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    continue
-                await websocket.send_json(payload)
-                await asyncio.sleep(0)
-        finally:
-            capture.release()
+        failures = 0
+        while True:
+            payload = await asyncio.to_thread(_read_frame, model, capture, confidence, zone_polygon)
+            if payload is None:
+                failures += 1
+                if failures >= 3:
+                    await websocket.send_json(
+                        {"type": "error", "message": "Realtime source stopped producing frames"}
+                    )
+                    return
+                await asyncio.sleep(0.2)
+                continue
+            failures = 0
+            await websocket.send_json(payload)
+            await asyncio.sleep(0)
     except WebSocketDisconnect:
         return
     except Exception as exc:
@@ -160,3 +210,9 @@ async def stream_realtime(
                     "message": f"Realtime inference failed: {type(exc).__name__}",
                 }
             )
+    finally:
+        if capture is not None:
+            with suppress(Exception):
+                capture.release()
+        with suppress(Exception):
+            await websocket.close()

@@ -20,6 +20,7 @@ class RestrictedZonePipeline:
         self._source_key: tuple[str, UUID] | None = None
         self._last_sequence: int | None = None
         self._inside: dict[tuple[int, str], bool] = {}
+        self._absent_frames: dict[int, int] = {}
         self._region_versions: dict[str, int] = {}
 
     def process(
@@ -40,6 +41,7 @@ class RestrictedZonePipeline:
             self._source_key = source_key
             self._last_sequence = None
             self._inside.clear()
+            self._absent_frames.clear()
             self._region_versions.clear()
         elif self._last_sequence is not None and batch.sequence_number <= self._last_sequence:
             raise ValueError(
@@ -76,6 +78,23 @@ class RestrictedZonePipeline:
                         )
                     )
                 self._inside[state_key] = inside
+
+        # The tracker can revive an id for two missed frames. Drop zone memory only
+        # after that window so a long session cannot keep every historical id.
+        active_track_ids = {person.track_id for person in tracked_frame.persons}
+        known_track_ids = {state_key[0] for state_key in self._inside}
+        for track_id in known_track_ids:
+            if track_id in active_track_ids:
+                self._absent_frames.pop(track_id, None)
+                continue
+            missed = self._absent_frames.get(track_id, 0) + 1
+            if missed <= 2:
+                self._absent_frames[track_id] = missed
+                continue
+            for state_key in tuple(self._inside):
+                if state_key[0] == track_id:
+                    del self._inside[state_key]
+            self._absent_frames.pop(track_id, None)
 
         self._last_sequence = batch.sequence_number
         return tuple(observations)

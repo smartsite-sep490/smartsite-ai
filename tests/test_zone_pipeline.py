@@ -95,6 +95,27 @@ def test_zone_pipeline_resets_state_when_geometry_version_changes() -> None:
     assert zones.process(moved_back_outside, configuration(geometry_version=8)) == ()
 
 
+def empty_batch(sequence_number: int) -> DetectionBatch:
+    return batch(sequence_number, person((0.35, 0.20, 0.55, 0.39))).model_copy(
+        update={"detections": ()}
+    )
+
+
+def test_zone_pipeline_drops_track_state_after_the_tracker_grace_window() -> None:
+    tracker = IoUPersonTracker()
+    zones = RestrictedZonePipeline()
+    outside = tracker.update(batch(1, person((0.35, 0.20, 0.55, 0.39))))
+    zones.process(outside, configuration())
+    assert zones._inside
+
+    for sequence_number in (2, 3):
+        zones.process(tracker.update(empty_batch(sequence_number)), configuration())
+    assert zones._inside
+
+    zones.process(tracker.update(empty_batch(4)), configuration())
+    assert zones._inside == {}
+
+
 def test_zone_pipeline_rejects_wrong_camera_and_out_of_order_frames() -> None:
     tracker = IoUPersonTracker()
     zones = RestrictedZonePipeline()

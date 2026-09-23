@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import sys
+import threading
 from collections.abc import Callable, Iterable
 
 import pytest
@@ -206,6 +207,37 @@ def test_connect_failure_releases_capture_and_masks_credentials(
     assert "***" in message
     assert capture.release_calls == 1
     assert source.is_connected is False
+
+
+@pytest.mark.anyio
+async def test_close_waits_for_an_in_flight_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    started = threading.Event()
+    release_gate = threading.Event()
+
+    class GatedCapture(FakeCapture):
+        def read(self) -> tuple[bool, object | None]:
+            self.read_calls += 1
+            started.set()
+            assert release_gate.wait(timeout=2)
+            return False, None
+
+    capture = GatedCapture(opened=True)
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    source = OpenCvFrameSource(make_config())
+    await source.connect()
+    read_task = asyncio.create_task(source.read_frame())
+    assert await asyncio.to_thread(started.wait, 1)
+    close_task = asyncio.create_task(source.close())
+    await asyncio.sleep(0.05)
+    assert capture.release_calls == 0
+    release_gate.set()
+    assert await read_task is None
+    await close_task
+    assert capture.release_calls == 1
 
 
 def test_close_releases_capture_and_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:

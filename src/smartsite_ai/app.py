@@ -136,17 +136,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             return
         try:
-            zone_polygon = parse_zone_polygon(settings.realtime_zone_polygon)
+            parse_zone_polygon(settings.realtime_zone_polygon)
         except ValueError:
             await _reject_realtime(websocket, "Realtime zone polygon is invalid")
             return
         async with app.state.realtime_lock:
-            await stream_realtime(
-                websocket,
-                model_path=settings.realtime_model_path,
-                source=settings.realtime_source,
-                confidence=settings.realtime_confidence,
-                zone_polygon=zone_polygon,
-            )
+            await stream_realtime(websocket, settings)
 
     return app

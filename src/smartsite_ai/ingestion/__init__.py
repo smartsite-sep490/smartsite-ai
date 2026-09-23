@@ -3,6 +3,7 @@
 from smartsite_ai.ingestion.backoff import ExponentialBackoff
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
 from smartsite_ai.ingestion.source import (
     FrameIntegrityError,
@@ -36,6 +37,7 @@ __all__ = [
     "FrameIntegrityError",
     "FrameSource",
     "IngestionError",
+    "OpenCvFrameSource",
     "QueueClosedError",
     "SessionSequenceError",
     "SourceAuthenticationError",

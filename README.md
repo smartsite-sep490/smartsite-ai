@@ -67,7 +67,7 @@ SmartSite Backend
 | --- | --- |
 | API | Python, FastAPI |
 | Detection | YOLO11s baseline |
-| Tracking | Supervision + tracker |
+| Tracking | Deterministic IoU tracker at the provider-neutral pipeline boundary |
 | PPE monitoring | Trained PPE detection weights |
 | Zone monitoring | Tracking + configured geometry |
 | Identity experiment | InsightFace / ArcFace |
@@ -115,7 +115,7 @@ The AI service does not own Site/Zone authorization rules.
 
 ## Current Status
 
-**Current phase: FastAPI foundation.**
+**Current phase: FastAPI and technical MF05/MF06 pipeline foundation.**
 
 Implemented:
 
@@ -125,6 +125,13 @@ Implemented:
 - RFC 8785 compatible hashing with cross-runtime safe-integer guards;
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
+- optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;
+- verified local model-artifact metadata, a lazy Ultralytics YOLO runner, and normalized `DetectionBatch` output;
+- local annotated-video validation with an optional MF05/MF06 UI timeline export;
+- deterministic IoU person tracking with stream/session-scoped track IDs;
+- PPE-to-person association with technical `PRESENT`/observable `MISSING` observations;
+- configured polygon restricted-zone transition detection with geometry-version handling;
+- MF05/MF06 orchestration into the locked technical observation event, with synthetic fixtures and behavior tests;
 - liveness endpoint;
 - readiness endpoint;
 - capability endpoint;
@@ -137,18 +144,19 @@ Implemented:
 
 Not yet implemented:
 
-- live RTSP stream hardware decode / OpenCV adapter (hardware/network dependent);
+- live RTSP hardware/network validation;
 - GPU runtime configuration;
-- YOLO inference;
 - PPE model weights;
-- tracking pipeline;
-- Zone geometry processing;
+- production detector-to-pipeline worker wiring;
+- production tracker/model calibration and evaluation on representative site data;
 - InsightFace integration;
 - camera/inference event producer loop;
 - OpenAI adapter;
 - benchmark results.
 
-The API explicitly reports `inference_ready: false` until inference capabilities actually exist.
+The API explicitly reports `inference_ready: false` until a configured worker has a verified local
+artifact, active camera source, and tested runtime; the local video command does not change API
+readiness.
 
 ## Requirements
 
@@ -167,6 +175,26 @@ Run the service:
 ```sh
 uv run --frozen smartsite-ai
 ```
+
+### Video source smoke test
+
+The video files used for local validation must stay outside Git. Install the
+optional vision dependencies, then pass an absolute path from Downloads:
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen --extra vision python -m smartsite_ai.ingestion.video_smoke `
+  "$env:USERPROFILE\Downloads\hazard_restricted_zone_test.mp4" `
+  --stream-id hazard-demo --camera-external-id hazard-demo --max-frames 120
+
+uv run --frozen --extra vision python -m smartsite_ai.ingestion.video_smoke `
+  "$env:USERPROFILE\Downloads\morteza_ppe_test_video.mp4" `
+  --stream-id ppe-demo --camera-external-id ppe-demo --max-frames 120
+```
+
+The command validates OpenCV open/decode, BGR24 frame envelope creation, EOF,
+worker queue delivery, and cleanup. It does not run YOLO inference or claim PPE
+or zone accuracy.
 
 Default development address: `http://127.0.0.1:8000`.
 
@@ -226,6 +254,18 @@ video command. It does not establish the checkpoint's training-data provenance, 
 accuracy, PPE-policy validity, production suitability, YOLO11s performance, or GPU support. Run
 with a GPU device only after `torch.cuda.is_available()` is true in the installed vision
 environment, and record the resulting hardware/runtime evidence separately.
+
+### Local MF05/MF06 UI test export
+
+The local command can pass normalized YOLO batches through the technical MF05/MF06 pipeline and
+write a timeline file consumed by the web UI. It stays local, does not call the Backend, and does
+not decide an authorized/unauthorized result. The output paths below are ignored by Git.
+
+```powershell
+uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\morteza_ppe_test_video.mp4 --camera-external-id ppe-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\ppe-ui.annotated.mp4 --metadata-output runs\ppe-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\ppe-ai.timeline.json --region-configuration examples\ppe-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
+
+uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\hazard_restricted_zone_test.mp4 --camera-external-id zone-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\zone-ui.annotated.mp4 --metadata-output runs\zone-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\zone-ai.timeline.json --region-configuration examples\zone-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
+```
 
 ## Testing
 

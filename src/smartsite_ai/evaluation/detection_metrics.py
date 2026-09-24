@@ -16,11 +16,11 @@ from smartsite_ai.evaluation.models import (
 )
 
 
-class _MetricModel(BaseModel):
+class ImmutableMetricsModel(BaseModel):
     model_config = ConfigDict(strict=True, frozen=True, extra="forbid", allow_inf_nan=False)
 
 
-class DetectionEvaluationFrame(_MetricModel):
+class DetectionEvaluationFrame(ImmutableMetricsModel):
     """Ground truth and predictions belonging to one evaluation frame."""
 
     frame_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
@@ -35,7 +35,7 @@ class DetectionEvaluationFrame(_MetricModel):
         return value
 
 
-class MetricValue(_MetricModel):
+class MetricValue(ImmutableMetricsModel):
     """A metric value, or an explicit explanation of why it is undefined."""
 
     value: float | None
@@ -48,7 +48,7 @@ class MetricValue(_MetricModel):
         return self
 
 
-class DetectionCounts(_MetricModel):
+class DetectionCounts(ImmutableMetricsModel):
     true_positives: int = Field(ge=0)
     false_positives: int = Field(ge=0)
     false_negatives: int = Field(ge=0)
@@ -68,7 +68,7 @@ class ClassDetectionMetrics(DetectionCounts):
     class_name: CanonicalPpeClassName
 
 
-class MacroDetectionMetrics(_MetricModel):
+class MacroDetectionMetrics(ImmutableMetricsModel):
     supported_classes: tuple[CanonicalPpeClassName, ...]
     excluded_classes: tuple[CanonicalPpeClassName, ...]
     precision: MetricValue
@@ -76,7 +76,7 @@ class MacroDetectionMetrics(_MetricModel):
     f1: MetricValue
 
 
-class DetectionMetricsReport(_MetricModel):
+class DetectionMetricsReport(ImmutableMetricsModel):
     iou_threshold: float = Field(gt=0.0, le=1.0)
     per_class: tuple[ClassDetectionMetrics, ...]
     macro: MacroDetectionMetrics
@@ -225,6 +225,7 @@ __all__ = [
     "DetectionCounts",
     "DetectionEvaluationFrame",
     "DetectionMetricsReport",
+    "ImmutableMetricsModel",
     "MacroDetectionMetrics",
     "MetricValue",
     "compute_detection_metrics",

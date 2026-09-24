@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
@@ -22,6 +23,10 @@ from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
+from smartsite_ai.pipelines.ppe_temporal import (
+    TemporalPpeCandidateGate,
+    filter_event_for_delivery,
+)
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
@@ -84,15 +89,6 @@ def _ui_frame(event: Any, width: int, height: int) -> dict[str, Any]:
         "detections": detections,
         "zoneDetections": zone_detections,
     }
-
-
-def _should_post(event: Any) -> bool:
-    payload = event.to_wire_dict()
-    return any(
-        observation["type"] == "ZONE_ENTRY"
-        or (observation["type"] == "PPE" and observation["status"] == "MISSING")
-        for observation in payload["observations"]
-    )
 
 
 def parse_zone_polygon(raw: str) -> list[tuple[float, float]]:
@@ -210,6 +206,32 @@ def _load_realtime_stack(
     return detector, runner, pipeline, configuration
 
 
+class RealtimeStreamGateTracker:
+    """Manage TemporalPpeCandidateGate lifecycle across replay stream sessions."""
+
+    def __init__(
+        self,
+        gate_factory: Callable[[], TemporalPpeCandidateGate] = TemporalPpeCandidateGate,
+    ) -> None:
+        self._gate_factory = gate_factory
+        self._current_session_id: UUID | None = None
+        self._gate: TemporalPpeCandidateGate = self._gate_factory()
+
+    @property
+    def current_session_id(self) -> UUID | None:
+        return self._current_session_id
+
+    @property
+    def gate(self) -> TemporalPpeCandidateGate:
+        return self._gate
+
+    def get_gate(self, session_id: UUID) -> TemporalPpeCandidateGate:
+        if self._current_session_id is not None and self._current_session_id != session_id:
+            self._gate = self._gate_factory()
+        self._current_session_id = session_id
+        return self._gate
+
+
 async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
     """Stream one source through the technical pipeline until the client disconnects."""
 
@@ -247,6 +269,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 {"type": "error", "message": f"Cannot open {safe_source_label(source)}"}
             )
             return
+        gate_tracker = RealtimeStreamGateTracker()
         failures = 0
         while True:
             try:
@@ -285,10 +308,27 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                     )
                 ),
             )
+            active_track_ids: tuple[int, ...] = ()
+            ppe_observations: tuple[Any, ...] = ()
+            if event is not None:
+                active_track_ids = tuple(
+                    obs.track_id for obs in event.observations if obs.type == "PERSON"
+                )
+                ppe_observations = tuple(obs for obs in event.observations if obs.type == "PPE")
+            temporal_gate = gate_tracker.get_gate(batch.session_id)
+            confirmed_candidates = temporal_gate.update(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                observed_at=batch.captured_at,
+                active_track_ids=active_track_ids,
+                observations=ppe_observations,
+            )
             await websocket.send_json(_ui_frame(event, envelope.width, envelope.height))
-            if backend is not None and event is not None and _should_post(event):
-                with suppress(Exception):
-                    await backend.post_event(event)
+            if backend is not None and event is not None:
+                delivery_event = filter_event_for_delivery(event, confirmed_candidates)
+                if delivery_event is not None:
+                    with suppress(Exception):
+                        await backend.post_event(delivery_event)
             await asyncio.sleep(0)
     except WebSocketDisconnect:
         return

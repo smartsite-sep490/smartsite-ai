@@ -59,12 +59,52 @@ def region() -> CameraObservationRegionConfiguration:
                     "regionId": REGION_ID,
                     "geometryVersion": 7,
                     "coordinateSpace": "NORMALIZED_0_1",
-                    "polygon": {"coordinates": ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0))},
+                    "polygon": {"coordinates": ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))},
                 },
             ),
         }
     )
     return configuration.regions[0]
+
+
+def left_half_region() -> CameraObservationRegionConfiguration:
+    configuration = CameraRegionConfiguration.model_validate(
+        {
+            "schemaVersion": "1.0.0",
+            "configurationVersion": 1,
+            "cameraExternalId": "camera-01",
+            "regions": (
+                {
+                    "regionId": REGION_ID,
+                    "geometryVersion": 7,
+                    "coordinateSpace": "NORMALIZED_0_1",
+                    "polygon": {"coordinates": ((0.0, 0.0), (0.5, 0.0), (0.5, 1.0), (0.0, 1.0))},
+                },
+            ),
+        }
+    )
+    return configuration.regions[0]
+
+
+def test_ppe_pipeline_omits_person_whose_bottom_center_is_outside_region() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.40, 0.10, 0.80, 0.90)),
+            detection("NO-Hardhat", (0.55, 0.12, 0.65, 0.25)),
+        )
+    )
+    assert PpePipeline().process(tracked, left_half_region()) == ()
+
+
+def test_ppe_pipeline_includes_polygon_boundary_bottom_center() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.40, 0.10, 0.60, 0.90)),
+            detection("NO-Hardhat", (0.44, 0.12, 0.54, 0.25)),
+        )
+    )
+    observations = PpePipeline().process(tracked, left_half_region())
+    assert [(item.ppe_item, item.status) for item in observations] == [("HARD_HAT", "MISSING")]
 
 
 def test_ppe_pipeline_associates_items_with_the_correct_person() -> None:
@@ -119,3 +159,30 @@ def test_ppe_pipeline_requires_an_explicit_negative_class_for_missing() -> None:
         ("SAFETY_VEST", "MISSING"),
     ]
     assert clipped_observations == ()
+
+
+def test_ppe_pipeline_omits_contradictory_item_evidence() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.40, 0.90)),
+            detection("Hardhat", (0.16, 0.12, 0.25, 0.25), 0.95),
+            detection("NO-Hardhat", (0.17, 0.12, 0.26, 0.25), 0.94),
+            detection("Safety Vest", (0.15, 0.35, 0.35, 0.70), 0.90),
+        )
+    )
+    observations = PpePipeline().process(tracked, region())
+    assert [(item.ppe_item, item.status) for item in observations] == [("SAFETY_VEST", "PRESENT")]
+
+
+def test_ppe_pipeline_suppresses_missing_fallback_for_conflicted_evidence() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.40, 0.90)),
+            detection("Hardhat", (0.16, 0.12, 0.25, 0.25), 0.95),
+            detection("NO-Hardhat", (0.17, 0.12, 0.26, 0.25), 0.94),
+            detection("Safety Vest", (0.15, 0.35, 0.35, 0.70), 0.90),
+        )
+    )
+    pipeline = PpePipeline(emit_missing=True)
+    observations = pipeline.process(tracked, region())
+    assert [(item.ppe_item, item.status) for item in observations] == [("SAFETY_VEST", "PRESENT")]

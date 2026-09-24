@@ -40,7 +40,13 @@ from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.pipelines import Mf05Mf06Pipeline, PpePipeline, RestrictedZonePipeline
+from smartsite_ai.pipelines import (
+    Mf05Mf06Pipeline,
+    PpePipeline,
+    RestrictedZonePipeline,
+    TemporalPpeCandidateGate,
+    filter_event_for_delivery,
+)
 from smartsite_ai.tracking import IoUPersonTracker
 
 # OpenCV property identifiers are stable public constants.  Keeping these numeric values here
@@ -66,6 +72,7 @@ class _UiTimelineCollector:
     configuration: CameraRegionConfiguration
     ppe_region_id: str
     pipeline: Mf05Mf06Pipeline = field(init=False)
+    temporal_gate: TemporalPpeCandidateGate = field(init=False)
     entries: list[dict[str, object]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -75,6 +82,7 @@ class _UiTimelineCollector:
             zones=RestrictedZonePipeline(),
             ppe_region_id=self.ppe_region_id,
         )
+        self.temporal_gate = TemporalPpeCandidateGate()
 
     def observe(self, batch: DetectionBatch, video_time_seconds: float) -> None:
         event = self.pipeline.process(
@@ -87,22 +95,33 @@ class _UiTimelineCollector:
                 )
             ),
         )
+        active_track_ids: tuple[int, ...] = ()
+        ppe_observations: tuple[Any, ...] = ()
+        if event is not None:
+            active_track_ids = tuple(
+                obs.track_id for obs in event.observations if obs.type == "PERSON"
+            )
+            ppe_observations = tuple(obs for obs in event.observations if obs.type == "PPE")
+
+        confirmed_candidates = self.temporal_gate.update(
+            stream_id=batch.stream_id,
+            session_id=batch.session_id,
+            observed_at=batch.captured_at,
+            active_track_ids=active_track_ids,
+            observations=ppe_observations,
+        )
+
         if event is None:
             return
 
-        event_payload = event.to_wire_dict()
-        observations = event_payload["observations"]
-        if not any(
-            observation["type"] == "ZONE_ENTRY"
-            or (observation["type"] == "PPE" and observation["status"] == "MISSING")
-            for observation in observations
-        ):
+        delivery_event = filter_event_for_delivery(event, confirmed_candidates)
+        if delivery_event is None:
             return
 
         self.entries.append(
             {
                 "videoTimeSeconds": round(video_time_seconds, 3),
-                "event": event_payload,
+                "event": delivery_event.to_wire_dict(),
             }
         )
 

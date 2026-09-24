@@ -48,15 +48,22 @@ class FakeCapture:
         opened: bool = True,
         release_raises: bool = False,
         frames: Iterable[object] = (),
+        pos_msec_values: Iterable[float] | None = None,
     ) -> None:
         self.opened = opened
         self.release_raises = release_raises
         self.release_calls = 0
         self.read_calls = 0
         self.frames = list(frames)
+        self.pos_msec_values = list(pos_msec_values) if pos_msec_values is not None else None
 
     def isOpened(self) -> bool:
         return self.opened
+
+    def get(self, prop_id: int) -> float:
+        if prop_id == 0 and self.pos_msec_values:
+            return self.pos_msec_values.pop(0)
+        return 0.0
 
     def read(self) -> tuple[bool, object | None]:
         self.read_calls += 1
@@ -501,3 +508,183 @@ async def test_stream_worker_applies_sampling_to_opencv_frames(
     assert status.metrics.frames_enqueued == 1
     assert status.metrics.sampled_out_frames == 2
     assert capture.read_calls == 4
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_non_live_stamps_session_start_plus_pos_msec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[
+            make_bgr_frame(640, 480),
+            make_bgr_frame(640, 480),
+        ],
+        pos_msec_values=[0.0, 500.0],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        session_start = source._session_start
+        assert session_start is not None
+
+        frame0 = await source.read_frame()
+        assert frame0 is not None
+        assert frame0.captured_at == session_start + timedelta(milliseconds=0.0)
+
+        frame1 = await source.read_frame()
+        assert frame1 is not None
+        assert frame1.captured_at == session_start + timedelta(milliseconds=500.0)
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_live_stamps_utc_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+        pos_msec_values=[1000.0],  # Should be ignored for live source
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="live-stream",
+        camera_external_id="cam-01",
+        source_url="rtsp://camera.local/live",
+        is_live=True,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        before = datetime.now(UTC)
+        frame = await source.read_frame()
+        after = datetime.now(UTC)
+        assert frame is not None
+        assert before <= frame.captured_at <= after
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "invalid_pos_msec",
+    [
+        None,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        -1.0,
+        -0.001,
+        "not-a-number",
+    ],
+)
+async def test_opencv_frame_source_non_live_rejects_invalid_pos_msec(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_pos_msec: object,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    class FakeCaptureWithInvalidPos(FakeCapture):
+        def get(self, prop_id: int) -> object:
+            if prop_id == 0:
+                return invalid_pos_msec
+            return 0.0
+
+    capture = FakeCaptureWithInvalidPos(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        with pytest.raises(SourceReadError):
+            await source.read_frame()
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_non_live_rejects_missing_or_raising_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    class CaptureWithoutGet:
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, object | None]:
+            return True, make_bgr_frame(640, 480)
+
+        def release(self) -> None:
+            pass
+
+    capture1 = CaptureWithoutGet()
+    cv2 = FakeCv2(lambda _source: capture1)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source1 = OpenCvFrameSource(config)
+    await source1.connect()
+    try:
+        with pytest.raises(SourceReadError, match="missing 'get' method"):
+            await source1.read_frame()
+    finally:
+        await source1.close()
+
+    class CaptureWithRaisingGet(FakeCapture):
+        def get(self, prop_id: int) -> float:
+            raise RuntimeError("Corrupted stream index")
+
+    capture2 = CaptureWithRaisingGet(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+    )
+    cv2 = FakeCv2(lambda _source: capture2)
+    install_fake_cv2(monkeypatch, cv2)
+
+    source2 = OpenCvFrameSource(config)
+    await source2.connect()
+    try:
+        with pytest.raises(SourceReadError, match="failed to read media timestamp"):
+            await source2.read_frame()
+    finally:
+        await source2.close()

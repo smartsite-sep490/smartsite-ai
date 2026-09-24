@@ -18,7 +18,12 @@ from smartsite_ai.pipelines.ppe_temporal import (
     filter_event_for_delivery,
     should_post_event,
 )
-from smartsite_ai.realtime import parse_zone_polygon, resolve_realtime_device, safe_source_label
+from smartsite_ai.realtime import (
+    RealtimeStreamGateTracker,
+    parse_zone_polygon,
+    resolve_realtime_device,
+    safe_source_label,
+)
 
 
 def test_zone_polygon_rejects_out_of_range_points() -> None:
@@ -332,3 +337,34 @@ async def test_realtime_loop_gate_updates_every_batch_and_controls_post_count() 
         o["type"] == "PPE" and o["status"] == "MISSING"
         for o in second_call_event.to_wire_dict()["observations"]
     )
+
+
+def test_realtime_stream_gate_tracker_resets_on_session_transition() -> None:
+    factory_calls = 0
+
+    def custom_factory() -> TemporalPpeCandidateGate:
+        nonlocal factory_calls
+        factory_calls += 1
+        return TemporalPpeCandidateGate()
+
+    tracker = RealtimeStreamGateTracker(gate_factory=custom_factory)
+    assert factory_calls == 1
+
+    session_1 = UUID("00000000-0000-0000-0000-000000000001")
+    session_2 = UUID("00000000-0000-0000-0000-000000000002")
+
+    gate_1 = tracker.get_gate(session_1)
+    assert tracker.current_session_id == session_1
+    assert tracker.gate is gate_1
+    assert factory_calls == 1
+
+    # Same session returns identical gate instance without invoking factory
+    assert tracker.get_gate(session_1) is gate_1
+    assert factory_calls == 1
+
+    # Transitioning to session_2 replaces the gate with a newly constructed instance
+    gate_2 = tracker.get_gate(session_2)
+    assert gate_2 is not gate_1
+    assert tracker.current_session_id == session_2
+    assert tracker.gate is gate_2
+    assert factory_calls == 2

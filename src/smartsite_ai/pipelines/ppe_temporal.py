@@ -79,8 +79,9 @@ class TemporalPpeCandidateGate:
             )
         self._last_observed_at[stream_key] = observed_at
 
-        # Expire state for inactive tracks exceeding track_expiry
-        active_track_set = set(active_track_ids)
+        # Deduplicate active tracks preserving order
+        unique_active_track_ids = tuple(dict.fromkeys(active_track_ids))
+        active_track_set = set(unique_active_track_ids)
         for key, state in list(self._states.items()):
             if key[0] == stream_id and key[1] == session_id:
                 track_id = key[2]
@@ -94,7 +95,7 @@ class TemporalPpeCandidateGate:
         }
 
         confirmed_candidates: list[ConfirmedPpeCandidate] = []
-        for track_id in active_track_ids:
+        for track_id in unique_active_track_ids:
             for item in PPE_ITEMS:
                 state_key = (stream_id, session_id, track_id, item)
                 obs = obs_by_track_item.get((track_id, item))
@@ -135,11 +136,18 @@ class TemporalPpeCandidateGate:
                             )
                             confirmed_candidates.append(candidate)
                             self._cooldowns[state_key] = observed_at
-                        state.confirmed = True
+                            state.confirmed = True
                 else:
-                    # Explicit PRESENT or absent/omitted item for this active track
+                    # Non-missing frame (explicit PRESENT or absent/omitted item)
                     state.consecutive_clear += 1
-                    if state.consecutive_clear >= self._clear_frames:
+                    if not state.confirmed:
+                        # Before confirmation, any non-missing frame immediately resets
+                        # the pending missing streak.
+                        state.consecutive_missing = 0
+                        state.first_seen_at = None
+                    elif state.consecutive_clear >= self._clear_frames:
+                        # After confirmation, clear_frames consecutive non-missing frames
+                        # are required to reset the confirmed episode.
                         state.consecutive_missing = 0
                         state.first_seen_at = None
                         state.confirmed = False
@@ -158,12 +166,15 @@ def filter_event_for_delivery(
     - PERSON, ZONE_ENTRY, and other non-PPE observations unchanged.
     - PPE observations with status PRESENT unchanged.
     - PPE observations with status MISSING only when (track_id, ppe_item) matches
-      a confirmed candidate.
+      a confirmed candidate belonging to this event's stream session.
     - Returns None if no deliverable trigger (ZONE_ENTRY or confirmed PPE/MISSING) remains.
     """
 
+    event_session_str = event.stream_session_id
     confirmed_keys = {
-        (candidate.track_id, candidate.ppe_item) for candidate in confirmed_ppe_candidates
+        (candidate.track_id, candidate.ppe_item)
+        for candidate in confirmed_ppe_candidates
+        if str(candidate.session_id) == event_session_str
     }
 
     filtered_observations = []

@@ -2,13 +2,16 @@
 
 import asyncio
 import importlib
-from datetime import UTC, datetime
+import math
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
+
+CAP_PROP_POS_MSEC = 0
 
 
 class OpenCvFrameSource:
@@ -22,6 +25,7 @@ class OpenCvFrameSource:
         self.config = config
         self._capture: Any | None = None
         self._session_id: UUID | None = None
+        self._session_start: datetime | None = None
         self._sequence_number = 0
         self._is_connected = False
         self._io_lock = asyncio.Lock()
@@ -82,7 +86,12 @@ class OpenCvFrameSource:
         if release is not None:
             release()
 
-    def _frame_to_envelope(self, frame: Any) -> FrameEnvelope:
+    def _frame_to_envelope(
+        self,
+        frame: Any,
+        *,
+        pos_msec: float | None = None,
+    ) -> FrameEnvelope:
         shape = getattr(frame, "shape", None)
         dtype = getattr(frame, "dtype", None)
         if len(shape or ()) != 3:
@@ -107,11 +116,20 @@ class OpenCvFrameSource:
         if self._session_id is None:
             raise SourceReadError("OpenCV source is missing an active session")
 
+        if not self.config.is_live:
+            if self._session_start is None:
+                raise SourceReadError("Non-live OpenCV source is missing active session start")
+            if pos_msec is None:
+                raise SourceReadError("Non-live OpenCV source requires valid media timestamp")
+            captured_at = self._session_start + timedelta(milliseconds=pos_msec)
+        else:
+            captured_at = datetime.now(UTC)
+
         envelope = FrameEnvelope(
             stream_id=self.config.stream_id,
             session_id=self._session_id,
             camera_external_id=self.config.camera_external_id,
-            captured_at=datetime.now(UTC),
+            captured_at=captured_at,
             width=int(width),
             height=int(height),
             sequence_number=self._sequence_number,
@@ -129,6 +147,7 @@ class OpenCvFrameSource:
             async with self._io_lock:
                 self._capture = capture
                 self._session_id = uuid4()
+                self._session_start = datetime.now(UTC)
                 self._sequence_number = 0
                 self._is_connected = True
                 capture = None
@@ -150,7 +169,37 @@ class OpenCvFrameSource:
             if not ok or frame is None:
                 return None
 
-            return self._frame_to_envelope(frame)
+            pos_msec: float | None = None
+            if not self.config.is_live:
+                get_fn = getattr(self._capture, "get", None)
+                if get_fn is None:
+                    raise SourceReadError(
+                        "OpenCV capture is missing 'get' method for media timestamps"
+                    )
+                try:
+                    raw_pos = await asyncio.to_thread(get_fn, CAP_PROP_POS_MSEC)
+                except Exception as exc:
+                    raise SourceReadError(
+                        f"OpenCV failed to read media timestamp: {type(exc).__name__}"
+                    ) from exc
+
+                if raw_pos is None:
+                    raise SourceReadError("OpenCV returned null media timestamp")
+
+                try:
+                    val = float(raw_pos)
+                except (TypeError, ValueError) as exc:
+                    raise SourceReadError(
+                        f"OpenCV returned non-numeric media timestamp: {raw_pos!r}"
+                    ) from exc
+
+                if not math.isfinite(val) or val < 0.0:
+                    raise SourceReadError(
+                        f"OpenCV returned invalid media timestamp (finite and >= 0 required): {val}"
+                    )
+                pos_msec = val
+
+            return self._frame_to_envelope(frame, pos_msec=pos_msec)
 
     async def close(self) -> None:
         """Release the source if it has been connected."""

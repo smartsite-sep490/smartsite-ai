@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
@@ -205,6 +206,32 @@ def _load_realtime_stack(
     return detector, runner, pipeline, configuration
 
 
+class RealtimeStreamGateTracker:
+    """Manage TemporalPpeCandidateGate lifecycle across replay stream sessions."""
+
+    def __init__(
+        self,
+        gate_factory: Callable[[], TemporalPpeCandidateGate] = TemporalPpeCandidateGate,
+    ) -> None:
+        self._gate_factory = gate_factory
+        self._current_session_id: UUID | None = None
+        self._gate: TemporalPpeCandidateGate = self._gate_factory()
+
+    @property
+    def current_session_id(self) -> UUID | None:
+        return self._current_session_id
+
+    @property
+    def gate(self) -> TemporalPpeCandidateGate:
+        return self._gate
+
+    def get_gate(self, session_id: UUID) -> TemporalPpeCandidateGate:
+        if self._current_session_id is not None and self._current_session_id != session_id:
+            self._gate = self._gate_factory()
+        self._current_session_id = session_id
+        return self._gate
+
+
 async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
     """Stream one source through the technical pipeline until the client disconnects."""
 
@@ -242,7 +269,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 {"type": "error", "message": f"Cannot open {safe_source_label(source)}"}
             )
             return
-        temporal_gate = TemporalPpeCandidateGate()
+        gate_tracker = RealtimeStreamGateTracker()
         failures = 0
         while True:
             try:
@@ -288,6 +315,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                     obs.track_id for obs in event.observations if obs.type == "PERSON"
                 )
                 ppe_observations = tuple(obs for obs in event.observations if obs.type == "PPE")
+            temporal_gate = gate_tracker.get_gate(batch.session_id)
             confirmed_candidates = temporal_gate.update(
                 stream_id=batch.stream_id,
                 session_id=batch.session_id,

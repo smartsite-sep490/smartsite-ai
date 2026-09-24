@@ -739,3 +739,295 @@ def test_filter_event_for_delivery_returns_none_when_no_deliverable_trigger() ->
     # Person + unconfirmed MISSING -> None (suppressed)
     assert filter_event_for_delivery(_make_event(person, unconfirmed_missing), ()) is None
     assert not should_post_event(_make_event(person, unconfirmed_missing), ())
+
+
+def test_non_missing_frame_resets_pending_missing_streak() -> None:
+    """A non-missing frame before confirmation resets consecutive missing streak immediately."""
+    gate = TemporalPpeCandidateGate(confirmation_frames=3, clear_frames=2)
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    # Frame 1: MISSING (streak = 1)
+    c1 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0,
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert c1 == ()
+
+    # Frame 2: MISSING (streak = 2)
+    c2 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=200),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert c2 == ()
+
+    # Frame 3: PRESENT (breaks the pending missing streak immediately)
+    c3 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=400),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    assert c3 == ()
+
+    # Frame 4: MISSING (streak restarts at 1, must NOT emit candidate!)
+    c4 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=600),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert c4 == ()
+
+
+def test_clear_hysteresis_after_confirmation() -> None:
+    """After confirmation, 1 clear frame does not reset confirmed state, but 2 clear frames do."""
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=3,
+        clear_frames=2,
+        cooldown=timedelta(seconds=10),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    # Frames 1..3: MISSING -> confirmed!
+    for i in range(3):
+        res = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=200 * i),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+    assert len(res) == 1
+    t_confirm = res[0].confirmed_at
+
+    # Frame 4: 1 PRESENT frame (hysteresis: does not yet end confirmed episode)
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=800),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+
+    # Frame 5: 1 MISSING frame (remains in the same confirmed episode, no new candidate)
+    res5 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=1000),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert res5 == ()
+
+    # Clear episode with 2 consecutive PRESENT frames at t0 + 11s (> 10s cooldown)
+    t_clear = t_confirm + timedelta(seconds=11)
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_clear,
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_clear + timedelta(milliseconds=200),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+
+    # 3 new consecutive missing frames now start a new episode and emit candidate
+    t_new = t_clear + timedelta(seconds=1)
+    for i in range(2):
+        c = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t_new + timedelta(milliseconds=200 * i),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        assert c == ()
+
+    c_new = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_new + timedelta(milliseconds=400),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert len(c_new) == 1
+
+
+def test_duplicate_active_track_ids_normalized_to_single_count() -> None:
+    """Duplicate track ids in active_track_ids advance the counter only once per frame."""
+    gate = TemporalPpeCandidateGate(confirmation_frames=3)
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    # Frame 1: active_track_ids=(1, 1) -> must only advance by 1
+    c1 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0,
+        active_track_ids=(1, 1),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert c1 == ()
+
+    # Frame 2: active_track_ids=(1, 1) -> must only advance to 2, NOT jump to 4 or confirm
+    c2 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=200),
+        active_track_ids=(1, 1),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert c2 == ()
+
+    # Frame 3: active_track_ids=(1, 1) -> 3rd frame, confirms now!
+    c3 = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=400),
+        active_track_ids=(1, 1),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert len(c3) == 1
+
+
+def test_delivery_filtering_rejects_candidate_from_different_session() -> None:
+    """A candidate from a different session cannot authorize a raw MISSING observation."""
+    session_a = UUID("00000000-0000-4000-8000-000000000001")
+    session_b = UUID("00000000-0000-4000-8000-000000000002")
+
+    person = PersonObservation.model_validate(
+        {
+            "type": "PERSON",
+            "trackId": 1,
+            "confidence": 0.9,
+            "boundingBox": BoundingBox.model_validate(
+                {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.9, "coordinateSpace": "NORMALIZED_0_1"}
+            ).to_wire_dict(),
+        }
+    )
+    missing_ppe = ppe_obs(1, "HARD_HAT", "MISSING")
+
+    # Event belongs to session A
+    event_session_a = TechnicalObservationEvent.create(
+        event_id="00000000-0000-4000-8000-000000000010",
+        camera_external_id="camera-01",
+        stream_session_id=str(session_a),
+        captured_at=datetime(2026, 9, 21, 12, tzinfo=UTC).isoformat(),
+        frame_dimensions={"width": 640, "height": 480},
+        observations=[person, missing_ppe],
+    )
+
+    # Candidate was confirmed on session B
+    candidate_session_b = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=session_b,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
+        confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+    )
+
+    # Must NOT deliver missing PPE authorized by foreign session
+    assert filter_event_for_delivery(event_session_a, (candidate_session_b,)) is None
+    assert not should_post_event(event_session_a, (candidate_session_b,))
+
+
+def test_cooldown_blocked_new_episode_emits_at_cooldown_expiry_if_missing_persists() -> None:
+    """When a new episode reaches 3 missing inside cooldown and persists, emit upon expiry."""
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=3,
+        clear_frames=2,
+        cooldown=timedelta(seconds=10),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    # 1. Episode 1: confirmed at t0 + 0.4s
+    for i in range(3):
+        res1 = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=200 * i),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+    assert len(res1) == 1
+    t_confirm1 = res1[0].confirmed_at
+    assert t_confirm1 == t0 + timedelta(milliseconds=400)
+
+    # 2. Episode 1 clears with 2 PRESENT frames
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=800),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=1000),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+
+    # 3. New episode starts at t0 + 5.0s, reaches 3 missing at t0 + 5.4s (inside 10s cooldown)
+    t_ep2_start = t0 + timedelta(seconds=5)
+    for i in range(3):
+        res = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t_ep2_start + timedelta(milliseconds=200 * i),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        # Inside cooldown: must NOT emit candidate yet!
+        assert res == ()
+
+    # 4. Continuous MISSING frames up to t_confirm1 + 9.9s (still < 10.0s cooldown)
+    # Frames arrive every 500ms so track does not expire
+    current_t = t_ep2_start + timedelta(milliseconds=600)
+    while current_t <= t_confirm1 + timedelta(seconds=9, milliseconds=900):
+        res_pre = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=current_t,
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        assert res_pre == ()
+        current_t += timedelta(milliseconds=500)
+
+    # 5. Exactly at cooldown expiry: t_confirm1 + 10.0s (t0 + 10.4s), missing continues!
+    # Latch was not set, so candidate is emitted NOW!
+    res_expiry = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_confirm1 + timedelta(seconds=10),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert len(res_expiry) == 1
+    assert res_expiry[0].first_seen_at == t_ep2_start
+    assert res_expiry[0].confirmed_at == t_confirm1 + timedelta(seconds=10)
+
+    # 6. Subsequent missing frames in this confirmed episode do not emit again
+    res_after = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_confirm1 + timedelta(seconds=10, milliseconds=200),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert res_after == ()

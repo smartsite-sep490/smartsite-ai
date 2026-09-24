@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Callable, Mapping
+from importlib.metadata import version as distribution_version
 from math import isfinite
 from pathlib import Path
 
@@ -18,6 +19,7 @@ _RAW_RESULT_LIMIT = _MAX_RAW_DETECTIONS + 1
 
 ModelFactory = Callable[[Path], object]
 ImageFactory = Callable[[FrameEnvelope], object]
+ProviderVersionFactory = Callable[[], str]
 
 
 class UltralyticsYoloRunner:
@@ -28,11 +30,22 @@ class UltralyticsYoloRunner:
         *,
         model_factory: ModelFactory | None = None,
         image_factory: ImageFactory | None = None,
+        provider_version_factory: ProviderVersionFactory | None = None,
     ) -> None:
         self._model_factory = model_factory or _default_model_factory
         self._image_factory = image_factory or _bgr_image
+        self._provider_version_factory = provider_version_factory or _ultralytics_version
         self._model: object | None = None
         self._artifact: VerifiedModelArtifact | None = None
+
+    @property
+    def provider_metadata(self) -> dict[str, object]:
+        """Return facts read from the loaded provider checkpoint."""
+
+        model = self._model
+        if model is None:
+            raise DetectorUnavailableError("Ultralytics runner is not loaded")
+        return _extract_provider_metadata(model, self._provider_version_factory())
 
     def load(self, artifact: VerifiedModelArtifact) -> None:
         """Construct the model from an already verified local artifact."""
@@ -91,6 +104,54 @@ def _provider_image_size(image_size: tuple[int, int]) -> tuple[int, int]:
 
     width, height = image_size
     return (height, width)
+
+
+def _ultralytics_version() -> str:
+    return distribution_version("ultralytics")
+
+
+def _extract_provider_metadata(model: object, provider_version: str) -> dict[str, object]:
+    task = getattr(model, "task", None)
+    names = getattr(model, "names", None)
+    network = getattr(model, "model", None)
+    yaml = getattr(network, "yaml", None)
+    if not isinstance(yaml, Mapping):
+        raise DetectorUnavailableError("Ultralytics checkpoint metadata is unavailable")
+
+    yaml_file = yaml.get("yaml_file")
+    yaml_stem = Path(yaml_file).stem if isinstance(yaml_file, str) else ""
+    if yaml_stem not in {"yolo11", "yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x"}:
+        raise DetectorUnavailableError(
+            "Ultralytics checkpoint does not prove a YOLO11 architecture"
+        )
+    scale = yaml.get("scale")
+    if scale not in {"n", "s", "m", "l", "x"}:
+        raise DetectorUnavailableError("Ultralytics checkpoint has an invalid YOLO11 variant")
+    if yaml_stem != "yolo11" and yaml_stem != f"yolo11{scale}":
+        raise DetectorUnavailableError(
+            "Ultralytics checkpoint YOLO11 variant metadata is inconsistent"
+        )
+    if not isinstance(task, str):
+        raise DetectorUnavailableError("Ultralytics checkpoint task metadata is unavailable")
+    if not isinstance(names, Mapping):
+        raise DetectorUnavailableError("Ultralytics checkpoint class metadata is unavailable")
+
+    class_map: dict[str, str] = {}
+    for class_id, class_name in names.items():
+        if isinstance(class_id, bool) or not isinstance(class_id, int):
+            raise DetectorUnavailableError("Ultralytics checkpoint class IDs must be integers")
+        if not isinstance(class_name, str):
+            raise DetectorUnavailableError("Ultralytics checkpoint class names must be strings")
+        class_map[str(class_id)] = class_name
+
+    return {
+        "providerName": "ultralytics",
+        "providerVersion": provider_version,
+        "architecture": "yolo11",
+        "variant": scale,
+        "task": task,
+        "classMap": class_map,
+    }
 
 
 def _default_model_factory(path: Path) -> object:

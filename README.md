@@ -268,6 +268,56 @@ accuracy, PPE-policy validity, production suitability, YOLO11s performance, or G
 with a GPU device only after `torch.cuda.is_available()` is true in the installed vision
 environment, and record the resulting hardware/runtime evidence separately.
 
+This YOLOv8 command is a **smoke reference only**. It proves that the local video, provider, and
+annotation path can run; it is not the selected production model and its output must not be reported
+as YOLO11s evaluation evidence.
+
+## Official YOLO11s PPE evaluation gate
+
+The selected gate evaluates a locally fine-tuned **official Ultralytics YOLO11s detector** against
+versioned, representative PPE data. The command never downloads weights or datasets. Keep model
+weights, dataset media, labels, episode indexes, provider data configuration, annotated evidence,
+and run outputs outside Git. Commit only non-secret example contracts and reviewed aggregate
+results when the team explicitly decides they belong in the repository.
+
+Copy [examples/yolo11s-ppe-artifact.example.json](examples/yolo11s-ppe-artifact.example.json) to a
+local ignored path and replace every placeholder. `artifactPath` must be an absolute path to the
+fine-tuned `.pt` file, `sha256` must be the checksum of that exact file, and the public source URL
+and license must describe the actual artifact. The example uses a Windows absolute path because the
+artifact contract rejects relative paths; it does not refer to a bundled or downloadable model.
+
+An evaluation run requires all of these existing local inputs:
+
+- a dataset manifest plus the selected split index and referenced images/labels;
+- the verified YOLO11s artifact specification;
+- a ground-truth episode index for candidate-level alert scoring;
+- a camera-region configuration and the UUID of its PPE region;
+- a provider data configuration used for independent provider validation.
+
+Create a new report directory name for every run. The CLI rejects an existing report directory so a
+previous result cannot be silently overwritten.
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen --extra vision smartsite-ai-evaluate `
+  --dataset-manifest C:\SmartSite\local-data\ppe-evaluation-manifest.json `
+  --artifact-spec C:\SmartSite\local-config\yolo11s-ppe-artifact.json `
+  --episodes-index C:\SmartSite\local-data\indexes\test-episodes.jsonl `
+  --region-configuration C:\SmartSite\local-config\ppe-evaluation-regions.json `
+  --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 `
+  --provider-data-config C:\SmartSite\local-data\data.yaml `
+  --split test `
+  --match-iou 0.50 `
+  --report-dir C:\SmartSite\local-runs\yolo11s-ppe-test-2026-09-24 `
+  --annotated
+```
+
+The gate must produce predictions, detection accuracy, candidate/episode metrics, and a summary from
+the same verified artifact and dataset split. Annotated media is optional evidence and is generated
+outside the timed evaluation path. Until a real fine-tuned artifact and the required local inputs
+have completed this gate, SmartSite must describe YOLO11s as the selected architecture and training
+target, not as a validated PPE checkpoint.
+
 ### Local MF05/MF06 UI test export
 
 The local command can pass normalized YOLO batches through the technical MF05/MF06 pipeline and

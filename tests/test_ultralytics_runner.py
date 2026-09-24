@@ -102,6 +102,27 @@ class FakeModel:
         return self._results
 
 
+class FakeProviderNetwork:
+    def __init__(self, *, scale: str = "s", yaml_file: str = "yolo11.yaml") -> None:
+        self.yaml = {"scale": scale, "yaml_file": yaml_file}
+
+
+class FakeProviderModel(FakeModel):
+    def __init__(
+        self,
+        results: list[FakeResult],
+        *,
+        scale: str = "s",
+        yaml_file: str = "yolo11.yaml",
+        task: str = "detect",
+        names: dict[int, str] | None = None,
+    ) -> None:
+        super().__init__(results)
+        self.model = FakeProviderNetwork(scale=scale, yaml_file=yaml_file)
+        self.task = task
+        self.names = names or {0: "person", 1: "hard_hat"}
+
+
 class FakeImageFlags:
     writeable = False
 
@@ -207,6 +228,72 @@ def test_load_is_explicit_and_prediction_uses_verified_path_and_frame_configurat
         "device": "cuda:0",
         "verbose": False,
     }
+
+
+def test_provider_metadata_is_derived_from_loaded_checkpoint_facts() -> None:
+    model = FakeProviderModel([make_result()], yaml_file="yolo11s.yaml")
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: model,
+        image_factory=fake_bgr_image,
+        provider_version_factory=lambda: "8.4.155",
+    )
+
+    runner.load(make_artifact())
+
+    assert runner.provider_metadata == {
+        "providerName": "ultralytics",
+        "providerVersion": "8.4.155",
+        "architecture": "yolo11",
+        "variant": "s",
+        "task": "detect",
+        "classMap": {"0": "person", "1": "hard_hat"},
+    }
+
+
+def test_provider_metadata_accepts_canonical_family_yaml_with_separate_scale() -> None:
+    model = FakeProviderModel([make_result()], scale="s", yaml_file="yolo11.yaml")
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: model,
+        image_factory=fake_bgr_image,
+        provider_version_factory=lambda: "8.4.155",
+    )
+
+    runner.load(make_artifact())
+
+    assert runner.provider_metadata["architecture"] == "yolo11"
+    assert runner.provider_metadata["variant"] == "s"
+
+
+def test_provider_metadata_rejects_yaml_variant_that_conflicts_with_scale() -> None:
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: FakeProviderModel([], scale="s", yaml_file="yolo11n.yaml"),
+        provider_version_factory=lambda: "8.4.155",
+    )
+    runner.load(make_artifact())
+
+    with pytest.raises(DetectorUnavailableError, match="variant metadata is inconsistent"):
+        _ = runner.provider_metadata
+
+
+def test_provider_metadata_rejects_unproven_or_contradictory_checkpoint_facts() -> None:
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: FakeProviderModel([], scale="s", yaml_file="yolov8.yaml"),
+        provider_version_factory=lambda: "8.4.155",
+    )
+    runner.load(make_artifact())
+
+    with pytest.raises(DetectorUnavailableError, match="YOLO11 architecture"):
+        _ = runner.provider_metadata
+
+
+def test_provider_metadata_before_load_is_rejected() -> None:
+    runner = UltralyticsYoloRunner(
+        model_factory=lambda _: FakeProviderModel([]),
+        provider_version_factory=lambda: "8.4.155",
+    )
+
+    with pytest.raises(DetectorUnavailableError, match="not loaded"):
+        _ = runner.provider_metadata
 
 
 def test_predict_rejects_a_provider_class_name_that_disagrees_with_the_artifact() -> None:

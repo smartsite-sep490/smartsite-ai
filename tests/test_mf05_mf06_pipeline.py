@@ -8,6 +8,7 @@ from smartsite_ai.tracking import IoUPersonTracker
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 REGION_ID = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+PPE_REGION_ID = "00000000-0000-4000-8000-000000000002"
 
 
 def box(x1: float, y1: float, x2: float, y2: float) -> NormalizedBoundingBox:
@@ -49,6 +50,12 @@ def configuration() -> CameraRegionConfiguration:
             "cameraExternalId": "camera-01",
             "regions": (
                 {
+                    "regionId": PPE_REGION_ID,
+                    "geometryVersion": 1,
+                    "coordinateSpace": "NORMALIZED_0_1",
+                    "polygon": {"coordinates": ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))},
+                },
+                {
                     "regionId": REGION_ID,
                     "geometryVersion": 7,
                     "coordinateSpace": "NORMALIZED_0_1",
@@ -64,7 +71,7 @@ def make_pipeline() -> Mf05Mf06Pipeline:
         tracker=IoUPersonTracker(),
         ppe=PpePipeline(),
         zones=RestrictedZonePipeline(),
-        ppe_region_id=REGION_ID,
+        ppe_region_id=PPE_REGION_ID,
     )
 
 

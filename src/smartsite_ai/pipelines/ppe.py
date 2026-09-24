@@ -7,8 +7,10 @@ from smartsite_ai.domain.observations import PpeObservation
 from smartsite_ai.domain.regions import CameraObservationRegionConfiguration
 from smartsite_ai.inference.models import NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.pipelines._geometry import (
+    bottom_center,
     box_center,
     intersection_over_second,
+    point_in_polygon,
     to_observation_bounding_box,
 )
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
@@ -80,9 +82,17 @@ class PpePipeline:
     ) -> tuple[PpeObservation, ...]:
         """Build PPE observations using the supplied immutable region context."""
 
-        associations = self._associate(tracked_frame)
+        eligible_people = tuple(
+            person
+            for person in tracked_frame.persons
+            if point_in_polygon(
+                bottom_center(person.bounding_box),
+                observation_region.polygon.coordinates,
+            )
+        )
+        associations = self._associate(tracked_frame, eligible_people)
         observations: list[PpeObservation] = []
-        for person in tracked_frame.persons:
+        for person in eligible_people:
             for item in self._items:
                 association = associations.get((person.track_id, item))
                 if association is not None:
@@ -109,11 +119,13 @@ class PpePipeline:
         return tuple(observations)
 
     def _associate(
-        self, tracked_frame: TrackedFrame
+        self,
+        tracked_frame: TrackedFrame,
+        eligible_people: tuple[TrackedPerson, ...],
     ) -> dict[tuple[int, PpeItem], tuple[Literal["PRESENT", "MISSING"], NormalizedDetection]]:
-        best: dict[
-            tuple[int, PpeItem],
-            tuple[float, float, int, Literal["PRESENT", "MISSING"], NormalizedDetection],
+        best_by_status: dict[
+            tuple[int, PpeItem, Literal["PRESENT", "MISSING"]],
+            tuple[float, float, int, NormalizedDetection],
         ] = {}
         for detection_index, detection in enumerate(tracked_frame.batch.detections):
             observation = self._class_to_observation.get(detection.class_name.casefold())
@@ -122,7 +134,7 @@ class PpePipeline:
             item, status = observation
 
             candidates: list[tuple[float, float, int, TrackedPerson]] = []
-            for person in tracked_frame.persons:
+            for person in eligible_people:
                 coverage = intersection_over_second(person.bounding_box, detection.bounding_box)
                 detection_center = box_center(detection.bounding_box)
                 if coverage < self._minimum_association_coverage:
@@ -134,13 +146,29 @@ class PpePipeline:
             if not candidates:
                 continue
             coverage, _person_confidence, _negative_track_id, person = max(candidates)
-            key = (person.track_id, item)
-            candidate = (coverage, detection.confidence, -detection_index, status, detection)
-            current = best.get(key)
+            status_key = (person.track_id, item, status)
+            candidate = (coverage, detection.confidence, -detection_index, detection)
+            current = best_by_status.get(status_key)
             if current is None or candidate[:3] > current[:3]:
-                best[key] = candidate
+                best_by_status[status_key] = candidate
 
-        return {key: (value[3], value[4]) for key, value in best.items()}
+        grouped: dict[
+            tuple[int, PpeItem],
+            dict[Literal["PRESENT", "MISSING"], tuple[float, float, int, NormalizedDetection]],
+        ] = {}
+        for (track_id, item, status), value in best_by_status.items():
+            grouped.setdefault((track_id, item), {})[status] = value
+
+        result: dict[
+            tuple[int, PpeItem],
+            tuple[Literal["PRESENT", "MISSING"], NormalizedDetection],
+        ] = {}
+        for (track_id, item), statuses in grouped.items():
+            if len(statuses) == 1:
+                ((status, candidate),) = statuses.items()
+                result[(track_id, item)] = (status, candidate[3])
+
+        return result
 
     def _is_observable(self, person: TrackedPerson) -> bool:
         box = person.bounding_box

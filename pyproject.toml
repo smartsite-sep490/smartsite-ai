@@ -33,7 +33,6 @@ cuda126 = [
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
-smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
 
 [dependency-groups]
 dev = [

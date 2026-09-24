@@ -36,6 +36,7 @@ cuda126 = [
 smartsite-ai = "smartsite_ai.main:run"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
 smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
+smartsite-ai-prepare-ppe-dataset = "smartsite_ai.tools.prepare_ppe_dataset:main"
 smartsite-ai-train-ppe = "smartsite_ai.tools.train_ppe:main"
 
 [dependency-groups]

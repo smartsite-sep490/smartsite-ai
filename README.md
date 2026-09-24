@@ -320,6 +320,37 @@ target, not as a validated PPE checkpoint.
 
 ### Local YOLO11s PPE fine-tuning
 
+Before fine-tuning, prepare the pinned local Roboflow **Construction Site Safety v27** YOLO export
+with `smartsite-ai-prepare-ppe-dataset`. The command performs no network access and never mutates
+the downloaded export. It verifies the reviewed ten-class source map and CC BY 4.0 provenance,
+requires one image/label pair for every item in train/validation/test, validates every normalized
+YOLO row, copies the media into a new directory, and remaps only these five classes:
+
+```text
+source 5 Person          -> 0 Person
+source 0 Hardhat         -> 1 Hardhat
+source 2 NO-Hardhat      -> 2 NO-Hardhat
+source 7 Safety Vest     -> 3 Safety Vest
+source 4 NO-Safety Vest  -> 4 NO-Safety Vest
+```
+
+`Mask`, `NO-Mask`, `Safety Cone`, `machinery`, and `vehicle` annotations are counted and removed.
+The new directory is published only after validation succeeds and contains canonical `data.yaml`
+plus `preparation.manifest.json` with file hashes, class/split counts, license, attribution, and an
+aggregate output hash. Keep both source and prepared datasets outside Git and retain attribution to
+Roboflow Universe Projects with the [version 27 dataset page](https://universe.roboflow.com/roboflow-universe-projects/construction-site-safety/dataset/27)
+under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+```powershell
+uv run --frozen smartsite-ai-prepare-ppe-dataset `
+  --input-dir C:\SmartSite\local-data\construction-site-safety-27 `
+  --output-dir C:\SmartSite\local-data\smartsite-ppe-5class
+```
+
+Use the prepared directory's `data.yaml` as the training input below. Do not delete class names in
+the provider YAML manually: the numeric IDs in every label file must be remapped as this command
+does.
+
 `smartsite-ai-train-ppe` fine-tunes an explicit local **official Ultralytics YOLO11s** base
 checkpoint. It does not download weights or datasets. Keep the base checkpoint, dataset, labels,
 training runs, and resulting weights in ignored local directories. The launcher requires absolute

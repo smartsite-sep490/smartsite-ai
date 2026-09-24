@@ -90,11 +90,14 @@ class PpePipeline:
                 observation_region.polygon.coordinates,
             )
         )
-        associations = self._associate(tracked_frame, eligible_people)
+        associations, conflicted = self._associate(tracked_frame, eligible_people)
         observations: list[PpeObservation] = []
         for person in eligible_people:
             for item in self._items:
-                association = associations.get((person.track_id, item))
+                key = (person.track_id, item)
+                if key in conflicted:
+                    continue
+                association = associations.get(key)
                 if association is not None:
                     status, detection = association
                     observations.append(
@@ -122,7 +125,10 @@ class PpePipeline:
         self,
         tracked_frame: TrackedFrame,
         eligible_people: tuple[TrackedPerson, ...],
-    ) -> dict[tuple[int, PpeItem], tuple[Literal["PRESENT", "MISSING"], NormalizedDetection]]:
+    ) -> tuple[
+        dict[tuple[int, PpeItem], tuple[Literal["PRESENT", "MISSING"], NormalizedDetection]],
+        set[tuple[int, PpeItem]],
+    ]:
         best_by_status: dict[
             tuple[int, PpeItem, Literal["PRESENT", "MISSING"]],
             tuple[float, float, int, NormalizedDetection],
@@ -163,12 +169,15 @@ class PpePipeline:
             tuple[int, PpeItem],
             tuple[Literal["PRESENT", "MISSING"], NormalizedDetection],
         ] = {}
+        conflicted: set[tuple[int, PpeItem]] = set()
         for (track_id, item), statuses in grouped.items():
             if len(statuses) == 1:
                 ((status, candidate),) = statuses.items()
                 result[(track_id, item)] = (status, candidate[3])
+            elif len(statuses) > 1:
+                conflicted.add((track_id, item))
 
-        return result
+        return result, conflicted
 
     def _is_observable(self, person: TrackedPerson) -> bool:
         box = person.bounding_box

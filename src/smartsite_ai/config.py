@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     # remains safe when no model/runtime is installed.
     realtime_model_path: str | None = None
     realtime_source: str | None = None
+    realtime_device: str = Field(
+        default="auto",
+        pattern=r"^(?:auto|cpu|cuda(?::[0-9]+)?)$",
+    )
     realtime_confidence: float = Field(default=0.25, ge=0.0, le=1.0)
     realtime_zone_polygon: str = "0.63,0.2;0.98,0.2;0.98,0.9;0.63,0.9"
     realtime_camera_external_id: str = "ppe-demo"

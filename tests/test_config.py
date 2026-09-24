@@ -54,6 +54,24 @@ def test_backend_ingestion_settings_default_to_none():
     assert settings.backend_service_token is None
 
 
+def test_realtime_device_defaults_to_auto():
+    from smartsite_ai.config import Settings
+
+    settings = Settings(_env_file=None)
+
+    assert settings.realtime_device == "auto"
+
+
+@pytest.mark.parametrize("value", ["gpu", "cuda:-1", "cuda:abc", "cuda:0:1"])
+def test_rejects_invalid_realtime_device(value, monkeypatch):
+    from smartsite_ai.config import Settings
+
+    monkeypatch.setenv("SMARTSITE_AI_REALTIME_DEVICE", value)
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_backend_ingestion_settings_read_from_env_and_mask_token(monkeypatch):
     from smartsite_ai.config import Settings
 

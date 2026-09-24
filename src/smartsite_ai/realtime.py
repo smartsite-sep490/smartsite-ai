@@ -14,7 +14,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
-from smartsite_ai.inference.artifacts import ModelArtifactSpec, verify_model_artifact
+from smartsite_ai.inference.artifacts import ModelArtifactSpec
+from smartsite_ai.inference.loading import load_detector_artifact
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
@@ -188,10 +189,13 @@ def _load_realtime_stack(
         image_size=(640, 640),
         device=_configured_realtime_device(settings.realtime_device),
     )
-    artifact = verify_model_artifact(spec)
-    runner = UltralyticsYoloRunner()
-    runner.load(artifact)
-    detector = Yolo11Detector(artifact, runner)
+    detector, loaded_runner, _artifact, _class_map = load_detector_artifact(
+        spec,
+        runner_factory=UltralyticsYoloRunner,
+    )
+    if not isinstance(loaded_runner, UltralyticsYoloRunner):
+        raise TypeError("realtime detector loader returned an unexpected runner")
+    runner = loaded_runner
     configuration = CameraRegionConfiguration.from_wire_bytes(
         Path(settings.realtime_region_configuration_path).read_bytes()
     )

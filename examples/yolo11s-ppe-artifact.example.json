@@ -1,0 +1,23 @@
+{
+  "artifactId": "smartsite-yolo11s-ppe",
+  "version": "replace-with-training-run-id",
+  "modelFamily": "yolo11s",
+  "artifactPath": "C:\\SmartSite\\local-models\\smartsite-yolo11s-ppe.pt",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "sourceUrl": "https://models.example.invalid/smartsite-yolo11s-ppe.pt",
+  "license": "replace-after-license-review",
+  "classMap": {
+    "0": "Person",
+    "1": "Hardhat",
+    "2": "NO-Hardhat",
+    "3": "Safety Vest",
+    "4": "NO-Safety Vest"
+  },
+  "confidenceThreshold": 0.25,
+  "iouThreshold": 0.45,
+  "imageSize": [
+    640,
+    640
+  ],
+  "device": "cuda:0"
+}

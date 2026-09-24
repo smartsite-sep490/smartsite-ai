@@ -33,12 +33,11 @@ from smartsite_ai.inference.artifacts import (
     ArtifactValidationError,
     ModelArtifactSpec,
     VerifiedModelArtifact,
-    verify_model_artifact,
 )
+from smartsite_ai.inference.loading import load_detector_artifact
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
-from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.pipelines import (
     Mf05Mf06Pipeline,
@@ -1016,10 +1015,13 @@ def run(argv: Sequence[str] | None = None) -> int:
             image_size=tuple(args.image_size),
             device=args.device,
         )
-        artifact = verify_model_artifact(spec)
-        runner = UltralyticsYoloRunner()
-        runner.load(artifact)
-        detector = Yolo11Detector(artifact, runner)
+        detector, loaded_runner, artifact, _class_map = load_detector_artifact(
+            spec,
+            runner_factory=UltralyticsYoloRunner,
+        )
+        if not isinstance(loaded_runner, UltralyticsYoloRunner):
+            raise TypeError("video detector loader returned an unexpected runner")
+        runner = loaded_runner
         run_video_validation(
             input_path=input_path,
             output_path=args.output,

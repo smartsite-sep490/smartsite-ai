@@ -18,12 +18,14 @@ dependencies = [
 
 [project.optional-dependencies]
 vision = [
+  "pyyaml==6.0.3",
   "supervision==0.30.4",
   "torch==2.14.0+cpu",
   "torchvision==0.29.0+cpu",
   "ultralytics==8.4.155",
 ]
 cuda126 = [
+  "pyyaml==6.0.3",
   "supervision==0.30.4",
   "torch==2.14.0+cu126",
   "torchvision==0.29.0+cu126",
@@ -34,12 +36,14 @@ cuda126 = [
 smartsite-ai = "smartsite_ai.main:run"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
 smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
+smartsite-ai-train-ppe = "smartsite_ai.tools.train_ppe:main"
 
 [dependency-groups]
 dev = [
   "httpx2==2.13.0",
   "jsonschema[format-nongpl]==4.23.0",
   "pytest==9.1.1",
+  "pyyaml==6.0.3",
   "ruff==0.16.8",
 ]
 

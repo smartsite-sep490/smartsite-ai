@@ -318,6 +318,62 @@ outside the timed evaluation path. Until a real fine-tuned artifact and the requ
 have completed this gate, SmartSite must describe YOLO11s as the selected architecture and training
 target, not as a validated PPE checkpoint.
 
+### Local YOLO11s PPE fine-tuning
+
+`smartsite-ai-train-ppe` fine-tunes an explicit local **official Ultralytics YOLO11s** base
+checkpoint. It does not download weights or datasets. Keep the base checkpoint, dataset, labels,
+training runs, and resulting weights in ignored local directories. The launcher requires absolute
+paths, rejects an existing final run directory, resolves `auto` to an available CUDA device or CPU,
+pins deterministic training, and writes `training.manifest.json` atomically only after a non-empty
+`weights/best.pt` exists. The manifest records the command, normalized configuration, requested
+and resolved device, exact `data.yaml` and base-checkpoint SHA-256 values, runtime/GPU facts, Git
+SHA and dirty state, and fine-tuned checkpoint SHA-256. A failed or interrupted run has no
+`COMPLETE` manifest.
+
+The input `data.yaml` must reference existing local `train`, `val`, and `test` inputs and already
+use this exact class ID map:
+
+```text
+0 Person
+1 Hardhat
+2 NO-Hardhat
+3 Safety Vest
+4 NO-Safety Vest
+```
+
+The recommended source research dataset currently exports more classes. **Deleting extra entries
+from `names` is invalid** because existing label IDs would then describe different objects. Prepare
+and review a canonical five-class dataset by filtering/remapping both the labels and the class map
+before using this launcher. Dataset acquisition, license review, and label transformation are
+deliberately outside this command. [The example data configuration](examples/yolo11s-ppe-data.example.yaml)
+shows only the required final shape.
+
+After placing an official `yolo11s.pt` checkpoint and the prepared dataset outside Git, create a
+new run name and execute:
+
+```powershell
+uv sync --frozen --extra cuda126
+New-Item -ItemType Directory -Force C:\SmartSite\local-runs | Out-Null
+uv run --frozen --extra cuda126 smartsite-ai-train-ppe `
+  --data C:\SmartSite\local-data\ppe\data.yaml `
+  --base-weights C:\SmartSite\local-models\yolo11s.pt `
+  --output-root C:\SmartSite\local-runs `
+  --name yolo11s-ppe-2026-09-25 `
+  --epochs 100 `
+  --imgsz 640 `
+  --batch 16 `
+  --patience 30 `
+  --seed 42 `
+  --device cuda:0
+```
+
+Use `--device cpu` on a machine without supported CUDA. Training time and feasible batch size vary
+by GPU and available VRAM; the RTX 4060 is a local validation target, not a runtime requirement.
+After training, create the ignored artifact specification using the exact `best.pt` checksum from
+the manifest, then run the evaluation gate above on the held-out test split. A completed training
+manifest proves reproducibility of the run inputs and artifact identity; it does not by itself
+prove PPE accuracy or production readiness.
+
 ### Local MF05/MF06 UI test export
 
 The local command can pass normalized YOLO batches through the technical MF05/MF06 pipeline and

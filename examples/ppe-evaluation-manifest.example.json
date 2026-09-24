@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetId": "workersafety25",
+  "datasetVersion": "1",
+  "sourceUrl": "https://universe.roboflow.com/armor/workersafety25",
+  "license": "CC BY 4.0",
+  "aggregateSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "classMap": {
+    "0": "Person",
+    "1": "Hardhat",
+    "2": "NO-Hardhat",
+    "3": "Safety Vest",
+    "4": "NO-Safety Vest"
+  },
+  "splits": {
+    "train": "indexes/train.jsonl",
+    "validation": "indexes/validation.jsonl",
+    "test": "indexes/test.jsonl"
+  }
+}

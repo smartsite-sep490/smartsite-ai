@@ -124,6 +124,45 @@ def safe_source_label(source: str) -> str:
     return f"{parts.scheme}://{host}"
 
 
+def resolve_realtime_device(
+    configured: str,
+    *,
+    cuda_available: bool,
+    cuda_device_count: int,
+) -> str:
+    """Resolve a validated runtime device without silently ignoring explicit CUDA."""
+
+    if configured == "cpu":
+        return "cpu"
+    if configured == "auto":
+        return "cuda:0" if cuda_available and cuda_device_count > 0 else "cpu"
+    if not cuda_available or cuda_device_count <= 0:
+        raise ValueError("CUDA device was requested but CUDA is unavailable")
+
+    device_index = 0 if configured == "cuda" else int(configured.removeprefix("cuda:"))
+    if device_index >= cuda_device_count:
+        raise ValueError(
+            f"CUDA device index {device_index} is unavailable; found {cuda_device_count} device(s)"
+        )
+    return f"cuda:{device_index}"
+
+
+def _configured_realtime_device(configured: str) -> str:
+    try:
+        import torch
+    except ImportError:
+        return resolve_realtime_device(
+            configured,
+            cuda_available=False,
+            cuda_device_count=0,
+        )
+    return resolve_realtime_device(
+        configured,
+        cuda_available=bool(torch.cuda.is_available()),
+        cuda_device_count=int(torch.cuda.device_count()),
+    )
+
+
 def _load_class_map(path: Path) -> dict[int, str]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not raw:
@@ -151,7 +190,7 @@ def _load_realtime_stack(
         confidence_threshold=settings.realtime_confidence,
         iou_threshold=0.45,
         image_size=(640, 640),
-        device="cpu",
+        device=_configured_realtime_device(settings.realtime_device),
     )
     artifact = verify_model_artifact(spec)
     runner = UltralyticsYoloRunner()

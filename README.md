@@ -145,7 +145,7 @@ Implemented:
 Not yet implemented:
 
 - live RTSP hardware/network validation;
-- GPU runtime configuration;
+- production/container GPU deployment and 1–3 camera end-to-end capacity validation;
 - PPE model weights;
 - production detector-to-pipeline worker wiring;
 - production tracker/model calibration and evaluation on representative site data;
@@ -222,6 +222,7 @@ Environment variables use the `SMARTSITE_AI_` prefix.
 | `SMARTSITE_AI_LOG_LEVEL` | `info` | Logging level |
 | `SMARTSITE_AI_BACKEND_INGESTION_URL` | unset | Backend origin or exact AI ingestion endpoint |
 | `SMARTSITE_AI_BACKEND_SERVICE_TOKEN` | unset | Bearer credential for Backend ingestion |
+| `SMARTSITE_AI_REALTIME_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or a CUDA index such as `cuda:0` |
 
 Invalid configuration prevents startup. The ingestion client fails closed when its URL or token is absent, but the FastAPI health/capability foundation can run before a camera worker is enabled. Camera credentials, model paths, and OpenAI credentials are intentionally not treated as implemented capabilities yet.
 
@@ -232,6 +233,18 @@ Vision dependencies are isolated from the core API environment.
 ```sh
 uv sync --frozen --extra vision
 ```
+
+On an NVIDIA deployment compatible with CUDA 12.6 wheels, install the pinned GPU profile instead:
+
+```sh
+uv sync --frozen --extra cuda126
+uv run --frozen --extra cuda126 python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+```
+
+`SMARTSITE_AI_REALTIME_DEVICE=auto` selects `cuda:0` only when this runtime reports CUDA as
+available. An explicit unavailable CUDA device fails worker initialization rather than silently
+falling back to CPU. The CUDA extra changes only the local/deployment environment; API imports and
+startup still do not initialize a model or GPU.
 
 The optional vision group currently pins Ultralytics and Supervision. YOLO11s selects the detector architecture/size, not a validated PPE checkpoint. GPU support must be validated against the selected PyTorch, CUDA, hardware, and trained weights before it is treated as a supported runtime. Ultralytics artifacts are AGPL-3.0 by default; a proprietary or commercial deployment must complete a license review before release.
 

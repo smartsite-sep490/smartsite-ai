@@ -17,7 +17,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-vision = ["ultralytics==8.4.155", "supervision==0.30.4"]
+vision = [
+  "supervision==0.30.4",
+  "torch==2.14.0+cpu",
+  "torchvision==0.29.0+cpu",
+  "ultralytics==8.4.155",
+]
+cuda126 = [
+  "supervision==0.30.4",
+  "torch==2.14.0+cu126",
+  "torchvision==0.29.0+cu126",
+  "ultralytics==8.4.155",
+]
 
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
@@ -53,3 +64,26 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", extra = "vision" },
+  { index = "pytorch-cu126", extra = "cuda126" },
+]
+torchvision = [
+  { index = "pytorch-cpu", extra = "vision" },
+  { index = "pytorch-cu126", extra = "cuda126" },
+]
+
+[tool.uv]
+conflicts = [[{ extra = "vision" }, { extra = "cuda126" }]]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

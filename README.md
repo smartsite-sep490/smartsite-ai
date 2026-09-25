@@ -429,6 +429,44 @@ the manifest, then run the evaluation gate above on the held-out test split. A c
 manifest proves reproducibility of the run inputs and artifact identity; it does not by itself
 prove PPE accuracy or production readiness.
 
+Build the evaluation inputs from the verified prepared dataset instead of manually translating
+YOLO labels. The converter re-verifies every prepared byte, requires the canonical five-class map,
+copies media into a new self-contained local directory, converts normalized YOLO boxes into strict
+evaluation annotations, and atomically publishes loader-validated train, validation, and test
+JSONL indexes. `conversion.manifest.json` links the resulting evaluation aggregate to the exact
+prepared-dataset aggregate and preparation manifest. Keep the output outside Git or under an
+ignored path such as `.cache/`.
+
+```powershell
+uv run --frozen smartsite-ai-build-evaluation-dataset `
+  --data C:\SmartSiteData\smartsite-ppe-5class-v27\data.yaml `
+  --output-dir C:\SmartSiteData\smartsite-ppe-evaluation-v27 `
+  --dataset-id construction-site-safety `
+  --dataset-version 27-smartsite-5class-v1
+```
+
+The source dataset contains independent annotated images. It does not contain reviewed person
+track identities or temporal missing-PPE episodes, so the converter does not invent an episode
+index. Candidate-level alert scoring still requires a separately reviewed video episode JSONL via
+`--episodes-index`; use the converted held-out images for detection metrics and provider validation.
+
+After a training run reaches `COMPLETE`, generate the artifact spec from its manifest. The command
+verifies `weights/best.pt`, its exact path, size and SHA-256, the prepared dataset aggregate, and the
+canonical class map. It requires an explicit public HTTPS artifact URL and an explicitly confirmed
+license review; it does not upload the checkpoint or test the URL over the network. Use `--device
+cpu` when evaluating on a CPU host; the default `trained` value reuses the resolved device recorded
+by training.
+
+```powershell
+uv run --frozen smartsite-ai-build-artifact-spec `
+  --training-manifest C:\SmartSiteData\runs\yolo11s-ppe-run\training.manifest.json `
+  --output C:\SmartSiteData\local-config\yolo11s-ppe-artifact.json `
+  --artifact-id smartsite-yolo11s-ppe `
+  --source-url https://github.com/smartsite-sep490/model-releases/releases/download/v1/best.pt `
+  --license AGPL-3.0-only `
+  --license-reviewed
+```
+
 ### Local MF05/MF06 UI test export
 
 The local command can pass normalized YOLO batches through the technical MF05/MF06 pipeline and

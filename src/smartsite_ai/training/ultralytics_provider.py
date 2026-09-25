@@ -67,6 +67,7 @@ class UltralyticsTrainingProvider:
                 device=configuration.device,
                 deterministic=True,
                 amp=False,
+                workers=0,
                 resume=False,
                 plots=False,
                 cache=False,

@@ -377,7 +377,8 @@ checkpoint. It does not download weights or datasets. Keep the base checkpoint, 
 training runs, and resulting weights in ignored local directories. The launcher requires absolute
 paths, rejects an existing final run directory, resolves `auto` to an available CUDA device or CPU,
 pins deterministic training, disables Ultralytics AMP so its safety check cannot download an
-unreviewed auxiliary model, and writes `training.manifest.json` atomically only after a non-empty
+unreviewed auxiliary model, uses in-process data loading to avoid unstable Windows worker
+subprocesses, and writes `training.manifest.json` atomically only after a non-empty
 `weights/best.pt` exists. The manifest records the command, normalized configuration, requested
 and resolved device, exact `data.yaml` and base-checkpoint SHA-256 values, runtime/GPU facts, Git
 SHA and dirty state, verified prepared-dataset aggregate, and fine-tuned checkpoint SHA-256. It

@@ -484,6 +484,7 @@ def _manifest(
             "resolvedDevice": configuration.device,
             "deterministic": True,
             "automaticMixedPrecision": False,
+            "dataLoaderWorkers": 0,
         },
         "source": dict(git),
         "runtime": dict(runtime),

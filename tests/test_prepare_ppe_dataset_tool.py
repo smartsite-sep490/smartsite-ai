@@ -125,6 +125,17 @@ def test_prepare_requires_one_to_one_image_label_pairs(tmp_path: Path) -> None:
         )
 
 
+def test_inspection_rejects_unreviewed_extra_pair(tmp_path: Path) -> None:
+    source = _source(tmp_path)
+    Image.new("RGB", (16, 16), color=(12, 34, 56)).save(source / "train" / "images" / "extra.jpg")
+    (source / "train" / "labels" / "extra.txt").write_text("5 0.5 0.5 0.4 0.8\n", encoding="utf-8")
+
+    with pytest.raises(
+        DatasetPreparationError, match="train split must contain the reviewed 1 image-label pairs"
+    ):
+        inspect_source(source.resolve())
+
+
 def test_prepare_rejects_unreviewed_source_class_map(tmp_path: Path) -> None:
     source = _source(tmp_path)
     config = source / "data.yaml"

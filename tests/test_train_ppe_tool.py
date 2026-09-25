@@ -317,6 +317,7 @@ def test_success_writes_atomic_complete_manifest_with_checkpoint_hash(tmp_path: 
     assert manifest["schemaVersion"] == "1.0.0"
     assert manifest["configuration"]["deterministic"] is True
     assert manifest["configuration"]["automaticMixedPrecision"] is False
+    assert manifest["configuration"]["dataLoaderWorkers"] == 0
     assert manifest["configuration"]["requestedDevice"] == "cuda:0"
     assert manifest["configuration"]["resolvedDevice"] == "cuda:0"
     assert (

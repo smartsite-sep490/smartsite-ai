@@ -68,11 +68,14 @@ class UltralyticsTrainingProvider:
                 deterministic=True,
                 resume=False,
                 plots=False,
+                cache=False,
             )
         except TrainingExecutionError:
             raise
         except Exception as error:
             raise TrainingExecutionError("Ultralytics training failed") from error
+        finally:
+            _remove_generated_label_caches(configuration.data_config.parent)
 
 
 def _is_official_yolo11s_detect(metadata: Mapping[str, object]) -> bool:
@@ -83,3 +86,17 @@ def _is_official_yolo11s_detect(metadata: Mapping[str, object]) -> bool:
         and metadata.get("variant") == "s"
         and metadata.get("task") == "detect"
     )
+
+
+def _remove_generated_label_caches(dataset_root: Path) -> None:
+    """Remove Ultralytics label indexes so the prepared dataset remains immutable."""
+
+    try:
+        for path in dataset_root.rglob("*.cache"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            path.unlink()
+    except OSError as error:
+        raise TrainingExecutionError(
+            "could not remove generated Ultralytics dataset cache"
+        ) from error

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Protocol
 
 from smartsite_ai.inference.loading import CANONICAL_PPE_CLASS_MAP
+from smartsite_ai.training.dataset_integrity import DatasetIntegrityError, verify_prepared_dataset
 
 _MAX_DATA_CONFIG_BYTES = 256 * 1024
 _RUN_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
@@ -41,6 +42,7 @@ class TrainingConfiguration:
     """Validated immutable inputs for one new local training run."""
 
     data_config: Path
+    dataset_aggregate_sha256: str
     base_weights: Path
     output_root: Path
     run_name: str
@@ -270,7 +272,7 @@ def _require_ignored_repository_path(path: Path) -> None:
 
     try:
         root_result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
             check=False,
             capture_output=True,
             text=True,
@@ -286,7 +288,7 @@ def _require_ignored_repository_path(path: Path) -> None:
     except ValueError:
         return
     ignored = subprocess.run(
-        ["git", "check-ignore", "--quiet", str(path)],
+        ["git", "-C", str(repository_root), "check-ignore", "--quiet", "--no-index", str(path)],
         check=False,
         capture_output=True,
         text=True,
@@ -304,6 +306,10 @@ def preflight_arguments(args: argparse.Namespace) -> TrainingConfiguration:
     data = _load_data_config(data_config)
     _validate_class_map(data)
     _validate_dataset_paths(data, data_config)
+    try:
+        dataset_aggregate_sha256 = verify_prepared_dataset(data_config)
+    except DatasetIntegrityError as error:
+        raise TrainingConfigurationError(f"prepared dataset integrity failed: {error}") from error
     output_root = _validate_output_root(args.output_root)
     if not isinstance(args.name, str) or not _RUN_NAME_PATTERN.fullmatch(args.name):
         raise TrainingConfigurationError(
@@ -316,6 +322,7 @@ def preflight_arguments(args: argparse.Namespace) -> TrainingConfiguration:
         raise TrainingConfigurationError("imgsz must be a multiple of 32")
     return TrainingConfiguration(
         data_config=data_config,
+        dataset_aggregate_sha256=dataset_aggregate_sha256,
         base_weights=base_weights,
         output_root=output_root,
         run_name=args.name,
@@ -362,9 +369,11 @@ def _default_runtime_facts() -> Mapping[str, object]:
 
 
 def _default_git_facts() -> Mapping[str, object]:
+    code_directory = Path(__file__).resolve().parent
+
     def git(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", *arguments],
+            ["git", "-C", str(code_directory), *arguments],
             check=False,
             capture_output=True,
             text=True,
@@ -459,6 +468,7 @@ def _manifest(
         "configuration": {
             "dataConfig": str(configuration.data_config),
             "dataConfigSha256": data_config_sha256,
+            "datasetAggregateSha256": configuration.dataset_aggregate_sha256,
             "baseWeights": str(configuration.base_weights),
             "baseWeightsSha256": base_weights_sha256,
             "outputRoot": str(configuration.output_root),
@@ -498,6 +508,12 @@ def execute_training(
     except ValueError as error:
         raise TrainingConfigurationError(f"device is unavailable: {error}") from error
     configuration = replace(configuration, device=resolved_device)
+    try:
+        before_dataset_aggregate = verify_prepared_dataset(configuration.data_config)
+    except DatasetIntegrityError as error:
+        raise TrainingConfigurationError(f"prepared dataset integrity failed: {error}") from error
+    if before_dataset_aggregate != configuration.dataset_aggregate_sha256:
+        raise TrainingConfigurationError("prepared dataset changed after preflight")
     data_config_sha256 = _sha256(configuration.data_config)
     base_weights_sha256 = _sha256(configuration.base_weights)
     started_at = services.now()
@@ -509,6 +525,14 @@ def execute_training(
         raise TrainingExecutionError("data config changed during training")
     if _sha256(configuration.base_weights) != base_weights_sha256:
         raise TrainingExecutionError("base weights changed during training")
+    try:
+        after_dataset_aggregate = verify_prepared_dataset(configuration.data_config)
+    except DatasetIntegrityError as error:
+        raise TrainingExecutionError(
+            f"prepared dataset integrity failed after training: {error}"
+        ) from error
+    if after_dataset_aggregate != before_dataset_aggregate:
+        raise TrainingExecutionError("prepared dataset changed during training")
     checkpoint = configuration.run_dir / "weights" / "best.pt"
     if checkpoint.is_symlink() or not checkpoint.is_file() or checkpoint.stat().st_size == 0:
         raise TrainingExecutionError("training did not produce a non-empty weights/best.pt")

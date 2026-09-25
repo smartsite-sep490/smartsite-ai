@@ -323,7 +323,7 @@ target, not as a validated PPE checkpoint.
 Before fine-tuning, prepare the pinned local Roboflow **Construction Site Safety v27** YOLO export
 with `smartsite-ai-prepare-ppe-dataset`. The command performs no network access and never mutates
 the downloaded export. It validates the export's Roboflow metadata against the reviewed project
-and version, requires exactly 2,605 train, 114 validation, and 82 test image/label pairs, decodes
+and version, requires exactly 2,603 train, 114 validation, and 82 test image/label pairs, decodes
 every bounded image, validates every normalized YOLO row, and remaps only these five classes:
 
 ```text
@@ -344,6 +344,14 @@ attribution, and input/output aggregate hashes. Keep both source and prepared da
 and retain attribution to
 Roboflow Universe Projects with the [version 27 dataset page](https://universe.roboflow.com/roboflow-universe-projects/construction-site-safety/dataset/27)
 under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+The provider page and archive README currently advertise 2,801 images, while the reviewed
+YOLOv11 ZIP downloaded on 2026-09-25 contains 2,799 image/label pairs: 2,603 train, 114 validation,
+and 82 test. The preparation gate uses the files actually present in that reviewed artifact. If a
+later provider export changes these counts, treat it as a new source artifact and review it instead
+of weakening the validation to make it pass. The reviewed ZIP checksum, extracted-content
+aggregate, actual split counts, and prepared-content aggregate are recorded in
+[`provenance/construction-site-safety-v27-yolov11.json`](provenance/construction-site-safety-v27-yolov11.json).
 
 ```powershell
 uv run --frozen smartsite-ai-prepare-ppe-dataset `

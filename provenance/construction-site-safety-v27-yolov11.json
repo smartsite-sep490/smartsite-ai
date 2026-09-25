@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetId": "roboflow-construction-site-safety",
+  "workspace": "roboflow-universe-projects",
+  "project": "construction-site-safety",
+  "version": 27,
+  "sourceUrl": "https://universe.roboflow.com/roboflow-universe-projects/construction-site-safety/dataset/27",
+  "license": "CC BY 4.0",
+  "exportFormat": "YOLOv11",
+  "retrievedOn": "2026-09-25",
+  "providerDeclaredImageCount": 2801,
+  "reviewedArtifact": {
+    "fileName": "construction-site-safety-v27-yolov11.zip",
+    "sizeBytes": 155999289,
+    "sha256": "50c7e0c73f86a02ae0b644edfc008c553d6b7ddcb2903e3078d7d0fa90dd7ec8"
+  },
+  "actualPairs": {
+    "train": 2603,
+    "validation": 114,
+    "test": 82,
+    "total": 2799
+  },
+  "extractedContentAggregate": {
+    "algorithm": "sha256-canonical-json-input-files-v1",
+    "sha256": "d44cddef299ca75276d6aa1a18506769dc0624933dba0b9f16d358f09a790567"
+  },
+  "preparedContentAggregate": {
+    "algorithm": "sha256-canonical-json-output-files-v1",
+    "sha256": "a49524d51d7ef9371cc5f3ca8402299fb72e0b9509b964d6eaa6d9f07c214611"
+  },
+  "reviewNote": "The provider page and archive README declare 2801 images, but the reviewed archive contains 2799 complete image-label pairs. Exact artifact bytes and actual split counts are authoritative for this reviewed revision."
+}

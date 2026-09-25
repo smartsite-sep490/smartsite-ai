@@ -38,7 +38,7 @@ SOURCE_LICENSE = "CC BY 4.0"
 SOURCE_ATTRIBUTION = "Roboflow Universe Projects — Construction Site Safety"
 SOURCE_WORKSPACE = "roboflow-universe-projects"
 SOURCE_PROJECT = "construction-site-safety"
-EXPECTED_SPLIT_COUNTS: Mapping[str, int] = {"train": 2605, "val": 114, "test": 82}
+EXPECTED_SPLIT_COUNTS: Mapping[str, int] = {"train": 2603, "val": 114, "test": 82}
 SOURCE_CLASS_MAP: tuple[tuple[int, str], ...] = (
     (0, "Hardhat"),
     (1, "Mask"),

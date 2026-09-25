@@ -483,6 +483,7 @@ def _manifest(
             "requestedDevice": configuration.requested_device,
             "resolvedDevice": configuration.device,
             "deterministic": True,
+            "automaticMixedPrecision": False,
         },
         "source": dict(git),
         "runtime": dict(runtime),

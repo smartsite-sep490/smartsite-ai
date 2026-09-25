@@ -73,6 +73,7 @@ def test_provider_runs_deterministic_official_yolo11s_training(tmp_path: Path) -
         "seed": 7,
         "device": "cuda:0",
         "deterministic": True,
+        "amp": False,
         "resume": False,
         "plots": False,
         "cache": False,

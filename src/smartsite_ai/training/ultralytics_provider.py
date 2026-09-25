@@ -66,6 +66,7 @@ class UltralyticsTrainingProvider:
                 seed=configuration.seed,
                 device=configuration.device,
                 deterministic=True,
+                amp=False,
                 resume=False,
                 plots=False,
                 cache=False,

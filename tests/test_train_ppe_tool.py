@@ -15,25 +15,67 @@ from smartsite_ai.tools.train_ppe import (
     preflight_arguments,
     run,
 )
+from smartsite_ai.training.dataset_integrity import aggregate_inventory, inventory_record
 
 
 def _write_inputs(tmp_path: Path, *, names: str | None = None) -> tuple[Path, Path, Path]:
     dataset_root = tmp_path / "dataset"
-    for split in ("train", "validation", "test"):
-        (dataset_root / "images" / split).mkdir(parents=True, exist_ok=True)
-    data = tmp_path / "data.yaml"
+    for split in ("train", "val", "test"):
+        (dataset_root / split / "images").mkdir(parents=True, exist_ok=True)
+        (dataset_root / split / "labels").mkdir(parents=True, exist_ok=True)
+        (dataset_root / split / "images" / f"{split}.jpg").write_bytes(b"image")
+        (dataset_root / split / "labels" / f"{split}.txt").write_text(
+            "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+        )
+    data = dataset_root / "data.yaml"
     data.write_text(
         "\n".join(
             (
-                f"path: {dataset_root.as_posix()}",
-                "train: images/train",
-                "val: images/validation",
-                "test: images/test",
+                "path: .",
+                "train: train/images",
+                "val: val/images",
+                "test: test/images",
                 "nc: 5",
                 names or "names: [Person, Hardhat, NO-Hardhat, Safety Vest, NO-Safety Vest]",
             )
         )
         + "\n",
+        encoding="utf-8",
+    )
+    files = [
+        inventory_record(path, dataset_root)
+        for path in sorted(
+            (
+                path
+                for path in dataset_root.rglob("*")
+                if path.is_file() and path.name != "preparation.manifest.json"
+            ),
+            key=lambda path: path.relative_to(dataset_root).as_posix(),
+        )
+    ]
+    (dataset_root / "preparation.manifest.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": "1.0.0",
+                "status": "COMPLETE",
+                "canonical": {
+                    "outputRoot": str(dataset_root.resolve()),
+                    "classMap": {
+                        "0": "Person",
+                        "1": "Hardhat",
+                        "2": "NO-Hardhat",
+                        "3": "Safety Vest",
+                        "4": "NO-Safety Vest",
+                    },
+                },
+                "outputFiles": files,
+                "outputAggregate": {
+                    "algorithm": "sha256-canonical-json-output-files-v1",
+                    "sha256": aggregate_inventory(files),
+                },
+            },
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     weights = tmp_path / "yolo11s.pt"
@@ -143,7 +185,7 @@ def test_import_does_not_load_vision_or_network_stacks() -> None:
 def test_preflight_normalizes_absolute_local_inputs(tmp_path: Path) -> None:
     configuration = preflight_arguments(build_parser().parse_args(_argv(tmp_path)))
 
-    assert configuration.data_config == (tmp_path / "data.yaml").resolve()
+    assert configuration.data_config == (tmp_path / "dataset" / "data.yaml").resolve()
     assert configuration.base_weights == (tmp_path / "yolo11s.pt").resolve()
     assert configuration.run_dir == (tmp_path / "runs" / "ppe-run-001").resolve()
     assert configuration.epochs == 25
@@ -173,7 +215,7 @@ def test_preflight_requires_exact_canonical_class_order(tmp_path: Path, names: s
 
 def test_preflight_rejects_downloadable_data_config(tmp_path: Path) -> None:
     arguments = _argv(tmp_path)
-    data = tmp_path / "data.yaml"
+    data = tmp_path / "dataset" / "data.yaml"
     data.write_text(
         data.read_text(encoding="utf-8") + "download: https://example.invalid/data.zip\n",
         encoding="utf-8",
@@ -185,13 +227,23 @@ def test_preflight_rejects_downloadable_data_config(tmp_path: Path) -> None:
 
 def test_preflight_rejects_missing_local_dataset_split(tmp_path: Path) -> None:
     arguments = _argv(tmp_path)
-    data = tmp_path / "data.yaml"
+    data = tmp_path / "dataset" / "data.yaml"
     data.write_text(
-        data.read_text(encoding="utf-8").replace("test: images/test", "test: images/missing"),
+        data.read_text(encoding="utf-8").replace("test: test/images", "test: test/missing"),
         encoding="utf-8",
     )
 
     with pytest.raises(TrainingConfigurationError, match="test path does not exist locally"):
+        preflight_arguments(build_parser().parse_args(arguments))
+
+
+def test_preflight_rejects_unmanifested_dataset_file(tmp_path: Path) -> None:
+    arguments = _argv(tmp_path)
+    (tmp_path / "dataset" / "train" / "labels" / "unexpected.txt").write_text(
+        "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
+    )
+
+    with pytest.raises(TrainingConfigurationError, match="differ from preparation manifest"):
         preflight_arguments(build_parser().parse_args(arguments))
 
 
@@ -257,12 +309,13 @@ def test_success_writes_atomic_complete_manifest_with_checkpoint_hash(tmp_path: 
     assert manifest["configuration"]["resolvedDevice"] == "cuda:0"
     assert (
         manifest["configuration"]["dataConfigSha256"]
-        == hashlib.sha256((tmp_path / "data.yaml").read_bytes()).hexdigest()
+        == hashlib.sha256((tmp_path / "dataset" / "data.yaml").read_bytes()).hexdigest()
     )
     assert (
         manifest["configuration"]["baseWeightsSha256"]
         == hashlib.sha256(b"local official base weights fixture").hexdigest()
     )
+    assert len(manifest["configuration"]["datasetAggregateSha256"]) == 64
     assert manifest["source"] == {
         "available": True,
         "commitSha": "a" * 40,
@@ -359,6 +412,25 @@ def test_successful_provider_return_without_best_checkpoint_is_failure(tmp_path:
 
     assert result == 1
     assert not (tmp_path / "runs" / "ppe-run-001" / "training.manifest.json").exists()
+
+
+class MutatingDatasetProvider:
+    def train(self, configuration: object) -> None:
+        label = configuration.data_config.parent / "train" / "labels" / "train.txt"
+        label.write_text("0 0.4 0.4 0.2 0.2\n", encoding="utf-8")
+        checkpoint = configuration.run_dir / "weights" / "best.pt"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_bytes(b"checkpoint built from mutated input")
+
+
+def test_training_rejects_dataset_mutation_and_never_writes_complete_manifest(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "ppe-run-001"
+
+    assert run(_argv(tmp_path), services=_services(MutatingDatasetProvider())) == 1
+
+    assert not (run_dir / "training.manifest.json").exists()
 
 
 def test_manifest_preserves_runtime_mapping_as_json(tmp_path: Path) -> None:

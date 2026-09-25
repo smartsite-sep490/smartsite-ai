@@ -7,7 +7,6 @@ Construction Site Safety v27 YOLO export and publishes a separate five-class dat
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import re
@@ -15,10 +14,21 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from smartsite_ai.training.dataset_integrity import (
+    DatasetIntegrityError,
+    aggregate_inventory,
+    inventory_record,
+    is_link_like,
+    safe_contained_path,
+    sha256_file,
+    walk_safe_files,
+)
 
 SOURCE_URL = (
     "https://universe.roboflow.com/roboflow-universe-projects/construction-site-safety/dataset/27"
@@ -26,6 +36,9 @@ SOURCE_URL = (
 SOURCE_VERSION = 27
 SOURCE_LICENSE = "CC BY 4.0"
 SOURCE_ATTRIBUTION = "Roboflow Universe Projects — Construction Site Safety"
+SOURCE_WORKSPACE = "roboflow-universe-projects"
+SOURCE_PROJECT = "construction-site-safety"
+EXPECTED_SPLIT_COUNTS: Mapping[str, int] = {"train": 2605, "val": 114, "test": 82}
 SOURCE_CLASS_MAP: tuple[tuple[int, str], ...] = (
     (0, "Hardhat"),
     (1, "Mask"),
@@ -50,6 +63,10 @@ DROPPED_SOURCE_IDS = frozenset({1, 3, 6, 8, 9})
 _IMAGE_SUFFIXES = frozenset({".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
 _CLASS_ID_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _MANIFEST_FILENAME = "preparation.manifest.json"
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_MAX_IMAGE_BYTES = 64 * 1024 * 1024
+_MAX_IMAGE_DIMENSION = 16_384
+_MAX_IMAGE_PIXELS = 100_000_000
 
 
 class DatasetPreparationError(ValueError):
@@ -73,6 +90,16 @@ class SplitPlan:
     pairs: tuple[tuple[Path, Path, PurePosixPath], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SourceInventory:
+    """Validated source layout and deterministic byte identity."""
+
+    root: Path
+    plans: tuple[SplitPlan, ...]
+    files: tuple[Mapping[str, object], ...]
+    aggregate_sha256: str
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the local-only CLI without importing vision or network packages."""
 
@@ -84,10 +111,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--input-dir", required=True, type=Path, help="absolute source export dir")
+    parser.add_argument("--output-dir", type=Path, help="absolute new ignored destination dir")
     parser.add_argument(
-        "--output-dir", required=True, type=Path, help="absolute new ignored destination dir"
+        "--expected-source-aggregate",
+        help="lowercase SHA-256 printed by --inspect-only; required for preparation",
+    )
+    parser.add_argument(
+        "--inspect-only",
+        action="store_true",
+        help="validate source and print its aggregate SHA-256 without writing output",
     )
     return parser
+
+
+def _is_link_like(path: Path) -> bool:
+    try:
+        return is_link_like(path)
+    except DatasetIntegrityError as error:
+        raise DatasetPreparationError(str(error)) from error
+
+
+def _ensure_contained_safe_path(path: Path, root: Path, *, kind: str) -> Path:
+    try:
+        return safe_contained_path(path, root, kind=kind)
+    except DatasetIntegrityError as error:
+        raise DatasetPreparationError(str(error)) from error
 
 
 def _absolute_existing_directory(path: Path, *, label: str) -> Path:
@@ -97,8 +145,8 @@ def _absolute_existing_directory(path: Path, *, label: str) -> Path:
         resolved = path.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as error:
         raise DatasetPreparationError(f"{label} must be an existing directory") from error
-    if path.is_symlink() or not resolved.is_dir():
-        raise DatasetPreparationError(f"{label} must be a non-symlink directory")
+    if _is_link_like(path) or not resolved.is_dir():
+        raise DatasetPreparationError(f"{label} must be a non-link directory")
     return resolved
 
 
@@ -112,8 +160,8 @@ def _validated_output(path: Path, input_root: Path) -> Path:
         output = parent / path.name
     except (OSError, RuntimeError, ValueError) as error:
         raise DatasetPreparationError("output parent must be an existing directory") from error
-    if not parent.is_dir() or parent.is_symlink():
-        raise DatasetPreparationError("output parent must be a non-symlink directory")
+    if not parent.is_dir() or _is_link_like(parent):
+        raise DatasetPreparationError("output parent must be a non-link directory")
     if output == input_root or input_root in output.parents:
         raise DatasetPreparationError("output directory must not be inside the source dataset")
     _require_ignored_repository_path(output)
@@ -125,7 +173,7 @@ def _require_ignored_repository_path(path: Path) -> None:
 
     try:
         root_result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "-C", str(path.parent), "rev-parse", "--show-toplevel"],
             check=False,
             capture_output=True,
             text=True,
@@ -141,7 +189,7 @@ def _require_ignored_repository_path(path: Path) -> None:
     except ValueError:
         return
     ignored = subprocess.run(
-        ["git", "check-ignore", "--quiet", str(path)],
+        ["git", "-C", str(repository_root), "check-ignore", "--quiet", "--no-index", str(path)],
         check=False,
         capture_output=True,
         text=True,
@@ -206,6 +254,10 @@ def _load_and_validate_source_yaml(path: Path) -> Mapping[str, object]:
         raise DatasetPreparationError(
             "source Roboflow URL must identify Construction Site Safety v27"
         )
+    if metadata.get("workspace") != SOURCE_WORKSPACE:
+        raise DatasetPreparationError("source Roboflow workspace is not the reviewed workspace")
+    if metadata.get("project") != SOURCE_PROJECT:
+        raise DatasetPreparationError("source Roboflow project is not the reviewed project")
     return document
 
 
@@ -213,15 +265,16 @@ def _relative_key(path: Path, root: Path) -> PurePosixPath:
     return PurePosixPath(path.relative_to(root).with_suffix("").as_posix())
 
 
-def _indexed_files(directory: Path, *, images: bool) -> dict[PurePosixPath, Path]:
-    if directory.is_symlink() or not directory.is_dir():
+def _indexed_files(directory: Path, root: Path, *, images: bool) -> dict[PurePosixPath, Path]:
+    if not directory.exists() or not directory.is_dir():
         raise DatasetPreparationError(f"required directory is missing or unsafe: {directory}")
+    _ensure_contained_safe_path(directory, root, kind="dataset directory")
     indexed: dict[PurePosixPath, Path] = {}
-    for path in sorted(directory.rglob("*")):
-        if path.is_symlink():
-            raise DatasetPreparationError(f"dataset files must not be symlinks: {path}")
-        if not path.is_file():
-            continue
+    try:
+        paths = sorted(walk_safe_files(directory, root))
+    except DatasetIntegrityError as error:
+        raise DatasetPreparationError(str(error)) from error
+    for path in paths:
         if images and path.suffix.lower() not in _IMAGE_SUFFIXES:
             raise DatasetPreparationError(f"unsupported file in images directory: {path}")
         if not images and path.suffix.lower() != ".txt":
@@ -235,8 +288,8 @@ def _indexed_files(directory: Path, *, images: bool) -> dict[PurePosixPath, Path
 
 def _build_split_plan(root: Path, canonical_name: str, source_name: str) -> SplitPlan:
     split_root = root / source_name
-    images = _indexed_files(split_root / "images", images=True)
-    labels = _indexed_files(split_root / "labels", images=False)
+    images = _indexed_files(split_root / "images", root, images=True)
+    labels = _indexed_files(split_root / "labels", root, images=False)
     missing_labels = sorted(set(images) - set(labels))
     missing_images = sorted(set(labels) - set(images))
     if missing_labels:
@@ -249,6 +302,11 @@ def _build_split_plan(root: Path, canonical_name: str, source_name: str) -> Spli
         )
     if not images:
         raise DatasetPreparationError(f"{source_name} split must contain at least one image pair")
+    expected = EXPECTED_SPLIT_COUNTS[canonical_name]
+    if len(images) != expected:
+        raise DatasetPreparationError(
+            f"{canonical_name} split must contain the reviewed {expected} image-label pairs"
+        )
     pairs = tuple((images[key], labels[key], key) for key in sorted(images))
     return SplitPlan(canonical_name=canonical_name, source_name=source_name, pairs=pairs)
 
@@ -323,18 +381,61 @@ def _parse_and_remap_label(
     return rendered, retained, dropped, sum(retained.values()), sum(dropped.values())
 
 
+def _validate_image(path: Path) -> None:
+    if path.stat().st_size <= 0 or path.stat().st_size > _MAX_IMAGE_BYTES:
+        raise DatasetPreparationError(f"image size is outside the allowed boundary: {path}")
+    try:
+        from PIL import Image
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                width, height = image.size
+                image_format = image.format
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width > _MAX_IMAGE_DIMENSION
+                    or height > _MAX_IMAGE_DIMENSION
+                    or width * height > _MAX_IMAGE_PIXELS
+                ):
+                    raise DatasetPreparationError(
+                        f"image dimensions are outside the allowed boundary: {path}"
+                    )
+                image.load()
+    except DatasetPreparationError:
+        raise
+    except Exception as error:
+        raise DatasetPreparationError(f"image is corrupt or unsupported: {path}") from error
+    expected_formats = {
+        ".bmp": {"BMP"},
+        ".jpeg": {"JPEG"},
+        ".jpg": {"JPEG"},
+        ".png": {"PNG"},
+        ".tif": {"TIFF"},
+        ".tiff": {"TIFF"},
+        ".webp": {"WEBP"},
+    }
+    if image_format not in expected_formats[path.suffix.lower()]:
+        raise DatasetPreparationError(f"image content does not match its suffix: {path}")
+
+
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file(path)
 
 
 def _git_facts() -> dict[str, object]:
+    code_directory = Path(__file__).resolve().parent
+
     def git(*arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["git", *arguments], check=False, capture_output=True, text=True, timeout=10
+            ["git", "-C", str(code_directory), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
 
     try:
@@ -364,10 +465,7 @@ def _canonical_data_yaml() -> str:
 
 
 def _aggregate_hash(output_files: Sequence[Mapping[str, object]]) -> str:
-    canonical = json.dumps(
-        list(output_files), ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    return aggregate_inventory(output_files)
 
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
@@ -378,17 +476,61 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     )
 
 
-def prepare_dataset(input_root: Path, output_root: Path) -> Path:
-    """Validate all source bytes and atomically publish one prepared dataset."""
+def inspect_source(input_root: Path) -> SourceInventory:
+    """Validate a reviewed v27 export and return its deterministic byte identity."""
 
-    source_yaml = input_root / "data.yaml"
+    input_root = _absolute_existing_directory(input_root, label="input directory")
+    source_yaml = _ensure_contained_safe_path(
+        input_root / "data.yaml", input_root, kind="source data.yaml"
+    )
     _load_and_validate_source_yaml(source_yaml)
     plans = _split_plans(input_root)
-    source_paths = [source_yaml]
+    paths: list[Path] = [source_yaml]
     for plan in plans:
         for image, label, _key in plan.pairs:
-            source_paths.extend((image, label))
-    input_hashes = {path: _sha256(path) for path in source_paths}
+            _validate_image(image)
+            _parse_and_remap_label(label)
+            paths.extend((image, label))
+    try:
+        files = tuple(
+            inventory_record(path, input_root)
+            for path in sorted(
+                paths, key=lambda candidate: candidate.relative_to(input_root).as_posix()
+            )
+        )
+    except DatasetIntegrityError as error:
+        raise DatasetPreparationError(str(error)) from error
+    return SourceInventory(
+        root=input_root,
+        plans=plans,
+        files=files,
+        aggregate_sha256=aggregate_inventory(files),
+    )
+
+
+def prepare_dataset(
+    input_root: Path,
+    output_root: Path,
+    *,
+    expected_source_aggregate: str,
+) -> Path:
+    """Validate all source bytes and atomically publish one prepared dataset."""
+
+    inventory = inspect_source(input_root)
+    input_root = inventory.root
+    if not _SHA256_PATTERN.fullmatch(expected_source_aggregate):
+        raise DatasetPreparationError(
+            "expected source aggregate must be 64 lowercase hex characters"
+        )
+    if inventory.aggregate_sha256 != expected_source_aggregate:
+        raise DatasetPreparationError("source aggregate does not match the inspected dataset bytes")
+    output_root = _validated_output(output_root, input_root)
+    source_yaml = input_root / "data.yaml"
+    plans = inventory.plans
+    input_hashes = {
+        input_root.joinpath(*PurePosixPath(str(entry["path"])).parts): str(entry["sha256"])
+        for entry in inventory.files
+    }
 
     temporary = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.", dir=output_root.parent))
     prepared_files: list[PreparedFile] = []
@@ -426,6 +568,7 @@ def prepare_dataset(input_root: Path, output_root: Path) -> Path:
                 output_label.parent.mkdir(parents=True, exist_ok=True)
                 rendered, retained, dropped, kept, removed = _parse_and_remap_label(source_label)
                 shutil.copyfile(source_image, output_image)
+                _validate_image(output_image)
                 output_label.write_text(rendered, encoding="utf-8", newline="\n")
                 if _sha256(output_image) != input_hashes[source_image]:
                     raise DatasetPreparationError(f"copied image hash mismatch: {source_image}")
@@ -497,6 +640,12 @@ def prepare_dataset(input_root: Path, output_root: Path) -> Path:
                 "exportFormat": "YOLO",
                 "inputRoot": str(input_root),
                 "classMap": {str(key): value for key, value in SOURCE_CLASS_MAP},
+                "workspace": SOURCE_WORKSPACE,
+                "project": SOURCE_PROJECT,
+                "inputAggregate": {
+                    "algorithm": "sha256-canonical-json-input-files-v1",
+                    "sha256": inventory.aggregate_sha256,
+                },
             },
             "canonical": {
                 "outputRoot": str(output_root),
@@ -534,9 +683,22 @@ def run(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
         parsed = build_parser().parse_args(arguments)
-        input_root = _absolute_existing_directory(parsed.input_dir, label="input directory")
-        output_root = _validated_output(parsed.output_dir, input_root)
-        manifest = prepare_dataset(input_root, output_root)
+        if parsed.inspect_only:
+            if parsed.output_dir is not None or parsed.expected_source_aggregate is not None:
+                raise DatasetPreparationError(
+                    "--inspect-only cannot be combined with output or expected aggregate"
+                )
+            print(f"source aggregate: {inspect_source(parsed.input_dir).aggregate_sha256}")
+            return 0
+        if parsed.output_dir is None or parsed.expected_source_aggregate is None:
+            raise DatasetPreparationError(
+                "preparation requires --output-dir and --expected-source-aggregate"
+            )
+        manifest = prepare_dataset(
+            parsed.input_dir,
+            parsed.output_dir,
+            expected_source_aggregate=parsed.expected_source_aggregate,
+        )
     except KeyboardInterrupt:
         print("dataset preparation interrupted; no COMPLETE dataset was published", file=sys.stderr)
         return 130

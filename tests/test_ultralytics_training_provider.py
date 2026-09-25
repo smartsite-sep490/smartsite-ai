@@ -27,9 +27,17 @@ class FakeModel:
         return object()
 
 
+class CacheCreatingModel(FakeModel):
+    def train(self, **arguments: object) -> object:
+        data = Path(str(arguments["data"]))
+        (data.parent / "labels.cache").write_bytes(b"generated cache")
+        return super().train(**arguments)
+
+
 def _configuration(tmp_path: Path) -> TrainingConfiguration:
     return TrainingConfiguration(
         data_config=(tmp_path / "data.yaml").resolve(),
+        dataset_aggregate_sha256="a" * 64,
         base_weights=(tmp_path / "yolo11s.pt").resolve(),
         output_root=(tmp_path / "runs").resolve(),
         run_name="run-001",
@@ -67,6 +75,7 @@ def test_provider_runs_deterministic_official_yolo11s_training(tmp_path: Path) -
         "deterministic": True,
         "resume": False,
         "plots": False,
+        "cache": False,
     }
 
 
@@ -81,6 +90,25 @@ def test_provider_rejects_non_s_variant_before_training(tmp_path: Path) -> None:
         provider.train(_configuration(tmp_path))
 
     assert model.arguments is None
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("provider failed")])
+def test_provider_removes_generated_label_cache_on_success_and_failure(
+    tmp_path: Path, failure: Exception | None
+) -> None:
+    model = CacheCreatingModel(failure=failure)
+    provider = UltralyticsTrainingProvider(
+        model_factory=lambda _path: model,
+        version_factory=lambda: "8.4.155",
+    )
+
+    if failure is None:
+        provider.train(_configuration(tmp_path))
+    else:
+        with pytest.raises(TrainingExecutionError, match="Ultralytics training failed"):
+            provider.train(_configuration(tmp_path))
+
+    assert not (tmp_path / "labels.cache").exists()
 
 
 def test_provider_rejects_unpinned_ultralytics_before_loading(tmp_path: Path) -> None:

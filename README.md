@@ -322,9 +322,9 @@ target, not as a validated PPE checkpoint.
 
 Before fine-tuning, prepare the pinned local Roboflow **Construction Site Safety v27** YOLO export
 with `smartsite-ai-prepare-ppe-dataset`. The command performs no network access and never mutates
-the downloaded export. It verifies the reviewed ten-class source map and CC BY 4.0 provenance,
-requires one image/label pair for every item in train/validation/test, validates every normalized
-YOLO row, copies the media into a new directory, and remaps only these five classes:
+the downloaded export. It validates the export's Roboflow metadata against the reviewed project
+and version, requires exactly 2,605 train, 114 validation, and 82 test image/label pairs, decodes
+every bounded image, validates every normalized YOLO row, and remaps only these five classes:
 
 ```text
 source 5 Person          -> 0 Person
@@ -335,15 +335,24 @@ source 4 NO-Safety Vest  -> 4 NO-Safety Vest
 ```
 
 `Mask`, `NO-Mask`, `Safety Cone`, `machinery`, and `vehicle` annotations are counted and removed.
-The new directory is published only after validation succeeds and contains canonical `data.yaml`
-plus `preparation.manifest.json` with file hashes, class/split counts, license, attribution, and an
-aggregate output hash. Keep both source and prepared datasets outside Git and retain attribution to
+The metadata inside an export is self-declared and does not by itself authenticate its publisher.
+Download version 27 from the linked official project page, then run `--inspect-only`. Review and
+retain the printed SHA-256 locally; it pins the exact downloaded bytes. Preparation requires that
+value and publishes a new directory only after validation succeeds. The result contains canonical
+`data.yaml` plus `preparation.manifest.json` with every file hash, class/split counts, license,
+attribution, and input/output aggregate hashes. Keep both source and prepared datasets outside Git
+and retain attribution to
 Roboflow Universe Projects with the [version 27 dataset page](https://universe.roboflow.com/roboflow-universe-projects/construction-site-safety/dataset/27)
 under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ```powershell
 uv run --frozen smartsite-ai-prepare-ppe-dataset `
   --input-dir C:\SmartSite\local-data\construction-site-safety-27 `
+  --inspect-only
+
+uv run --frozen smartsite-ai-prepare-ppe-dataset `
+  --input-dir C:\SmartSite\local-data\construction-site-safety-27 `
+  --expected-source-aggregate <64-lowercase-hex-from-inspection> `
   --output-dir C:\SmartSite\local-data\smartsite-ppe-5class
 ```
 
@@ -358,8 +367,9 @@ paths, rejects an existing final run directory, resolves `auto` to an available 
 pins deterministic training, and writes `training.manifest.json` atomically only after a non-empty
 `weights/best.pt` exists. The manifest records the command, normalized configuration, requested
 and resolved device, exact `data.yaml` and base-checkpoint SHA-256 values, runtime/GPU facts, Git
-SHA and dirty state, and fine-tuned checkpoint SHA-256. A failed or interrupted run has no
-`COMPLETE` manifest.
+SHA and dirty state, verified prepared-dataset aggregate, and fine-tuned checkpoint SHA-256. It
+recomputes every prepared file before and after provider execution; a changed, missing, extra,
+linked, or unmanifested file fails the run. A failed or interrupted run has no `COMPLETE` manifest.
 
 The input `data.yaml` must reference existing local `train`, `val`, and `test` inputs and already
 use this exact class ID map:

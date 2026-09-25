@@ -72,7 +72,9 @@ def test_prepare_remaps_labels_and_writes_complete_manifest(tmp_path: Path) -> N
     assert (output / "train" / "labels" / "train.txt").read_text(encoding="utf-8") == (
         "0 0.5 0.5 0.4 0.8\n1 0.5 0.2 0.2 0.2\n"
     )
-    assert (output / "data.yaml").read_text(encoding="utf-8").endswith("  4: NO-Safety Vest\n")
+    data_yaml = (output / "data.yaml").read_text(encoding="utf-8")
+    assert data_yaml.startswith(f"path: {json.dumps(output.resolve().as_posix())}\n")
+    assert data_yaml.endswith("  4: NO-Safety Vest\n")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "COMPLETE"
     assert manifest["source"]["version"] == 27

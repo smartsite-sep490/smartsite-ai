@@ -206,7 +206,9 @@ def _validate_dataset_paths(data: Mapping[str, object], data_config: Path) -> No
         raise TrainingConfigurationError("data config path must be a non-blank local path")
     root = Path(root_value).expanduser()
     if not root.is_absolute():
-        root = data_config.parent / root
+        raise TrainingConfigurationError(
+            "data config path must be absolute for deterministic Ultralytics resolution"
+        )
     try:
         root = root.resolve(strict=True)
     except (OSError, RuntimeError, ValueError) as error:

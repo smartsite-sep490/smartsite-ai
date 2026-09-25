@@ -452,10 +452,10 @@ def _git_facts() -> dict[str, object]:
     }
 
 
-def _canonical_data_yaml() -> str:
+def _canonical_data_yaml(output_root: Path) -> str:
     names = "\n".join(f"  {class_id}: {name}" for class_id, name in CANONICAL_CLASS_MAP)
     return (
-        "path: .\n"
+        f"path: {json.dumps(output_root.as_posix())}\n"
         "train: train/images\n"
         "val: val/images\n"
         "test: test/images\n"
@@ -539,7 +539,7 @@ def prepare_dataset(
     split_summaries: dict[str, object] = {}
     try:
         data_yaml = temporary / "data.yaml"
-        data_yaml.write_text(_canonical_data_yaml(), encoding="utf-8", newline="\n")
+        data_yaml.write_text(_canonical_data_yaml(output_root), encoding="utf-8", newline="\n")
         prepared_files.append(
             PreparedFile(
                 input_path="data.yaml",

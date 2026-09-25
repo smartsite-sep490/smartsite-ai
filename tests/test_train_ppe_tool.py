@@ -31,7 +31,7 @@ def _write_inputs(tmp_path: Path, *, names: str | None = None) -> tuple[Path, Pa
     data.write_text(
         "\n".join(
             (
-                "path: .",
+                f"path: {json.dumps(dataset_root.resolve().as_posix())}",
                 "train: train/images",
                 "val: val/images",
                 "test: test/images",
@@ -234,6 +234,17 @@ def test_preflight_rejects_missing_local_dataset_split(tmp_path: Path) -> None:
     )
 
     with pytest.raises(TrainingConfigurationError, match="test path does not exist locally"):
+        preflight_arguments(build_parser().parse_args(arguments))
+
+
+def test_preflight_rejects_relative_dataset_root_used_by_ultralytics(tmp_path: Path) -> None:
+    arguments = _argv(tmp_path)
+    data = tmp_path / "dataset" / "data.yaml"
+    lines = data.read_text(encoding="utf-8").splitlines()
+    lines[0] = "path: ."
+    data.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(TrainingConfigurationError, match="path must be absolute"):
         preflight_arguments(build_parser().parse_args(arguments))
 
 

@@ -24,9 +24,5 @@
     "algorithm": "sha256-canonical-json-input-files-v1",
     "sha256": "d44cddef299ca75276d6aa1a18506769dc0624933dba0b9f16d358f09a790567"
   },
-  "preparedContentAggregate": {
-    "algorithm": "sha256-canonical-json-output-files-v1",
-    "sha256": "a49524d51d7ef9371cc5f3ca8402299fb72e0b9509b964d6eaa6d9f07c214611"
-  },
   "reviewNote": "The provider page and archive README declare 2801 images, but the reviewed archive contains 2799 complete image-label pairs. Exact artifact bytes and actual split counts are authoritative for this reviewed revision."
 }

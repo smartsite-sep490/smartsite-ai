@@ -350,8 +350,12 @@ YOLOv11 ZIP downloaded on 2026-09-25 contains 2,799 image/label pairs: 2,603 tra
 and 82 test. The preparation gate uses the files actually present in that reviewed artifact. If a
 later provider export changes these counts, treat it as a new source artifact and review it instead
 of weakening the validation to make it pass. The reviewed ZIP checksum, extracted-content
-aggregate, actual split counts, and prepared-content aggregate are recorded in
+aggregate, and actual split counts are recorded in
 [`provenance/construction-site-safety-v27-yolov11.json`](provenance/construction-site-safety-v27-yolov11.json).
+The generated `data.yaml` pins the absolute prepared-dataset root because Ultralytics resolves a
+relative `path` through its machine-level dataset setting. Move the prepared dataset only by
+running preparation again into the new destination so its manifest and data configuration remain
+consistent.
 
 ```powershell
 uv run --frozen smartsite-ai-prepare-ppe-dataset `

@@ -306,7 +306,7 @@ def test_reset_after_two_consecutive_non_missing_frames() -> None:
     assert c == ()
 
 
-def test_absent_item_for_active_track_counts_as_clear() -> None:
+def test_absent_item_is_unknown_and_breaks_pending_missing_without_proving_clear() -> None:
     gate = TemporalPpeCandidateGate()
     t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
 
@@ -326,7 +326,8 @@ def test_absent_item_for_active_track_counts_as_clear() -> None:
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
 
-    # Track 1 is active, but HARD_HAT is omitted/absent -> counts as clear frames
+    # Track 1 is active, but HARD_HAT is omitted/absent -> UNKNOWN. It breaks the
+    # pending consecutive-missing streak without acting as PRESENT evidence.
     gate.update(
         stream_id=STREAM_ID,
         session_id=SESSION_ID,
@@ -351,6 +352,51 @@ def test_absent_item_for_active_track_counts_as_clear() -> None:
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
     assert c == ()
+
+
+def test_absent_item_does_not_clear_a_confirmed_missing_episode() -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=2, clear_frames=2)
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    for offset in (0, 200):
+        candidates = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=offset),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+    assert len(candidates) == 1
+
+    for offset in (400, 600, 800):
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=offset),
+            active_track_ids=(1,),
+            observations=(),
+        )
+
+    assert gate.confirmed_track_items(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        active_track_ids=(1,),
+    ) == frozenset({(1, "HARD_HAT")})
+
+    for offset in (1000, 1200):
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=offset),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+        )
+
+    assert not gate.confirmed_track_items(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        active_track_ids=(1,),
+    )
 
 
 def test_track_expiry_exact_and_over_one_second_boundary() -> None:

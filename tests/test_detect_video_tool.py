@@ -1004,10 +1004,12 @@ def test_ui_timeline_collector_zone_entry_without_leaking_unconfirmed_ppe() -> N
         ),
     )
     collector.observe(make_batch(2, person_inside, no_hardhat), video_time_seconds=0.4)
+    collector.observe(make_batch(3, person_inside), video_time_seconds=0.6)
+    collector.observe(make_batch(4, person_inside), video_time_seconds=0.8)
 
-    # Timeline entry is recorded for ZONE_ENTRY at video_time_seconds 0.4
+    # Timeline entry is recorded after three consecutive inside frames.
     assert len(collector.entries) == 1
-    assert collector.entries[0]["videoTimeSeconds"] == 0.4
+    assert collector.entries[0]["videoTimeSeconds"] == 0.8
 
     # The recorded event must contain ZONE_ENTRY and PERSON, but MUST NOT
     # leak unconfirmed PPE/MISSING!

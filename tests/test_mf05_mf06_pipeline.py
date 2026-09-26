@@ -91,18 +91,32 @@ def test_pipeline_builds_technical_observations_without_authorization_decisions(
         region_configuration=configuration(),
         event_id="00000000-0000-4000-8000-000000000011",
     )
+    third = pipeline.process(
+        batch(3, detection("person", (0.45, 0.20, 0.55, 0.60))),
+        region_configuration=configuration(),
+        event_id="00000000-0000-4000-8000-000000000012",
+    )
+    fourth = pipeline.process(
+        batch(4, detection("person", (0.45, 0.20, 0.55, 0.60))),
+        region_configuration=configuration(),
+        event_id="00000000-0000-4000-8000-000000000013",
+    )
 
     assert first is not None
     assert second is not None
+    assert third is not None
+    assert fourth is not None
     assert [observation.type for observation in first.observations] == [
         "PERSON",
         "PPE",
     ]
-    assert {observation.type for observation in second.observations} == {
+    assert {observation.type for observation in second.observations} == {"PERSON"}
+    assert {observation.type for observation in third.observations} == {"PERSON"}
+    assert {observation.type for observation in fourth.observations} == {
         "PERSON",
         "ZONE_ENTRY",
     }
-    wire = second.to_wire_dict()
+    wire = fourth.to_wire_dict()
     assert "allowed" not in wire
     assert "denied" not in wire
     assert "unauthorized" not in wire

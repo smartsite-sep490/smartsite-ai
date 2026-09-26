@@ -297,6 +297,15 @@ An evaluation run requires all of these existing local inputs:
 Create a new report directory name for every run. The CLI rejects an existing report directory so a
 previous result cannot be silently overwritten.
 
+The evaluation CLI starts a temporary Ultralytics runtime sandbox before importing the provider.
+Ultralytics settings, Matplotlib/provider caches, temporary files, and local fallback fonts stay in
+that sandbox; offline mode is enabled and auto-install is disabled. Independent provider validation
+also writes run output only to a unique temporary workspace. Both locations are removed on success
+and failure. The provider YAML must declare an absolute dataset root and resolve its selected,
+training, and validation image directories inside one bounded, local, non-symlink dataset root.
+Validation snapshots pre-existing `*.cache` files, removes only caches created by that invocation,
+and discards the result if cleanup or the integrity of a pre-existing cache cannot be verified.
+
 ```powershell
 uv sync --frozen --extra vision
 uv run --frozen --extra vision smartsite-ai-evaluate `

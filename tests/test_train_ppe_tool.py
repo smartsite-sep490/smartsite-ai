@@ -5,12 +5,15 @@ import sys
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import smartsite_ai.tools.train_ppe as train_ppe
 from smartsite_ai.tools.train_ppe import (
     TrainingConfigurationError,
     TrainingServices,
+    _default_runtime_facts,
     build_parser,
     preflight_arguments,
     run,
@@ -180,6 +183,36 @@ def test_import_does_not_load_vision_or_network_stacks() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_runtime_facts_use_the_imported_torch_module_for_version_and_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    distribution_lookups: list[str] = []
+
+    def distribution_lookup(name: str) -> str:
+        distribution_lookups.append(name)
+        return "metadata-version-must-not-be-used-for-torch"
+
+    cuda = SimpleNamespace(
+        is_available=lambda: True,
+        get_device_name=lambda _index: "NVIDIA Test GPU",
+    )
+    torch = SimpleNamespace(
+        __version__="2.14.0+cu126-imported",
+        version=SimpleNamespace(cuda="12.6"),
+        cuda=cuda,
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    monkeypatch.setattr(train_ppe, "_distribution_version", distribution_lookup)
+
+    facts = _default_runtime_facts()
+
+    assert facts["torch"] == "2.14.0+cu126-imported"
+    assert facts["cudaAvailable"] is True
+    assert facts["cudaRuntime"] == "12.6"
+    assert facts["cudaDevice"] == "NVIDIA Test GPU"
+    assert distribution_lookups == ["ultralytics"]
 
 
 def test_preflight_normalizes_absolute_local_inputs(tmp_path: Path) -> None:

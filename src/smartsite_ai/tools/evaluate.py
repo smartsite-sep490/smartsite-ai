@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib.metadata import PackageNotFoundError
@@ -237,6 +237,7 @@ def _default_execute(configuration: EvaluationRunConfiguration) -> None:
         OpenCvEvaluationMedia,
         OpenCvOverlayRenderer,
         UltralyticsValidationProvider,
+        ultralytics_runtime_sandbox,
     )
     from smartsite_ai.inference.loading import load_yolo11_detector
     from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
@@ -248,10 +249,16 @@ def _default_execute(configuration: EvaluationRunConfiguration) -> None:
     )
     from smartsite_ai.tracking import IoUPersonTracker
 
-    detector, runner, artifact, _class_map = load_yolo11_detector(
-        configuration.artifact_spec,
-        runner_factory=UltralyticsYoloRunner,
-    )
+    runtime_stack = ExitStack()
+    runtime_stack.enter_context(ultralytics_runtime_sandbox())
+    try:
+        detector, runner, artifact, _class_map = load_yolo11_detector(
+            configuration.artifact_spec,
+            runner_factory=UltralyticsYoloRunner,
+        )
+    except BaseException:
+        runtime_stack.close()
+        raise
 
     def execute_loaded() -> None:
         if artifact.model_family != "yolo11s":
@@ -364,7 +371,10 @@ def _default_execute(configuration: EvaluationRunConfiguration) -> None:
     try:
         execute_loaded()
     finally:
-        runner.close()
+        try:
+            runner.close()
+        finally:
+            runtime_stack.close()
 
 
 def _git_metadata() -> Any:

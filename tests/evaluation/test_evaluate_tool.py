@@ -249,7 +249,12 @@ def test_controlled_failure_writes_sanitized_incomplete_status(tmp_path: Path) -
     assert "super-secret" not in serialized
 
 
-def test_default_service_runs_real_preflight_and_never_fakes_scores(tmp_path: Path) -> None:
+def test_default_service_runs_real_preflight_without_optional_vision_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import smartsite_ai.evaluation.runtime_adapters as runtime_adapters
+
+    monkeypatch.setattr(runtime_adapters, "find_spec", lambda _package: None)
     result = run(_argv(tmp_path))
     status_path = tmp_path / "run-001" / "evaluation.incomplete.json"
     status = json.loads(status_path.read_text(encoding="utf-8"))

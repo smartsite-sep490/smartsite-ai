@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -336,8 +337,16 @@ def test_evidence_exporter_rejects_unsafe_frame_id(tmp_path: Path) -> None:
 def _validation_arguments(tmp_path: Path) -> ProviderValidationArguments:
     model = tmp_path / "model.pt"
     data = tmp_path / "data.yaml"
+    (tmp_path / "test" / "images").mkdir(parents=True)
+    (tmp_path / "test" / "labels").mkdir()
     model.write_bytes(b"weights")
-    data.write_text("path: .", encoding="utf-8")
+    data.write_text(
+        f"path: {tmp_path.resolve().as_posix()}\n"
+        "train: test/images\n"
+        "val: test/images\n"
+        "test: test/images\n",
+        encoding="utf-8",
+    )
     return ProviderValidationArguments(
         model_path=model.resolve(),
         data_config_path=data.resolve(),
@@ -351,6 +360,72 @@ def _validation_arguments(tmp_path: Path) -> ProviderValidationArguments:
         device="cpu",
         seed=7,
     )
+
+
+def test_real_ultralytics_import_and_font_lookup_stay_in_runtime_sandbox(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside-config"
+    outside.mkdir()
+    source_root = Path(__file__).parents[2] / "src"
+    code = """
+from pathlib import Path
+import tempfile
+from smartsite_ai.evaluation.runtime_adapters import (
+    _temporary_validation_workspace,
+    ultralytics_runtime_sandbox,
+)
+
+original_temp = tempfile.gettempdir()
+with ultralytics_runtime_sandbox() as root:
+    import ultralytics.utils as ultralytics_utils
+    from ultralytics.utils.checks import check_font
+
+    config = Path(ultralytics_utils.USER_CONFIG_DIR).resolve()
+    settings = Path(ultralytics_utils.SETTINGS_FILE).resolve()
+    config.relative_to(root)
+    settings.relative_to(root)
+    font = Path(check_font("Arial.ttf")).resolve()
+    font.relative_to(root)
+    assert font.is_file()
+    configured_temp = Path(tempfile.gettempdir()).resolve()
+    configured_temp.relative_to(root)
+    with tempfile.NamedTemporaryFile() as handle:
+        Path(handle.name).resolve().relative_to(root)
+    workspace = _temporary_validation_workspace()
+    Path(workspace.name).resolve().relative_to(root)
+    workspace.cleanup()
+    print(f"SANDBOX={root}")
+assert not root.exists()
+assert tempfile.gettempdir() == original_temp
+"""
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+    environment["YOLO_CONFIG_DIR"] = str(outside)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=environment,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "SANDBOX=" in completed.stdout
+    assert list(outside.iterdir()) == []
+
+
+def test_real_ultralytics_provider_refuses_to_import_without_runtime_sandbox(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+
+    with pytest.raises(EvaluationRuntimeError, match="requires an active runtime sandbox"):
+        UltralyticsValidationProvider(
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
 
 
 def test_ultralytics_provider_uses_exact_local_inputs_and_locked_arguments(tmp_path: Path) -> None:
@@ -376,6 +451,8 @@ def test_ultralytics_provider_uses_exact_local_inputs_and_locked_arguments(tmp_p
     ).validate(arguments)
 
     assert calls == [arguments.model_path]
+    project = Path(str(model.kwargs.pop("project")))
+    assert not project.exists()
     assert model.kwargs == {
         "data": str(arguments.data_config_path),
         "split": "test",
@@ -388,6 +465,9 @@ def test_ultralytics_provider_uses_exact_local_inputs_and_locked_arguments(tmp_p
         "device": "cpu",
         "seed": 7,
         "deterministic": True,
+        "name": "validation",
+        "exist_ok": False,
+        "save": False,
         "plots": False,
         "save_json": False,
         "verbose": False,
@@ -395,6 +475,301 @@ def test_ultralytics_provider_uses_exact_local_inputs_and_locked_arguments(tmp_p
     assert result["provider_version"] == PINNED_ULTRALYTICS_VERSION
     assert result["ap50"] == pytest.approx(0.8)
     assert result["ap50_95"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("provider_fails", [False, True])
+def test_ultralytics_provider_isolates_outputs_and_removes_only_new_caches(
+    tmp_path: Path,
+    provider_fails: bool,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    pre_existing = tmp_path / "val" / "labels.cache"
+    pre_existing.parent.mkdir()
+    pre_existing.write_bytes(b"keep this cache")
+    generated = tmp_path / "test" / "labels.cache"
+    workspaces: list[Path] = []
+
+    class CacheCreatingModel:
+        names = {
+            0: "Person",
+            1: "Hardhat",
+            2: "NO-Hardhat",
+            3: "Safety Vest",
+            4: "NO-Safety Vest",
+        }
+
+        def val(self, **kwargs: object) -> object:
+            project = Path(str(kwargs["project"]))
+            workspaces.append(project)
+            output = project / str(kwargs["name"])
+            output.mkdir()
+            (output / "results.csv").write_text("provider output", encoding="utf-8")
+            generated.write_bytes(b"generated cache")
+            if provider_fails:
+                raise RuntimeError("provider failed")
+            return SimpleNamespace(box=SimpleNamespace(map50=0.8, map=0.5))
+
+    provider = UltralyticsValidationProvider(
+        model_factory=lambda _path: CacheCreatingModel(),
+        provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+    )
+
+    if provider_fails:
+        with pytest.raises(RuntimeError, match="provider failed"):
+            provider.validate(arguments)
+    else:
+        provider.validate(arguments)
+
+    assert pre_existing.read_bytes() == b"keep this cache"
+    assert not generated.exists()
+    assert len(workspaces) == 1
+    assert not workspaces[0].exists()
+
+
+def test_ultralytics_provider_discards_result_when_existing_cache_changes(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    pre_existing = tmp_path / "test" / "labels.cache"
+    pre_existing.write_bytes(b"original cache")
+
+    class CacheMutatingModel:
+        names = {
+            0: "Person",
+            1: "Hardhat",
+            2: "NO-Hardhat",
+            3: "Safety Vest",
+            4: "NO-Safety Vest",
+        }
+
+        def val(self, **_kwargs: object) -> object:
+            pre_existing.write_bytes(b"mutated cache")
+            return SimpleNamespace(box=SimpleNamespace(map50=0.8, map=0.5))
+
+    provider = UltralyticsValidationProvider(
+        model_factory=lambda _path: CacheMutatingModel(),
+        provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+    )
+
+    with pytest.raises(EvaluationRuntimeError, match="cleanup failed"):
+        provider.validate(arguments)
+
+    assert pre_existing.exists()
+
+
+def test_ultralytics_provider_fails_safely_when_generated_cache_cannot_be_removed(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    generated = tmp_path / "test" / "labels.cache"
+
+    class CacheCreatingModel:
+        names = {
+            0: "Person",
+            1: "Hardhat",
+            2: "NO-Hardhat",
+            3: "Safety Vest",
+            4: "NO-Safety Vest",
+        }
+
+        def val(self, **_kwargs: object) -> object:
+            generated.write_bytes(b"generated cache")
+            return SimpleNamespace(box=SimpleNamespace(map50=0.8, map=0.5))
+
+    def reject_unlink(_path: Path) -> None:
+        raise PermissionError("locked")
+
+    provider = UltralyticsValidationProvider(
+        model_factory=lambda _path: CacheCreatingModel(),
+        provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        cache_unlink=reject_unlink,
+    )
+
+    with pytest.raises(EvaluationRuntimeError, match="cleanup failed"):
+        provider.validate(arguments)
+
+    assert generated.exists()
+
+
+def test_ultralytics_provider_discards_result_when_workspace_cleanup_fails(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    workspace_path = tmp_path / "isolated-output"
+
+    class FailingWorkspace:
+        name = str(workspace_path.resolve())
+
+        def __init__(self) -> None:
+            workspace_path.mkdir()
+
+        def cleanup(self) -> None:
+            raise PermissionError("locked")
+
+    class SuccessfulModel:
+        names = {
+            0: "Person",
+            1: "Hardhat",
+            2: "NO-Hardhat",
+            3: "Safety Vest",
+            4: "NO-Safety Vest",
+        }
+
+        def val(self, **_kwargs: object) -> object:
+            return SimpleNamespace(box=SimpleNamespace(map50=0.8, map=0.5))
+
+    provider = UltralyticsValidationProvider(
+        model_factory=lambda _path: SuccessfulModel(),
+        provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        workspace_factory=FailingWorkspace,
+    )
+
+    with pytest.raises(EvaluationRuntimeError, match="cleanup failed"):
+        provider.validate(arguments)
+
+    assert workspace_path.exists()
+
+
+def test_ultralytics_provider_rejects_split_outside_declared_dataset_root(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    arguments.data_config_path.write_text(
+        f"path: {tmp_path.as_posix()}\ntest: ../{outside.name}\n",
+        encoding="utf-8",
+    )
+    loaded = False
+
+    def factory(_path: Path) -> object:
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    with pytest.raises(EvaluationRuntimeError, match="inside the declared dataset root"):
+        UltralyticsValidationProvider(
+            model_factory=factory,
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
+
+    assert loaded is False
+
+
+def test_ultralytics_provider_rejects_unselected_split_outside_dataset_root(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-train"
+    outside_images = outside / "images"
+    outside_labels = outside / "labels"
+    outside_images.mkdir(parents=True)
+    outside_labels.mkdir()
+    arguments.data_config_path.write_text(
+        f"path: {tmp_path.as_posix()}\n"
+        f"train: ../{outside.name}/images\n"
+        "val: test/images\n"
+        "test: test/images\n",
+        encoding="utf-8",
+    )
+    loaded = False
+
+    def factory(_path: Path) -> object:
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    with pytest.raises(EvaluationRuntimeError, match="inside the declared dataset root"):
+        UltralyticsValidationProvider(
+            model_factory=factory,
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
+
+    assert loaded is False
+
+
+def test_ultralytics_provider_rejects_split_list_files_that_can_escape_root(
+    tmp_path: Path,
+) -> None:
+    arguments = _validation_arguments(tmp_path)
+    split_index = tmp_path / "test.txt"
+    split_index.write_text("../outside/image.jpg\n", encoding="utf-8")
+    arguments.data_config_path.write_text(
+        f"path: {tmp_path.resolve().as_posix()}\ntest: test.txt\n", encoding="utf-8"
+    )
+    loaded = False
+
+    def factory(_path: Path) -> object:
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    with pytest.raises(EvaluationRuntimeError, match="split paths must be directories"):
+        UltralyticsValidationProvider(
+            model_factory=factory,
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
+
+    assert loaded is False
+
+
+def test_ultralytics_provider_rejects_relative_dataset_root_before_model_load(
+    tmp_path: Path,
+) -> None:
+    config_root = tmp_path / "configuration"
+    dataset_root = tmp_path / "dataset"
+    config_root.mkdir()
+    (dataset_root / "test" / "images").mkdir(parents=True)
+    (dataset_root / "test" / "labels").mkdir()
+    model_path = tmp_path / "model.pt"
+    model_path.write_bytes(b"weights")
+    data_path = config_root / "data.yaml"
+    data_path.write_text("path: ../dataset\ntest: test/images\n", encoding="utf-8")
+    arguments = _validation_arguments(tmp_path).model_copy(
+        update={"model_path": model_path.resolve(), "data_config_path": data_path.resolve()}
+    )
+    loaded = False
+
+    def factory(_path: Path) -> object:
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    with pytest.raises(EvaluationRuntimeError, match="path must be absolute"):
+        UltralyticsValidationProvider(
+            model_factory=factory,
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
+
+    assert loaded is False
+
+
+def test_ultralytics_provider_rejects_images_root_with_labels_outside_dataset_root(
+    tmp_path: Path,
+) -> None:
+    images = tmp_path / "images"
+    images.mkdir()
+    (tmp_path / "labels").mkdir()
+    arguments = _validation_arguments(tmp_path).model_copy(
+        update={"data_config_path": (tmp_path / "images-root.yaml").resolve()}
+    )
+    arguments.data_config_path.write_text(
+        f"path: {images.resolve().as_posix()}\ntest: .\n", encoding="utf-8"
+    )
+    loaded = False
+
+    def factory(_path: Path) -> object:
+        nonlocal loaded
+        loaded = True
+        return object()
+
+    with pytest.raises(EvaluationRuntimeError, match="label and cache paths must remain inside"):
+        UltralyticsValidationProvider(
+            model_factory=factory,
+            provider_version_factory=lambda: PINNED_ULTRALYTICS_VERSION,
+        ).validate(arguments)
+
+    assert loaded is False
 
 
 def test_ultralytics_provider_fails_before_loading_on_wrong_version_or_missing_file(

@@ -356,16 +356,16 @@ def _default_runtime_facts() -> Mapping[str, object]:
         "python": platform.python_version(),
         "platform": platform.platform(),
         "ultralytics": _distribution_version("ultralytics"),
-        "torch": _distribution_version("torch"),
     }
     try:
         import torch
 
+        facts["torch"] = str(torch.__version__)
         facts["cudaAvailable"] = bool(torch.cuda.is_available())
         facts["cudaRuntime"] = torch.version.cuda
         facts["cudaDevice"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
     except (ImportError, RuntimeError):
-        facts.update(cudaAvailable=False, cudaRuntime=None, cudaDevice=None)
+        facts.update(torch=None, cudaAvailable=False, cudaRuntime=None, cudaDevice=None)
     return facts
 
 

@@ -137,22 +137,50 @@ class TemporalPpeCandidateGate:
                             confirmed_candidates.append(candidate)
                             self._cooldowns[state_key] = observed_at
                             state.confirmed = True
-                else:
-                    # Non-missing frame (explicit PRESENT or absent/omitted item)
+                elif obs is not None and obs.status == "PRESENT":
+                    # Only explicit positive evidence clears a missing episode. An
+                    # omitted item is UNKNOWN, not proof that the worker is compliant.
                     state.consecutive_clear += 1
                     if not state.confirmed:
-                        # Before confirmation, any non-missing frame immediately resets
-                        # the pending missing streak.
+                        # Before confirmation, explicit PRESENT evidence immediately
+                        # resets the pending missing streak.
                         state.consecutive_missing = 0
                         state.first_seen_at = None
                     elif state.consecutive_clear >= self._clear_frames:
-                        # After confirmation, clear_frames consecutive non-missing frames
+                        # After confirmation, clear_frames consecutive PRESENT frames
                         # are required to reset the confirmed episode.
                         state.consecutive_missing = 0
                         state.first_seen_at = None
                         state.confirmed = False
+                else:
+                    # No observation for this item means UNKNOWN. It breaks a pending
+                    # consecutive-evidence streak, but cannot clear an already confirmed
+                    # episode. Track expiry remains the fallback for a vanished person.
+                    state.consecutive_clear = 0
+                    if not state.confirmed:
+                        state.consecutive_missing = 0
+                        state.first_seen_at = None
 
         return tuple(confirmed_candidates)
+
+    def confirmed_track_items(
+        self,
+        *,
+        stream_id: str,
+        session_id: UUID,
+        active_track_ids: Sequence[int],
+    ) -> frozenset[tuple[int, PpeItem]]:
+        """Return currently confirmed PPE items for active tracks in one stream session."""
+
+        active = set(active_track_ids)
+        return frozenset(
+            (track_id, item)
+            for (state_stream, state_session, track_id, item), state in self._states.items()
+            if state_stream == stream_id
+            and state_session == session_id
+            and track_id in active
+            and state.confirmed
+        )
 
 
 def filter_event_for_delivery(

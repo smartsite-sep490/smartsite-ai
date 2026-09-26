@@ -1,5 +1,7 @@
 """MF05/MF06 orchestration into the locked technical observation event."""
 
+from uuid import UUID
+
 from smartsite_ai.domain.observations import (
     FrameDimensions,
     PersonObservation,
@@ -70,7 +72,16 @@ class Mf05Mf06Pipeline:
             for person in tracked_frame.persons
         )
         ppe_observations = self._ppe.process(tracked_frame, ppe_region)
-        zone_observations = self._zones.process(tracked_frame, region_configuration)
+        restricted_zone_configuration = region_configuration.model_copy(
+            update={
+                "regions": tuple(
+                    region
+                    for region in region_configuration.regions
+                    if region.region_id.casefold() != self._ppe_region_id
+                )
+            }
+        )
+        zone_observations = self._zones.process(tracked_frame, restricted_zone_configuration)
         observations = [*person_observations, *ppe_observations, *zone_observations]
         if not observations:
             return None
@@ -82,6 +93,21 @@ class Mf05Mf06Pipeline:
             captured_at=batch.captured_at.isoformat(),
             frame_dimensions=FrameDimensions(width=batch.frame_width, height=batch.frame_height),
             observations=observations,
+        )
+
+    def occupied_zone_track_regions(
+        self,
+        *,
+        stream_id: str,
+        session_id: UUID,
+        active_track_ids: tuple[int, ...],
+    ) -> frozenset[tuple[int, str]]:
+        """Expose confirmed MF06 occupancy for realtime presentation only."""
+
+        return self._zones.occupied_track_regions(
+            stream_id=stream_id,
+            session_id=session_id,
+            active_track_ids=active_track_ids,
         )
 
 

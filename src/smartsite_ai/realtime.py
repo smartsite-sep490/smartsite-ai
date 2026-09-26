@@ -32,7 +32,14 @@ from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
 
-def _ui_frame(event: Any, width: int, height: int) -> dict[str, Any]:
+def _ui_frame(
+    event: Any,
+    width: int,
+    height: int,
+    *,
+    confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
+    occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+) -> dict[str, Any]:
     """Map one technical event to the JSON shape the web realtime screen already reads."""
 
     if event is None:
@@ -46,7 +53,7 @@ def _ui_frame(event: Any, width: int, height: int) -> dict[str, Any]:
     payload = event.to_wire_dict()
     people: dict[int, dict[str, Any]] = {}
     ppe_status: dict[int, dict[str, str]] = {}
-    zone_tracks: set[int] = set()
+    entered_zone_regions: set[tuple[int, str]] = set()
     for observation in payload["observations"]:
         track_id = int(observation["trackId"])
         kind = observation["type"]
@@ -55,13 +62,28 @@ def _ui_frame(event: Any, width: int, height: int) -> dict[str, Any]:
         elif kind == "PPE":
             ppe_status.setdefault(track_id, {})[observation["ppeItem"]] = observation["status"]
         elif kind == "ZONE_ENTRY":
-            zone_tracks.add(track_id)
+            entered_zone_regions.add((track_id, observation["regionId"]))
     detections = []
     zone_detections = []
     for track_id, person in people.items():
         status = {"HARD_HAT": "UNKNOWN", "SAFETY_VEST": "UNKNOWN"}
         status.update(ppe_status.get(track_id, {}))
         missing = [item for item, value in status.items() if value == "MISSING"]
+        confirmed_missing = sorted(
+            item for confirmed_track, item in confirmed_ppe_items if confirmed_track == track_id
+        )
+        if confirmed_missing:
+            alert_state = "CONFIRMED"
+            label = f"MISSING {confirmed_missing[0].replace('_', ' ')}"
+        elif missing:
+            alert_state = "PENDING_CONFIRMATION"
+            label = "PPE CHECK PENDING"
+        elif all(value == "PRESENT" for value in status.values()):
+            alert_state = "COMPLIANT"
+            label = "PPE COMPLIANT"
+        else:
+            alert_state = "UNKNOWN"
+            label = "PPE UNKNOWN"
         box = person.get("boundingBox")
         detections.append(
             {
@@ -69,19 +91,42 @@ def _ui_frame(event: Any, width: int, height: int) -> dict[str, Any]:
                 "confidence": person.get("confidence") or 0.0,
                 "boundingBox": box,
                 "ppeStatus": status,
-                "active": bool(missing),
-                "label": f"MISSING {missing[0].replace('_', ' ')}" if missing else "PPE OK",
+                "alertState": alert_state,
+                "confirmedMissingItems": confirmed_missing,
+                "active": bool(confirmed_missing),
+                "label": label,
             }
         )
-        zone_detections.append(
-            {
-                "trackId": track_id,
-                "confidence": person.get("confidence") or 0.0,
-                "boundingBox": box,
-                "active": track_id in zone_tracks,
-                "label": "ZONE ENTRY" if track_id in zone_tracks else "OUTSIDE ZONE",
-            }
+        occupied_regions = sorted(
+            region_id
+            for occupied_track, region_id in occupied_zone_regions
+            if occupied_track == track_id
         )
+        entered_regions = sorted(
+            region_id
+            for entered_track, region_id in entered_zone_regions
+            if entered_track == track_id
+        )
+        displayed_regions = sorted(set(occupied_regions) | set(entered_regions))
+        if not displayed_regions:
+            displayed_regions = [None]
+        for region_id in displayed_regions:
+            zone_detections.append(
+                {
+                    "trackId": track_id,
+                    "confidence": person.get("confidence") or 0.0,
+                    "boundingBox": box,
+                    "active": region_id is not None,
+                    "label": (
+                        "ZONE ENTRY"
+                        if region_id in entered_regions
+                        else "IN RESTRICTED ZONE"
+                        if region_id is not None
+                        else "OUTSIDE ZONE"
+                    ),
+                    "regionId": region_id,
+                }
+            )
     return {
         "type": "frame",
         "width": width,
@@ -327,7 +372,25 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 active_track_ids=active_track_ids,
                 observations=ppe_observations,
             )
-            await websocket.send_json(_ui_frame(event, envelope.width, envelope.height))
+            confirmed_ppe_items = temporal_gate.confirmed_track_items(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                active_track_ids=active_track_ids,
+            )
+            occupied_zone_regions = pipeline.occupied_zone_track_regions(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                active_track_ids=active_track_ids,
+            )
+            await websocket.send_json(
+                _ui_frame(
+                    event,
+                    envelope.width,
+                    envelope.height,
+                    confirmed_ppe_items=confirmed_ppe_items,
+                    occupied_zone_regions=occupied_zone_regions,
+                )
+            )
             if backend is not None and event is not None:
                 delivery_event = filter_event_for_delivery(event, confirmed_candidates)
                 if delivery_event is not None:

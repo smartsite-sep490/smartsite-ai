@@ -20,10 +20,174 @@ from smartsite_ai.pipelines.ppe_temporal import (
 )
 from smartsite_ai.realtime import (
     RealtimeStreamGateTracker,
+    _ui_frame,
     parse_zone_polygon,
     resolve_realtime_device,
     safe_source_label,
 )
+
+
+def _ui_event(*observations: object) -> TechnicalObservationEvent:
+    return TechnicalObservationEvent.create(
+        event_id="00000000-0000-4000-8000-000000000010",
+        camera_external_id="camera-01",
+        stream_session_id="00000000-0000-4000-8000-000000000001",
+        captured_at="2026-09-21T12:00:00Z",
+        frame_dimensions={"width": 640, "height": 480},
+        observations=observations,
+    )
+
+
+def _ui_person() -> PersonObservation:
+    return PersonObservation.model_validate(
+        {
+            "type": "PERSON",
+            "trackId": 1,
+            "confidence": 0.9,
+            "boundingBox": {
+                "x1": 0.1,
+                "y1": 0.1,
+                "x2": 0.4,
+                "y2": 0.9,
+                "coordinateSpace": "NORMALIZED_0_1",
+            },
+        }
+    )
+
+
+def _ui_ppe(item: str, status: str) -> PpeObservation:
+    return PpeObservation.model_validate(
+        {
+            "type": "PPE",
+            "trackId": 1,
+            "ppeItem": item,
+            "status": status,
+            "regionId": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "geometryVersion": 1,
+            "confidence": 0.8,
+        }
+    )
+
+
+def test_ui_frame_distinguishes_unknown_pending_confirmed_and_compliant_ppe() -> None:
+    unknown = _ui_frame(_ui_event(_ui_person()), 640, 480)["detections"][0]
+    assert (unknown["alertState"], unknown["active"], unknown["label"]) == (
+        "UNKNOWN",
+        False,
+        "PPE UNKNOWN",
+    )
+
+    pending = _ui_frame(
+        _ui_event(_ui_person(), _ui_ppe("HARD_HAT", "MISSING")),
+        640,
+        480,
+    )["detections"][0]
+    assert (pending["alertState"], pending["active"], pending["label"]) == (
+        "PENDING_CONFIRMATION",
+        False,
+        "PPE CHECK PENDING",
+    )
+
+    confirmed = _ui_frame(
+        _ui_event(_ui_person(), _ui_ppe("HARD_HAT", "MISSING")),
+        640,
+        480,
+        confirmed_ppe_items=frozenset({(1, "HARD_HAT")}),
+    )["detections"][0]
+    assert (confirmed["alertState"], confirmed["active"], confirmed["label"]) == (
+        "CONFIRMED",
+        True,
+        "MISSING HARD HAT",
+    )
+    assert confirmed["confirmedMissingItems"] == ["HARD_HAT"]
+
+    confirmed_unknown = _ui_frame(
+        _ui_event(_ui_person()),
+        640,
+        480,
+        confirmed_ppe_items=frozenset({(1, "HARD_HAT")}),
+    )["detections"][0]
+    assert (confirmed_unknown["alertState"], confirmed_unknown["active"]) == (
+        "CONFIRMED",
+        True,
+    )
+    assert confirmed_unknown["confirmedMissingItems"] == ["HARD_HAT"]
+
+    confirmed_first_present = _ui_frame(
+        _ui_event(_ui_person(), _ui_ppe("HARD_HAT", "PRESENT")),
+        640,
+        480,
+        confirmed_ppe_items=frozenset({(1, "HARD_HAT")}),
+    )["detections"][0]
+    assert (confirmed_first_present["alertState"], confirmed_first_present["active"]) == (
+        "CONFIRMED",
+        True,
+    )
+
+    compliant = _ui_frame(
+        _ui_event(
+            _ui_person(),
+            _ui_ppe("HARD_HAT", "PRESENT"),
+            _ui_ppe("SAFETY_VEST", "PRESENT"),
+        ),
+        640,
+        480,
+    )["detections"][0]
+    assert (compliant["alertState"], compliant["active"], compliant["label"]) == (
+        "COMPLIANT",
+        False,
+        "PPE COMPLIANT",
+    )
+
+
+def test_ui_frame_keeps_confirmed_zone_occupancy_active_after_entry_frame() -> None:
+    region_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    frame = _ui_frame(
+        _ui_event(_ui_person()),
+        640,
+        480,
+        occupied_zone_regions=frozenset({(1, region_id)}),
+    )
+
+    assert frame["zoneDetections"][0] == {
+        "trackId": 1,
+        "confidence": 0.9,
+        "boundingBox": {
+            "x1": 0.1,
+            "y1": 0.1,
+            "x2": 0.4,
+            "y2": 0.9,
+            "coordinateSpace": "NORMALIZED_0_1",
+        },
+        "active": True,
+        "label": "IN RESTRICTED ZONE",
+        "regionId": region_id,
+    }
+
+
+def test_ui_frame_preserves_each_entered_region_when_zones_overlap() -> None:
+    region_a = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    region_b = "f81d4fae-7dec-11d0-a765-00a0c91e6bf7"
+    zone_entry = {
+        "type": "ZONE_ENTRY",
+        "trackId": 1,
+        "regionId": region_b,
+        "geometryVersion": 1,
+        "confidence": 0.9,
+    }
+    frame = _ui_frame(
+        _ui_event(_ui_person(), zone_entry),
+        640,
+        480,
+        occupied_zone_regions=frozenset({(1, region_a), (1, region_b)}),
+    )
+
+    assert [
+        (detection["regionId"], detection["label"]) for detection in frame["zoneDetections"]
+    ] == [
+        (region_a, "IN RESTRICTED ZONE"),
+        (region_b, "ZONE ENTRY"),
+    ]
 
 
 def test_zone_polygon_rejects_out_of_range_points() -> None:

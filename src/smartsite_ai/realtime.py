@@ -29,6 +29,7 @@ from smartsite_ai.pipelines.ppe_temporal import (
     filter_event_for_delivery,
 )
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
 
@@ -173,6 +174,8 @@ def resolve_realtime_device(
     cuda_device_count: int,
 ) -> str:
     """Resolve a validated runtime device without silently ignoring explicit CUDA."""
+
+    configured = validate_runtime_device(configured)
 
     if configured == "cpu":
         return "cpu"

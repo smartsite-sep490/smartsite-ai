@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import Protocol
 
 from smartsite_ai.inference.loading import CANONICAL_PPE_CLASS_MAP
+from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.training.dataset_integrity import DatasetIntegrityError, verify_prepared_dataset
 
 _MAX_DATA_CONFIG_BYTES = 256 * 1024
 _RUN_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
-_DEVICE_PATTERN = re.compile(r"^(?:auto|cpu|cuda(?::[0-9]{1,2})?|[0-9]{1,2})$")
 _MANIFEST_FILENAME = "training.manifest.json"
 
 
@@ -93,11 +93,10 @@ def _batch_size(value: str) -> int:
 
 
 def _device(value: str) -> str:
-    if not _DEVICE_PATTERN.fullmatch(value):
-        raise argparse.ArgumentTypeError(
-            "device must be auto, cpu, cuda, cuda:N, or a numeric CUDA index"
-        )
-    return value
+    try:
+        return validate_runtime_device(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def build_parser() -> argparse.ArgumentParser:

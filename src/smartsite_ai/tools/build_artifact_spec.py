@@ -14,10 +14,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from smartsite_ai.inference.artifacts import ArtifactValidationError
 from smartsite_ai.inference.loading import (
     CANONICAL_PPE_CLASS_MAP,
     load_artifact_spec,
 )
+from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.training.dataset_integrity import (
     DatasetIntegrityError,
     is_link_like,
@@ -185,7 +187,7 @@ def _require_ignored_repository_file(path: Path) -> None:
         raise ArtifactSpecBuildError("in-repository artifact spec output must be ignored by Git")
 
 
-def _new_output_file(path: Path) -> Path:
+def _new_output_file(path: Path, *, forbidden_roots: Sequence[Path]) -> Path:
     if not path.is_absolute():
         raise ArtifactSpecBuildError("artifact spec output must be an absolute path")
     if path.exists() or path.is_symlink():
@@ -197,13 +199,19 @@ def _new_output_file(path: Path) -> Path:
     if is_link_like(parent) or not parent.is_dir():
         raise ArtifactSpecBuildError("artifact spec output parent must be a non-link directory")
     output = parent / path.name
+    for root in forbidden_roots:
+        normalized_root = root.resolve(strict=True)
+        if output == normalized_root or normalized_root in output.parents:
+            raise ArtifactSpecBuildError(
+                "artifact spec output must be outside the prepared dataset and training run"
+            )
     _require_ignored_repository_file(output)
     return output
 
 
 def _verified_checkpoint(
     manifest_path: Path, manifest: Mapping[str, object]
-) -> tuple[Path, str, str, int, str]:
+) -> tuple[Path, str, str, int, str, Path]:
     if manifest.get("schemaVersion") != "1.0.0" or manifest.get("status") != "COMPLETE":
         raise ArtifactSpecBuildError("training manifest must be COMPLETE schema 1.0.0")
     configuration = _required_mapping(manifest.get("configuration"), label="configuration")
@@ -286,6 +294,7 @@ def _verified_checkpoint(
         run_name,
         image_size,
         resolved_device,
+        data_config.parent.resolve(strict=True),
     )
 
 
@@ -338,16 +347,23 @@ def build_artifact_spec(
     """Verify training evidence and atomically publish one strict artifact spec."""
 
     manifest_path, manifest = _load_manifest(training_manifest)
-    output = _new_output_file(output)
     source_url = _public_source_url(source_url)
     artifact_license = _reviewed_license(artifact_license, license_reviewed)
-    checkpoint, checksum, run_name, image_size, trained_device = _verified_checkpoint(
-        manifest_path, manifest
+    checkpoint, checksum, run_name, image_size, trained_device, prepared_root = (
+        _verified_checkpoint(manifest_path, manifest)
+    )
+    output = _new_output_file(
+        output,
+        forbidden_roots=(prepared_root, manifest_path.parent),
     )
     if not device.strip() or device != device.strip() or len(device) > 128 or "\x00" in device:
         raise ArtifactSpecBuildError("device must be a bounded non-blank value")
     if device == "trained":
         device = trained_device
+    try:
+        device = validate_runtime_device(device)
+    except ValueError as error:
+        raise ArtifactSpecBuildError(str(error)) from error
     payload = {
         "artifactId": artifact_id,
         "version": run_name,
@@ -398,7 +414,13 @@ def run(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("artifact spec generation interrupted; no output was published", file=sys.stderr)
         return 130
-    except (ArtifactSpecBuildError, DatasetIntegrityError, OSError, RuntimeError) as error:
+    except (
+        ArtifactSpecBuildError,
+        ArtifactValidationError,
+        DatasetIntegrityError,
+        OSError,
+        RuntimeError,
+    ) as error:
         print(f"artifact spec generation failed: {error}", file=sys.stderr)
         return 1
     print(f"artifact spec complete: {output}")

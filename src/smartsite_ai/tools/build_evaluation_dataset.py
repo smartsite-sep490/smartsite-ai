@@ -17,6 +17,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from smartsite_ai.evaluation.dataset import (
+    DatasetValidationError,
     compute_dataset_aggregate_sha256,
     load_evaluation_dataset,
 )
@@ -478,7 +479,13 @@ def run(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("evaluation dataset conversion interrupted; no output was published", file=sys.stderr)
         return 130
-    except (EvaluationDatasetBuildError, DatasetIntegrityError, OSError, RuntimeError) as error:
+    except (
+        DatasetValidationError,
+        EvaluationDatasetBuildError,
+        DatasetIntegrityError,
+        OSError,
+        RuntimeError,
+    ) as error:
         print(f"evaluation dataset conversion failed: {error}", file=sys.stderr)
         return 1
     print(f"evaluation dataset complete: {manifest}")

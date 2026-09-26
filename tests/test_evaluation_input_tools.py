@@ -2,10 +2,14 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
-from smartsite_ai.evaluation.dataset import load_evaluation_dataset
+from smartsite_ai.evaluation.dataset import DatasetValidationError, load_evaluation_dataset
+from smartsite_ai.inference.artifacts import ArtifactValidationError
 from smartsite_ai.inference.loading import load_artifact_spec
+from smartsite_ai.tools import build_artifact_spec as artifact_spec_tool
+from smartsite_ai.tools import build_evaluation_dataset as evaluation_dataset_tool
 from smartsite_ai.tools.build_artifact_spec import run as run_artifact_spec
 from smartsite_ai.tools.build_evaluation_dataset import run as run_evaluation_dataset
 from smartsite_ai.training.dataset_integrity import aggregate_inventory, inventory_record
@@ -177,6 +181,41 @@ def test_build_evaluation_dataset_rejects_changed_prepared_byte_without_output(
     assert not output.exists()
 
 
+def test_evaluation_dataset_cli_contains_loader_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    data = _prepared_dataset(tmp_path)
+    output = tmp_path / "evaluation"
+
+    def reject_loaded_output(_path: Path) -> None:
+        raise DatasetValidationError("synthetic loader rejection")
+
+    monkeypatch.setattr(evaluation_dataset_tool, "load_evaluation_dataset", reject_loaded_output)
+
+    assert (
+        run_evaluation_dataset(
+            [
+                "--data",
+                str(data.resolve()),
+                "--output-dir",
+                str(output.resolve()),
+                "--dataset-id",
+                "construction-site-safety",
+                "--dataset-version",
+                "27-smartsite-5class-v1",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "synthetic loader rejection" in captured.err
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not list(output.parent.glob(f".{output.name}.*"))
+
+
 def test_build_artifact_spec_uses_exact_complete_run_identity(tmp_path: Path) -> None:
     manifest, checkpoint = _training_manifest(tmp_path)
     output = tmp_path / "artifact.json"
@@ -211,6 +250,37 @@ def test_build_artifact_spec_uses_exact_complete_run_identity(tmp_path: Path) ->
     assert not list(output.parent.glob(f".{output.name}.*"))
 
 
+@pytest.mark.parametrize("location", ["prepared", "training-run"])
+def test_build_artifact_spec_rejects_output_inside_verified_inputs(
+    tmp_path: Path, location: str
+) -> None:
+    manifest, _checkpoint = _training_manifest(tmp_path)
+    training = json.loads(manifest.read_text(encoding="utf-8"))
+    if location == "prepared":
+        output = Path(training["configuration"]["dataConfig"]).parent / "artifact.json"
+    else:
+        output = manifest.parent / "local-config" / "artifact.json"
+        output.parent.mkdir()
+
+    assert (
+        run_artifact_spec(
+            [
+                "--training-manifest",
+                str(manifest.resolve()),
+                "--output",
+                str(output.resolve()),
+                "--source-url",
+                "https://example.com/best.pt",
+                "--license",
+                "AGPL-3.0-only",
+                "--license-reviewed",
+            ]
+        )
+        == 1
+    )
+    assert not output.exists()
+
+
 def test_build_artifact_spec_rejects_unreviewed_license_without_output(tmp_path: Path) -> None:
     manifest, _checkpoint = _training_manifest(tmp_path)
     output = tmp_path / "artifact.json"
@@ -232,6 +302,67 @@ def test_build_artifact_spec_rejects_unreviewed_license_without_output(tmp_path:
         == 1
     )
     assert not output.exists()
+
+
+def test_build_artifact_spec_rejects_unsupported_device_syntax(tmp_path: Path) -> None:
+    manifest, _checkpoint = _training_manifest(tmp_path)
+    output = tmp_path / "artifact.json"
+
+    assert (
+        run_artifact_spec(
+            [
+                "--training-manifest",
+                str(manifest.resolve()),
+                "--output",
+                str(output.resolve()),
+                "--source-url",
+                "https://example.com/best.pt",
+                "--license",
+                "AGPL-3.0-only",
+                "--license-reviewed",
+                "--device",
+                "cuda:999",
+            ]
+        )
+        == 1
+    )
+    assert not output.exists()
+
+
+def test_artifact_spec_cli_contains_contract_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest, _checkpoint = _training_manifest(tmp_path)
+    output = tmp_path / "artifact.json"
+
+    def reject_generated_spec(_path: Path) -> None:
+        raise ArtifactValidationError("synthetic artifact contract rejection")
+
+    monkeypatch.setattr(artifact_spec_tool, "load_artifact_spec", reject_generated_spec)
+
+    assert (
+        run_artifact_spec(
+            [
+                "--training-manifest",
+                str(manifest.resolve()),
+                "--output",
+                str(output.resolve()),
+                "--source-url",
+                "https://example.com/best.pt",
+                "--license",
+                "AGPL-3.0-only",
+                "--license-reviewed",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert "synthetic artifact contract rejection" in captured.err
+    assert "Traceback" not in captured.err
+    assert not output.exists()
+    assert not list(output.parent.glob(f".{output.name}.*"))
 
 
 def test_build_artifact_spec_rejects_non_public_source_url(tmp_path: Path) -> None:

@@ -3,7 +3,9 @@
 import asyncio
 import importlib
 import math
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -12,6 +14,8 @@ from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 
 CAP_PROP_POS_MSEC = 0
+CAP_PROP_FPS = 5
+DEFAULT_REPLAY_FPS = 30.0
 
 
 class OpenCvFrameSource:
@@ -21,7 +25,13 @@ class OpenCvFrameSource:
     stream, model, or GPU runtime state.
     """
 
-    def __init__(self, config: StreamConfig) -> None:
+    def __init__(
+        self,
+        config: StreamConfig,
+        *,
+        monotonic_clock: Callable[[], float] = monotonic,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self.config = config
         self._capture: Any | None = None
         self._session_id: UUID | None = None
@@ -29,6 +39,14 @@ class OpenCvFrameSource:
         self._sequence_number = 0
         self._is_connected = False
         self._io_lock = asyncio.Lock()
+        self._monotonic_clock = monotonic_clock
+        self._sleeper = sleeper
+        self._replay_wall_start: float | None = None
+        self._replay_media_start_ms: float | None = None
+        self._last_replay_media_ms: float | None = None
+        self._last_raw_media_ms: float | None = None
+        self._last_effective_media_ms: float | None = None
+        self._fallback_frame_interval_ms = 1000.0 / DEFAULT_REPLAY_FPS
 
     @property
     def source_id(self) -> str:
@@ -85,6 +103,20 @@ class OpenCvFrameSource:
         release = getattr(capture, "release", None)
         if release is not None:
             release()
+
+    @staticmethod
+    def _frame_interval_ms(capture: Any) -> float:
+        """Return a bounded FPS-derived interval, falling back deterministically."""
+        get_fn = getattr(capture, "get", None)
+        if get_fn is None:
+            return 1000.0 / DEFAULT_REPLAY_FPS
+        try:
+            fps = float(get_fn(CAP_PROP_FPS))
+        except Exception:
+            return 1000.0 / DEFAULT_REPLAY_FPS
+        if not math.isfinite(fps) or fps < 0.1 or fps > 1000.0:
+            return 1000.0 / DEFAULT_REPLAY_FPS
+        return 1000.0 / fps
 
     def _frame_to_envelope(
         self,
@@ -144,11 +176,28 @@ class OpenCvFrameSource:
         cv2 = await asyncio.to_thread(self._load_cv2)
         capture = await asyncio.to_thread(self._open_capture, cv2)
         try:
+            interval_task = asyncio.create_task(
+                asyncio.to_thread(self._frame_interval_ms, capture),
+                name=f"opencv-fps-{self.config.stream_id}",
+            )
+            try:
+                fallback_frame_interval_ms = await asyncio.shield(interval_task)
+            except asyncio.CancelledError:
+                # A to_thread call keeps running after its waiter is cancelled.
+                # Wait for the metadata read to finish before releasing capture.
+                await asyncio.shield(interval_task)
+                raise
             async with self._io_lock:
                 self._capture = capture
                 self._session_id = uuid4()
                 self._session_start = datetime.now(UTC)
                 self._sequence_number = 0
+                self._replay_wall_start = None
+                self._replay_media_start_ms = None
+                self._last_replay_media_ms = None
+                self._last_raw_media_ms = None
+                self._last_effective_media_ms = None
+                self._fallback_frame_interval_ms = fallback_frame_interval_ms
                 self._is_connected = True
                 capture = None
         finally:
@@ -157,6 +206,7 @@ class OpenCvFrameSource:
 
     async def read_frame(self) -> FrameEnvelope | None:
         """Read one decoded BGR24 frame from the connected source."""
+        replay_deadline: float | None = None
         async with self._io_lock:
             if not self._is_connected or self._capture is None:
                 raise SourceReadError("OpenCV source is not connected")
@@ -197,9 +247,46 @@ class OpenCvFrameSource:
                     raise SourceReadError(
                         f"OpenCV returned invalid media timestamp (finite and >= 0 required): {val}"
                     )
-                pos_msec = val
+                if self._last_raw_media_ms is not None and val < self._last_raw_media_ms:
+                    raise SourceReadError("Replay media timestamp moved backwards")
+                if self._last_effective_media_ms is None:
+                    pos_msec = val
+                elif val == self._last_raw_media_ms:
+                    # Some OpenCV/codec combinations repeatedly report 0 ms or
+                    # coarse duplicate timestamps. Synthesize a deterministic
+                    # frame interval so downstream temporal logic remains strict.
+                    pos_msec = self._last_effective_media_ms + self._fallback_frame_interval_ms
+                else:
+                    pos_msec = max(val, self._last_effective_media_ms + 0.001)
+                self._last_raw_media_ms = val
+                self._last_effective_media_ms = pos_msec
 
-            return self._frame_to_envelope(frame, pos_msec=pos_msec)
+                if self.config.pace_replay:
+                    if self._replay_wall_start is None:
+                        self._replay_wall_start = self._monotonic_clock()
+                        self._replay_media_start_ms = pos_msec
+                        self._last_replay_media_ms = pos_msec
+                    if self._replay_media_start_ms is None:
+                        raise SourceReadError("Replay pacing is missing its media-time origin")
+                    if self._last_replay_media_ms is None:
+                        raise SourceReadError(
+                            "Replay pacing is missing its previous media timestamp"
+                        )
+                    media_step_ms = pos_msec - self._last_replay_media_ms
+                    if media_step_ms > 10_000:
+                        raise SourceReadError("Replay media timestamp gap exceeds 10 seconds")
+                    self._last_replay_media_ms = pos_msec
+                    media_elapsed = (pos_msec - self._replay_media_start_ms) / 1000.0
+                    replay_deadline = self._replay_wall_start + media_elapsed
+
+            envelope = self._frame_to_envelope(frame, pos_msec=pos_msec)
+
+        while replay_deadline is not None:
+            delay = replay_deadline - self._monotonic_clock()
+            if delay <= 0:
+                break
+            await self._sleeper(min(delay, 1.0))
+        return envelope
 
     async def close(self) -> None:
         """Release the source if it has been connected."""
@@ -207,6 +294,12 @@ class OpenCvFrameSource:
             capture = self._capture
             self._capture = None
             self._is_connected = False
+            self._replay_wall_start = None
+            self._replay_media_start_ms = None
+            self._last_replay_media_ms = None
+            self._last_raw_media_ms = None
+            self._last_effective_media_ms = None
+            self._fallback_frame_interval_ms = 1000.0 / DEFAULT_REPLAY_FPS
         if capture is not None:
             try:
                 await asyncio.to_thread(self._release_capture, capture)

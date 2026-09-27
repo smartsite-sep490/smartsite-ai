@@ -506,6 +506,40 @@ track identities or temporal missing-PPE episodes, so the converter does not inv
 index. Candidate-level alert scoring still requires a separately reviewed video episode JSONL via
 `--episodes-index`; use the converted held-out images for detection metrics and provider validation.
 
+### Reviewed video corpus for event-level PPE metrics
+
+Build temporal evaluation inputs only from videos and labels that a person has reviewed. Copy
+[`examples/ppe-video-corpus-source.example.json`](examples/ppe-video-corpus-source.example.json),
+[`examples/ppe-video-reviewed-frames.example.jsonl`](examples/ppe-video-reviewed-frames.example.jsonl),
+and [`examples/ppe-video-episodes.example.jsonl`](examples/ppe-video-episodes.example.jsonl) to an
+ignored local directory, then replace every example value. Frame labels use stable
+`personInstanceId` values throughout a clip and connect every PPE object to that frame's Person
+annotation with `relatedPersonAnnotationId`. `observablePpeItems` records which body-area evidence
+was actually reviewable; absence of a PPE box is not a missing-PPE label.
+
+The builder runs no model inference and makes no network request. It verifies source hashes,
+probes actual video dimensions/frame count/duration, decodes each selected frame to verify its
+timestamp, and enforces the reviewed `maxFrameGapSeconds` cadence (at most one second). It rejects
+orphan, conflicting, or duplicate-person relationships and requires every reviewed negative-PPE
+frame to belong to exactly one non-overlapping ground-truth episode with no positive-PPE evidence
+inside that interval. It copies the reviewed videos and labels into a new atomic, self-contained
+evaluation directory and loads the result through the official dataset and episode loaders before
+publishing `COMPLETE`.
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen --extra vision smartsite-ai-build-video-evaluation-corpus `
+  --source-manifest C:\SmartSiteData\ppe-video-labels\source.json `
+  --output-dir C:\SmartSiteData\ppe-video-evaluation-v1
+```
+
+The generated `corpus.manifest.json` records input hashes, reviewer metadata, evaluated camera
+seconds, and rate-gate eligibility. The official false-candidate-rate gate requires at least 1,800
+reviewed camera-seconds. A smaller corpus remains useful for smoke evaluation but is explicitly
+marked ineligible. Tool validation proves structural consistency and traceability; it does not
+replace a second-person review of the visual labels. Pass the generated
+`evaluation.manifest.json` and `indexes/test-episodes.jsonl` to `smartsite-ai-evaluate`.
+
 After a training run reaches `COMPLETE`, generate the artifact spec from its manifest. The command
 verifies `weights/best.pt`, its exact path, size and SHA-256, the prepared dataset aggregate, and the
 canonical class map. It requires an explicit public HTTPS artifact URL and an explicitly confirmed

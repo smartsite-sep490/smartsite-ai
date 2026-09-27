@@ -124,6 +124,9 @@ Implemented:
 - strict, versioned MF05/MF06 observation models and vendored JSON Schema provenance;
 - RFC 8785 compatible hashing with cross-runtime safe-integer guards;
 - authenticated Backend ingestion client with bounded retries and strict response validation;
+- authenticated, bounded camera-configuration polling with strong ETag/304 support and stale-snapshot fail-closed behavior;
+- an explicit one-camera headless worker that connects ingestion, verified YOLO11 inference, tracking, MF05/MF06 pipelines, and Backend delivery without a browser session;
+- a crash-tolerant SQLite observation outbox with canonical payload conflict detection, retry scheduling, terminal 4xx classification, and Backend idempotency compatibility;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
 - optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;
 - verified local model-artifact metadata, a lazy Ultralytics YOLO runner, and normalized `DetectionBatch` output;
@@ -147,10 +150,12 @@ Not yet implemented:
 - live RTSP hardware/network validation;
 - production/container GPU deployment and 1–3 camera end-to-end capacity validation;
 - PPE model weights;
-- production detector-to-pipeline worker wiring;
 - production tracker/model calibration and evaluation on representative site data;
 - InsightFace integration;
-- camera/inference event producer loop;
+- multi-camera runtime supervision and dynamic camera discovery;
+- an operational retention/pruning policy for delivered outbox rows;
+- Safety Alert list/detail/review APIs and Web integration;
+- exact processed-frame synchronization for live Web overlays;
 - OpenAI adapter;
 - benchmark results.
 
@@ -196,6 +201,44 @@ The command validates OpenCV open/decode, BGR24 frame envelope creation, EOF,
 worker queue delivery, and cleanup. It does not run YOLO inference or claim PPE
 or zone accuracy.
 
+### Headless MF05/MF06 worker
+
+`smartsite-ai-camera-worker` runs one configured video, laptop camera, or RTSP stream without an
+open Web page. It fetches the Backend-owned region snapshot before loading the model or opening the
+source, polls with ETag, applies newer geometry at a frame boundary, and writes every deliverable
+event to a local SQLite outbox before sending it. A crash after Backend acceptance but before the
+local acknowledgement safely resends the same event ID; the Backend's ingestion idempotency avoids
+duplicating the business event.
+
+The Backend must already contain the camera and active regions, and the camera UUID must be present
+in its `AI_CONFIGURATION_CAMERA_IDS` allowlist. The AI process uses the same server-side service
+credential for configuration and event ingestion:
+
+```powershell
+$env:SMARTSITE_AI_BACKEND_INGESTION_URL = 'http://127.0.0.1:3000'
+$env:SMARTSITE_AI_BACKEND_SERVICE_TOKEN = '<local-service-token>'
+
+uv sync --frozen --extra cuda126
+uv run --frozen --extra cuda126 smartsite-ai-camera-worker `
+  --source 'C:\SmartSiteData\recordings\ppe-demo.mp4' `
+  --stream-id 'site-gate-01' `
+  --camera-id '<backend-camera-uuid>' `
+  --camera-external-id 'CAM-GATE-01' `
+  --ppe-region-id '<active-ppe-region-uuid>' `
+  --model-spec 'C:\SmartSiteData\config\yolo11s-ppe-artifact.json' `
+  --outbox 'C:\SmartSiteData\runtime\smartsite-ai-outbox.sqlite3' `
+  --target-fps 10
+```
+
+For a laptop webcam, use `--source 0 --live`. For credentialed RTSP, set
+`SMARTSITE_AI_WORKER_SOURCE` and omit `--source`, then add `--live`; never commit camera credentials
+or put them in command history. A finite video exits after EOF. Exit code `0` means the run ended
+with no pending or terminal outbox entries; exit code `2` means events remain pending or a
+non-retryable Backend response requires operator review.
+
+This slice provides durable technical event production. It does not yet provide the Safety Alert
+review screen or frame-perfect browser streaming.
+
 Default development address: `http://127.0.0.1:8000`.
 
 ## API
@@ -222,9 +265,13 @@ Environment variables use the `SMARTSITE_AI_` prefix.
 | `SMARTSITE_AI_LOG_LEVEL` | `info` | Logging level |
 | `SMARTSITE_AI_BACKEND_INGESTION_URL` | unset | Backend origin or exact AI ingestion endpoint |
 | `SMARTSITE_AI_BACKEND_SERVICE_TOKEN` | unset | Bearer credential for Backend ingestion |
+| `SMARTSITE_AI_WORKER_SOURCE` | unset | Secret worker video/camera/RTSP source; CLI `--source` overrides it |
 | `SMARTSITE_AI_REALTIME_DEVICE` | `auto` | `auto`, `cpu`, `cuda`, or a CUDA index such as `cuda:0` |
 
-Invalid configuration prevents startup. The ingestion client fails closed when its URL or token is absent, but the FastAPI health/capability foundation can run before a camera worker is enabled. Camera credentials, model paths, and OpenAI credentials are intentionally not treated as implemented capabilities yet.
+Invalid configuration prevents worker startup. The ingestion clients fail closed when their URL or
+token is absent, while the FastAPI health/capability foundation can run without a camera worker.
+Camera sources and verified local model artifact paths are supported by the explicit headless worker;
+OpenAI credentials are not yet an implemented runtime capability.
 
 ## Vision Dependencies
 

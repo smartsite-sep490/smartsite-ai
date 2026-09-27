@@ -89,3 +89,17 @@ def test_backend_ingestion_settings_read_from_env_and_mask_token(monkeypatch):
     assert raw_token not in str(settings)
     assert raw_token not in settings.model_dump_json()
     assert "**********" in repr(settings.backend_service_token)
+
+
+def test_worker_source_reads_from_env_and_masks_camera_credentials(monkeypatch):
+    from smartsite_ai.config import Settings
+
+    raw_source = "rtsp://camera-user:camera-password@camera.internal/live"
+    monkeypatch.setenv("SMARTSITE_AI_WORKER_SOURCE", raw_source)
+
+    settings = Settings(_env_file=None)
+    assert settings.worker_source is not None
+    assert settings.worker_source.get_secret_value() == raw_source
+    assert raw_source not in repr(settings)
+    assert raw_source not in str(settings)
+    assert raw_source not in settings.model_dump_json()

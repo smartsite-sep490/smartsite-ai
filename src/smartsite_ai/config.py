@@ -21,6 +21,7 @@ class Settings(BaseSettings):
 
     backend_ingestion_url: str | None = None
     backend_service_token: SecretStr | None = None
+    worker_source: SecretStr | None = None
 
     # Local realtime demo settings. Keep these opt-in so the API foundation
     # remains safe when no model/runtime is installed.

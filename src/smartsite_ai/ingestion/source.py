@@ -166,7 +166,8 @@ def classify_error_reason(exc: BaseException) -> str:
 class FrameSource(Protocol):
     """Protocol representing a video stream source (RTSP, video file, or fake).
 
-    Implementations must not depend on YOLO, Ultralytics, or OpenCV.
+    The protocol stays provider-neutral; concrete implementations may use a
+    media backend such as OpenCV, but must not depend on YOLO or Ultralytics.
     """
 
     @property

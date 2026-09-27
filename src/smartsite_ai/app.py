@@ -1,13 +1,16 @@
 """HTTP contract for the API process, independent of future inference workers."""
 
+import asyncio
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, WebSocket
 from pydantic import BaseModel
 
 from smartsite_ai.config import Settings
+from smartsite_ai.realtime import parse_zone_polygon, stream_realtime
 
 
 class LiveHealth(BaseModel):
@@ -57,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if expose_docs else None,
     )
     app.state.api_ready = False
+    app.state.realtime_lock = asyncio.Lock()
 
     @app.get("/health/live", response_model=LiveHealth, tags=["health"])
     async def live() -> LiveHealth:
@@ -82,7 +86,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "camera": Capability(reason="No camera ingestion worker or stream is configured."),
                 "detector": Capability(
                     provider="ultralytics-yolo11s + supervision",
-                    reason="Pipeline direction only; no model weights, PPE model or worker loaded.",
+                    reason=(
+                        "Local realtime demo is opt-in. Production worker is not configured."
+                        if settings.realtime_model_path
+                        else "No model weights, PPE model or worker loaded."
+                    ),
                 ),
                 "zone": Capability(
                     provider="supervision",
@@ -98,5 +106,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             }
         )
+
+    def _realtime_authorized(websocket: WebSocket) -> bool:
+        expected = settings.backend_service_token
+        if expected is None:
+            return False
+        provided = websocket.query_params.get("token", "")
+        if not provided:
+            return False
+        return hmac.compare_digest(provided, expected.get_secret_value())
+
+    async def _reject_realtime(websocket: WebSocket, message: str) -> None:
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": message})
+        await websocket.close(code=1011)
+
+    @app.websocket("/ws/realtime")
+    async def realtime(websocket: WebSocket) -> None:
+        if not _realtime_authorized(websocket):
+            await _reject_realtime(websocket, "Realtime source is not authorized")
+            return
+        if app.state.realtime_lock.locked():
+            await _reject_realtime(websocket, "Realtime source is already in use")
+            return
+        if not settings.realtime_model_path or not settings.realtime_source:
+            await _reject_realtime(
+                websocket,
+                "Set SMARTSITE_AI_REALTIME_MODEL_PATH and SMARTSITE_AI_REALTIME_SOURCE",
+            )
+            return
+        try:
+            parse_zone_polygon(settings.realtime_zone_polygon)
+        except ValueError:
+            await _reject_realtime(websocket, "Realtime zone polygon is invalid")
+            return
+        async with app.state.realtime_lock:
+            await stream_realtime(websocket, settings)
 
     return app

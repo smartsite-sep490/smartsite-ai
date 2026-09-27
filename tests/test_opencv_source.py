@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import sys
+import threading
 from collections.abc import Callable, Iterable
 
 import pytest
@@ -47,15 +48,22 @@ class FakeCapture:
         opened: bool = True,
         release_raises: bool = False,
         frames: Iterable[object] = (),
+        pos_msec_values: Iterable[float] | None = None,
     ) -> None:
         self.opened = opened
         self.release_raises = release_raises
         self.release_calls = 0
         self.read_calls = 0
         self.frames = list(frames)
+        self.pos_msec_values = list(pos_msec_values) if pos_msec_values is not None else None
 
     def isOpened(self) -> bool:
         return self.opened
+
+    def get(self, prop_id: int) -> float:
+        if prop_id == 0 and self.pos_msec_values:
+            return self.pos_msec_values.pop(0)
+        return 0.0
 
     def read(self) -> tuple[bool, object | None]:
         self.read_calls += 1
@@ -91,6 +99,19 @@ def make_config(source_url: str = "rtsp://camera.local/live") -> StreamConfig:
 
 def make_bgr_frame(width: int, height: int, fill: int = 0) -> FakeFrame:
     return FakeFrame(bytes([fill]) * width * height * 3, shape=(height, width, 3))
+
+
+class FakeMonotonic:
+    def __init__(self) -> None:
+        self.value = 100.0
+        self.sleep_calls: list[float] = []
+
+    def __call__(self) -> float:
+        return self.value
+
+    async def sleep(self, delay: float) -> None:
+        self.sleep_calls.append(delay)
+        self.value += delay
 
 
 def install_fake_cv2(monkeypatch: pytest.MonkeyPatch, cv2: FakeCv2) -> None:
@@ -206,6 +227,37 @@ def test_connect_failure_releases_capture_and_masks_credentials(
     assert "***" in message
     assert capture.release_calls == 1
     assert source.is_connected is False
+
+
+@pytest.mark.anyio
+async def test_close_waits_for_an_in_flight_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    started = threading.Event()
+    release_gate = threading.Event()
+
+    class GatedCapture(FakeCapture):
+        def read(self) -> tuple[bool, object | None]:
+            self.read_calls += 1
+            started.set()
+            assert release_gate.wait(timeout=2)
+            return False, None
+
+    capture = GatedCapture(opened=True)
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    source = OpenCvFrameSource(make_config())
+    await source.connect()
+    read_task = asyncio.create_task(source.read_frame())
+    assert await asyncio.to_thread(started.wait, 1)
+    close_task = asyncio.create_task(source.close())
+    await asyncio.sleep(0.05)
+    assert capture.release_calls == 0
+    release_gate.set()
+    assert await read_task is None
+    await close_task
+    assert capture.release_calls == 1
 
 
 def test_close_releases_capture_and_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -469,3 +521,328 @@ async def test_stream_worker_applies_sampling_to_opencv_frames(
     assert status.metrics.frames_enqueued == 1
     assert status.metrics.sampled_out_frames == 2
     assert capture.read_calls == 4
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_non_live_stamps_session_start_plus_pos_msec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import timedelta
+
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[
+            make_bgr_frame(640, 480),
+            make_bgr_frame(640, 480),
+        ],
+        pos_msec_values=[0.0, 500.0],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        session_start = source._session_start
+        assert session_start is not None
+
+        frame0 = await source.read_frame()
+        assert frame0 is not None
+        assert frame0.captured_at == session_start + timedelta(milliseconds=0.0)
+
+        frame1 = await source.read_frame()
+        assert frame1 is not None
+        assert frame1.captured_at == session_start + timedelta(milliseconds=500.0)
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_opencv_finite_replay_can_be_paced_by_media_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[make_bgr_frame(2, 2), make_bgr_frame(2, 2)],
+        pos_msec_values=[100.0, 600.0],
+    )
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    timer = FakeMonotonic()
+    config = StreamConfig(
+        stream_id="paced-file",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+        pace_replay=True,
+    )
+    source = OpenCvFrameSource(config, monotonic_clock=timer, sleeper=timer.sleep)
+    await source.connect()
+    try:
+        assert await source.read_frame() is not None
+        assert timer.sleep_calls == []
+        assert await source.read_frame() is not None
+        assert timer.sleep_calls == [pytest.approx(0.5)]
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_opencv_finite_replay_normalizes_duplicate_media_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[make_bgr_frame(2, 2), make_bgr_frame(2, 2), make_bgr_frame(2, 2)],
+        pos_msec_values=[0.0, 0.0, 0.0],
+    )
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    timer = FakeMonotonic()
+    config = StreamConfig(
+        stream_id="duplicate-time-file",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+        pace_replay=True,
+    )
+    source = OpenCvFrameSource(config, monotonic_clock=timer, sleeper=timer.sleep)
+    await source.connect()
+    try:
+        frames = [await source.read_frame() for _ in range(3)]
+    finally:
+        await source.close()
+
+    assert all(frame is not None for frame in frames)
+    captured = [frame.captured_at for frame in frames if frame is not None]
+    assert captured[0] < captured[1] < captured[2]
+    assert timer.sleep_calls == [pytest.approx(1 / 30), pytest.approx(1 / 30)]
+
+
+@pytest.mark.anyio
+async def test_opencv_connect_cancellation_releases_capture_after_fps_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(opened=True)
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_frame_interval(_capture: object) -> float:
+        entered.set()
+        assert release.wait(timeout=2)
+        return 1000.0 / 30.0
+
+    monkeypatch.setattr(
+        OpenCvFrameSource,
+        "_frame_interval_ms",
+        staticmethod(blocking_frame_interval),
+    )
+    source = OpenCvFrameSource(
+        StreamConfig(
+            stream_id="cancel-connect",
+            camera_external_id="cam-01",
+            source_url=r"D:\data\video.mp4",
+            is_live=False,
+        )
+    )
+
+    connect_task = asyncio.create_task(source.connect())
+    assert await asyncio.to_thread(entered.wait, 1)
+    connect_task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(connect_task, timeout=1)
+
+    assert capture.release_calls == 1
+    assert source.is_connected is False
+
+
+@pytest.mark.anyio
+async def test_opencv_connect_ignores_optional_fps_metadata_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    class CaptureWithBrokenFps(FakeCapture):
+        def get(self, prop_id: int) -> float:
+            if prop_id == 5:
+                raise OSError("driver metadata failure")
+            return super().get(prop_id)
+
+    capture = CaptureWithBrokenFps(opened=True)
+    install_fake_cv2(monkeypatch, FakeCv2(lambda _source: capture))
+    source = OpenCvFrameSource(
+        StreamConfig(
+            stream_id="broken-fps",
+            camera_external_id="cam-01",
+            source_url=r"D:\data\video.mp4",
+            is_live=False,
+        )
+    )
+
+    await source.connect()
+    assert source.is_connected is True
+    await source.close()
+    assert capture.release_calls == 1
+
+
+def test_replay_pacing_is_rejected_for_live_sources() -> None:
+    with pytest.raises(ValueError, match="finite video"):
+        StreamConfig(
+            stream_id="live",
+            camera_external_id="cam-01",
+            source_url="rtsp://camera.local/live",
+            is_live=True,
+            pace_replay=True,
+        )
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_live_stamps_utc_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    capture = FakeCapture(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+        pos_msec_values=[1000.0],  # Should be ignored for live source
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="live-stream",
+        camera_external_id="cam-01",
+        source_url="rtsp://camera.local/live",
+        is_live=True,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        before = datetime.now(UTC)
+        frame = await source.read_frame()
+        after = datetime.now(UTC)
+        assert frame is not None
+        assert before <= frame.captured_at <= after
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "invalid_pos_msec",
+    [
+        None,
+        float("nan"),
+        float("inf"),
+        -float("inf"),
+        -1.0,
+        -0.001,
+        "not-a-number",
+    ],
+)
+async def test_opencv_frame_source_non_live_rejects_invalid_pos_msec(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_pos_msec: object,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    class FakeCaptureWithInvalidPos(FakeCapture):
+        def get(self, prop_id: int) -> object:
+            if prop_id == 0:
+                return invalid_pos_msec
+            return 0.0
+
+    capture = FakeCaptureWithInvalidPos(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+    )
+    cv2 = FakeCv2(lambda _source: capture)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source = OpenCvFrameSource(config)
+    await source.connect()
+    try:
+        with pytest.raises(SourceReadError):
+            await source.read_frame()
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_opencv_frame_source_non_live_rejects_missing_or_raising_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
+
+    class CaptureWithoutGet:
+        def __init__(self) -> None:
+            self.read_calls = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self) -> tuple[bool, object | None]:
+            return True, make_bgr_frame(640, 480)
+
+        def release(self) -> None:
+            pass
+
+    capture1 = CaptureWithoutGet()
+    cv2 = FakeCv2(lambda _source: capture1)
+    install_fake_cv2(monkeypatch, cv2)
+
+    config = StreamConfig(
+        stream_id="file-stream",
+        camera_external_id="cam-01",
+        source_url=r"D:\data\video.mp4",
+        is_live=False,
+    )
+    source1 = OpenCvFrameSource(config)
+    await source1.connect()
+    try:
+        with pytest.raises(SourceReadError, match="missing 'get' method"):
+            await source1.read_frame()
+    finally:
+        await source1.close()
+
+    class CaptureWithRaisingGet(FakeCapture):
+        def get(self, prop_id: int) -> float:
+            raise RuntimeError("Corrupted stream index")
+
+    capture2 = CaptureWithRaisingGet(
+        opened=True,
+        frames=[make_bgr_frame(640, 480)],
+    )
+    cv2 = FakeCv2(lambda _source: capture2)
+    install_fake_cv2(monkeypatch, cv2)
+
+    source2 = OpenCvFrameSource(config)
+    await source2.connect()
+    try:
+        with pytest.raises(SourceReadError, match="failed to read media timestamp"):
+            await source2.read_frame()
+    finally:
+        await source2.close()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import sqlite3
@@ -15,13 +14,15 @@ import pytest
 from PIL import Image
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
-from smartsite_ai.domain.observations import TechnicalObservationEvent
+from smartsite_ai.domain.observations import EvidenceItem, TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.evidence.models import (
     EvidenceBindingError,
+    EvidenceConflictError,
     EvidencePathContainmentError,
     EvidenceSizeLimitError,
+    FrameBatchBindingError,
 )
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.ingestion.config import StreamConfig
@@ -30,7 +31,10 @@ from smartsite_ai.ingestion.queue import QueueClosedError
 from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
-from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker
+from smartsite_ai.processing_worker import (
+    HeadlessCameraProcessingWorker,
+    validate_frame_batch_binding,
+)
 
 SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 REGION_ID = "22222222-2222-4222-8222-222222222222"
@@ -167,13 +171,14 @@ class FakePipeline:
 
 
 # ==============================================================================
-# 1. Exact-frame binding tests
+# 1. Exact-frame binding & collision tests
 # ==============================================================================
 
 
 @pytest.mark.anyio
 async def test_evidence_publisher_exact_frame_binding(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     frame = _make_frame(1, color_bgr=(255, 0, 0))  # pure blue in BGR
@@ -190,9 +195,13 @@ async def test_evidence_publisher_exact_frame_binding(tmp_path: Path) -> None:
     expected_uri = f"local://evidence/{SESSION_ID}/1/{event.event_id}.jpg"
     assert item.uri == expected_uri
 
-    # 3. File exists on disk and matches frame content
-    saved_file = evidence_dir / str(SESSION_ID) / f"1_{event.event_id}.jpg"
+    # 3. File exists on disk as flat file in root_dir
+    saved_file = evidence_dir / f"{SESSION_ID}_1_{event.event_id}.jpg"
     assert saved_file.is_file()
+
+    # 4. Manifest sidecar is NOT written
+    manifest_file = evidence_dir / f"{SESSION_ID}_1_{event.event_id}.manifest.json"
+    assert not manifest_file.exists()
 
     with Image.open(saved_file) as img:
         assert img.size == (frame.width, frame.height)
@@ -205,7 +214,9 @@ async def test_evidence_publisher_exact_frame_binding(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_evidence_publisher_rejects_mismatched_frame_binding(tmp_path: Path) -> None:
-    publisher = LocalEvidencePublisher(root_dir=tmp_path / "evidence")
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     frame_a = _make_frame(1)
     frame_b = _make_frame(2)
@@ -216,14 +227,197 @@ async def test_evidence_publisher_rejects_mismatched_frame_binding(tmp_path: Pat
         await publisher.publish(frame=frame_a, event=event_b)
 
 
+@pytest.mark.anyio
+async def test_evidence_publisher_preserves_existing_evidence_and_deduplicates_on_retry(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
+
+    frame = _make_frame(1)
+    base_event = _make_event(frame, event_id="44444444-4444-4444-8444-444444444444")
+
+    existing_crop = EvidenceItem(
+        kind="CROP",
+        uri="local://evidence/crops/crop1.jpg",
+    )
+    event_with_existing = TechnicalObservationEvent.create(
+        event_id=base_event.event_id,
+        camera_external_id=base_event.camera_external_id,
+        stream_session_id=base_event.stream_session_id,
+        captured_at=base_event.captured_at,
+        frame_dimensions=base_event.frame_dimensions,
+        observations=base_event.observations,
+        evidence=[existing_crop],
+        schema_version=base_event.schema_version,
+    )
+
+    published_1 = await publisher.publish(frame=frame, event=event_with_existing)
+
+    # 1. Existing evidence is preserved, FRAME is appended
+    assert len(published_1.evidence) == 2
+    assert published_1.evidence[0] == existing_crop
+    assert published_1.evidence[1].kind == "FRAME"
+    expected_uri = f"local://evidence/{SESSION_ID}/1/{base_event.event_id}.jpg"
+    assert published_1.evidence[1].uri == expected_uri
+
+    # 2. On retry (publishing same frame/event again), duplicate URI is not added
+    published_2 = await publisher.publish(frame=frame, event=published_1)
+    assert len(published_2.evidence) == 2
+    assert published_2.evidence[0] == existing_crop
+    assert published_2.evidence[1].kind == "FRAME"
+    assert published_2.evidence[1].uri == expected_uri
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("attribute", "mismatched_value"),
+    [
+        ("stream_id", "wrong-stream"),
+        ("camera_external_id", "CAM-DIFFERENT"),
+        ("session_id", UUID("99999999-9999-4999-8999-999999999999")),
+        ("sequence_number", 999),
+        ("captured_at", datetime(2026, 9, 27, 12, 0, tzinfo=UTC)),
+        ("frame_width", 640),
+        ("frame_height", 480),
+    ],
+)
+async def test_worker_rejects_detection_batch_mismatch(
+    attribute: str,
+    mismatched_value: object,
+) -> None:
+    frame = _make_frame(1, width=10, height=10)
+    batch_kwargs = {
+        "stream_id": frame.stream_id,
+        "camera_external_id": frame.camera_external_id,
+        "session_id": frame.session_id,
+        "sequence_number": frame.sequence_number,
+        "captured_at": frame.captured_at,
+        "frame_width": frame.width,
+        "frame_height": frame.height,
+        "model_artifact_id": "ppe-model",
+        "model_version": "1",
+        "model_sha256": "a" * 64,
+        "detections": (),
+    }
+    batch_kwargs[attribute] = mismatched_value
+    bad_batch = DetectionBatch.model_validate(batch_kwargs)
+
+    with pytest.raises(FrameBatchBindingError):
+        validate_frame_batch_binding(frame, bad_batch)
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_handles_same_session_timestamp_collision(tmp_path: Path) -> None:
+    """Publisher collision test with identical captured_at but distinct sequence and payload."""
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
+
+    collision_timestamp = datetime(2026, 9, 27, 10, 0, 0, tzinfo=UTC)
+    frame_blue = FrameEnvelope(
+        stream_id="gate-stream",
+        session_id=SESSION_ID,
+        camera_external_id=CAMERA_ID,
+        captured_at=collision_timestamp,
+        width=10,
+        height=10,
+        sequence_number=1,
+        payload=bytes([255, 0, 0] * 100),  # blue
+    )
+    frame_green = FrameEnvelope(
+        stream_id="gate-stream",
+        session_id=SESSION_ID,
+        camera_external_id=CAMERA_ID,
+        captured_at=collision_timestamp,  # identical timestamp
+        width=10,
+        height=10,
+        sequence_number=2,  # distinct sequence
+        payload=bytes([0, 255, 0] * 100),  # green
+    )
+
+    event_blue = _make_event(frame_blue, event_id="11111111-aaaa-4111-8111-111111111111")
+    event_green = _make_event(frame_green, event_id="22222222-bbbb-4222-8222-222222222222")
+
+    published_blue = await publisher.publish(frame=frame_blue, event=event_blue)
+    published_green = await publisher.publish(frame=frame_green, event=event_green)
+
+    uri_blue = published_blue.evidence[0].uri
+    uri_green = published_green.evidence[0].uri
+    assert uri_blue != uri_green
+    assert uri_blue == f"local://evidence/{SESSION_ID}/1/{event_blue.event_id}.jpg"
+    assert uri_green == f"local://evidence/{SESSION_ID}/2/{event_green.event_id}.jpg"
+
+    file_blue = evidence_dir / f"{SESSION_ID}_1_{event_blue.event_id}.jpg"
+    file_green = evidence_dir / f"{SESSION_ID}_2_{event_green.event_id}.jpg"
+    assert file_blue.is_file()
+    assert file_green.is_file()
+
+    with Image.open(file_blue) as img:
+        rgb = img.getpixel((0, 0))
+        assert abs(rgb[0] - 0) <= 5 and abs(rgb[2] - 255) <= 5  # blue
+    with Image.open(file_green) as img:
+        rgb = img.getpixel((0, 0))
+        assert abs(rgb[1] - 255) <= 5 and abs(rgb[0] - 0) <= 5  # green
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_detector_returning_mismatched_batch_before_pipeline(
+    tmp_path: Path,
+) -> None:
+    """Reject a detector batch with a mismatched sequence before pipeline execution."""
+
+    class BadDetector:
+        async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+            return DetectionBatch.from_frame(
+                frame,
+                model_artifact_id="ppe-model",
+                model_version="1",
+                model_sha256="a" * 64,
+                detections=(),
+            ).model_copy(update={"sequence_number": frame.sequence_number + 100})
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    stream = FakeStream([_make_frame(1)])
+    outbox = SqliteEventOutbox((tmp_path / "outbox.sqlite3").resolve())
+    client = BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(lambda _: httpx.Response(200)),
+    )
+    dispatcher = OutboxDispatcher(outbox, client)
+
+    worker = HeadlessCameraProcessingWorker(
+        stream=stream,
+        detector=BadDetector(),
+        pipeline=FakePipeline(),
+        ppe_region_id=REGION_ID,
+        configurations=store,
+        outbox=outbox,
+        dispatcher=dispatcher,
+        delivery_interval_seconds=0.01,
+    )
+
+    with pytest.raises(FrameBatchBindingError):
+        await worker.run()
+
+    # Outbox must have 0 enqueued events
+    counts = await outbox.counts()
+    assert counts.pending == 0
+    assert counts.delivered == 0
+
+
 # ==============================================================================
-# 2. Atomic manifest and reference tests
+# 2. Atomic single JPEG artifact tests
 # ==============================================================================
 
 
 @pytest.mark.anyio
-async def test_evidence_publisher_atomic_manifest_and_reference(tmp_path: Path) -> None:
+async def test_evidence_publisher_atomic_single_jpeg_create(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     frame = _make_frame(10)
@@ -231,42 +425,130 @@ async def test_evidence_publisher_atomic_manifest_and_reference(tmp_path: Path) 
 
     await publisher.publish(frame=frame, event=event)
 
-    image_path = evidence_dir / str(SESSION_ID) / f"10_{event.event_id}.jpg"
-    manifest_path = evidence_dir / str(SESSION_ID) / f"10_{event.event_id}.manifest.json"
-
+    image_path = evidence_dir / f"{SESSION_ID}_10_{event.event_id}.jpg"
     assert image_path.is_file()
-    assert manifest_path.is_file()
+
+    # Manifest sidecar does not exist (single artifact model)
+    manifest_path = evidence_dir / f"{SESSION_ID}_10_{event.event_id}.manifest.json"
+    assert not manifest_path.exists()
 
     # No leftover temp files
-    temp_files = list((evidence_dir / str(SESSION_ID)).glob(".*"))
+    temp_files = list(evidence_dir.glob(".*"))
     assert len(temp_files) == 0
 
-    # Verify manifest fields
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["eventId"] == event.event_id
-    assert manifest["streamSessionId"] == str(SESSION_ID)
-    assert manifest["sequenceNumber"] == 10
-    assert manifest["cameraExternalId"] == CAMERA_ID
-    assert manifest["width"] == frame.width
-    assert manifest["height"] == frame.height
-    assert manifest["mediaType"] == "image/jpeg"
-    assert manifest["sha256"] == hashlib.sha256(image_path.read_bytes()).hexdigest()
-    assert manifest["sizeBytes"] == image_path.stat().st_size
-    assert manifest["uri"] == f"local://evidence/{SESSION_ID}/10/{event.event_id}.jpg"
+
+@pytest.mark.anyio
+async def test_evidence_publisher_is_idempotent_and_rejects_conflicting_pixels(
+    tmp_path: Path,
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
+    event_id = "77777777-7777-4777-8777-777777777777"
+    blue = _make_frame(11, color_bgr=(255, 0, 0))
+    green = _make_frame(11, color_bgr=(0, 255, 0))
+    event = _make_event(blue, event_id=event_id)
+
+    await publisher.publish(frame=blue, event=event)
+    image_path = evidence_dir / f"{SESSION_ID}_11_{event_id}.jpg"
+    original = image_path.read_bytes()
+
+    await publisher.publish(frame=blue, event=event)
+    assert image_path.read_bytes() == original
+
+    with pytest.raises(EvidenceConflictError):
+        await publisher.publish(frame=green, event=event)
+    assert image_path.read_bytes() == original
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_no_overwrite_conflict_and_idempotency(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
+
+    frame_blue = _make_frame(1, color_bgr=(255, 0, 0))
+    event = _make_event(frame_blue, event_id="77777777-7777-4777-8777-777777777777")
+
+    # 1. First publish succeeds
+    published_1 = await publisher.publish(frame=frame_blue, event=event)
+    file_path = evidence_dir / f"{SESSION_ID}_1_{event.event_id}.jpg"
+    assert file_path.is_file()
+    original_bytes = file_path.read_bytes()
+
+    # 2. Idempotent publish with identical frame & event succeeds without error
+    published_2 = await publisher.publish(frame=frame_blue, event=event)
+    assert published_2.evidence[0].uri == published_1.evidence[0].uri
+    assert file_path.read_bytes() == original_bytes
+
+    # 3. Publish with same session, sequence, and eventId but DIFFERENT pixels must raise conflict
+    frame_green = _make_frame(1, color_bgr=(0, 255, 0))
+    with pytest.raises(EvidenceConflictError, match="already exists with conflicting content"):
+        await publisher.publish(frame=frame_green, event=event)
+
+    # 4. File on disk must remain unchanged (not overwritten)
+    assert file_path.read_bytes() == original_bytes
+    with Image.open(file_path) as img:
+        rgb = img.getpixel((0, 0))
+        assert abs(rgb[0] - 0) <= 5 and abs(rgb[2] - 255) <= 5
 
 
 # ==============================================================================
-# 3. Path containment (traversal) tests
+# 3. Path containment, root validation & traversal tests
 # ==============================================================================
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_requires_existing_directory_root(tmp_path: Path) -> None:
+    non_existent = tmp_path / "does_not_exist"
+    with pytest.raises(EvidencePathContainmentError, match="must exist"):
+        LocalEvidencePublisher(root_dir=non_existent)
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_rejects_file_as_root(tmp_path: Path) -> None:
+    file_path = tmp_path / "some_file.txt"
+    file_path.write_text("hello", encoding="utf-8")
+    with pytest.raises(EvidencePathContainmentError, match="must be a directory"):
+        LocalEvidencePublisher(root_dir=file_path)
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_rejects_link_like_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    import smartsite_ai.evidence.local_publisher as lp_mod
+
+    monkeypatch.setattr(lp_mod, "is_link_like", lambda p: True)
+    with pytest.raises(EvidencePathContainmentError, match="must not be a symlink"):
+        LocalEvidencePublisher(root_dir=evidence_dir)
+
+
+@pytest.mark.anyio
+async def test_evidence_publisher_revalidates_root_before_write(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
+
+    # Simulate root directory being deleted after init
+    evidence_dir.rmdir()
+    frame = _make_frame(1)
+    event = _make_event(frame)
+
+    with pytest.raises(EvidencePathContainmentError, match="root directory is missing or invalid"):
+        await publisher.publish(frame=frame, event=event)
 
 
 @pytest.mark.anyio
 async def test_evidence_publisher_rejects_path_traversal_event_id(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     with pytest.raises(EvidencePathContainmentError):
-        publisher._resolve_evidence_paths(
+        publisher._resolve_evidence_path(
             session_id=str(SESSION_ID),
             sequence_number=1,
             event_id="../../escaped",
@@ -276,10 +558,11 @@ async def test_evidence_publisher_rejects_path_traversal_event_id(tmp_path: Path
 @pytest.mark.anyio
 async def test_evidence_publisher_rejects_path_traversal_session_id(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     with pytest.raises(EvidencePathContainmentError):
-        publisher._resolve_evidence_paths(
+        publisher._resolve_evidence_path(
             session_id="../../escaped",
             sequence_number=1,
             event_id="55555555-5555-4555-8555-555555555555",
@@ -287,14 +570,15 @@ async def test_evidence_publisher_rejects_path_traversal_session_id(tmp_path: Pa
 
 
 # ==============================================================================
-# 4. Retention bounded tests
+# 4. Immutable write tests (no count-based retention / prune)
 # ==============================================================================
 
 
 @pytest.mark.anyio
-async def test_evidence_publisher_bounds_retention(tmp_path: Path) -> None:
+async def test_evidence_publisher_immutable_write_does_not_prune(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
-    publisher = LocalEvidencePublisher(root_dir=evidence_dir, retention_limit=3)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     # Publish 5 frames sequentially
     for i in range(1, 6):
@@ -302,20 +586,9 @@ async def test_evidence_publisher_bounds_retention(tmp_path: Path) -> None:
         event = _make_event(frame, event_id=f"00000000-0000-0000-0000-00000000000{i}")
         await publisher.publish(frame=frame, event=event)
 
-    # At most 3 .jpg and 3 .manifest.json files should remain
-    retained_images = sorted(evidence_dir.glob("*/*.jpg"))
-    retained_manifests = sorted(evidence_dir.glob("*/*.manifest.json"))
-
-    assert len(retained_images) == 3
-    assert len(retained_manifests) == 3
-
-    # Retained should be the 3 newest (sequences 3, 4, 5)
-    names = [p.name for p in retained_images]
-    assert names == [
-        "3_00000000-0000-0000-0000-000000000003.jpg",
-        "4_00000000-0000-0000-0000-000000000004.jpg",
-        "5_00000000-0000-0000-0000-000000000005.jpg",
-    ]
+    # All 5 .jpg files must remain intact without pruning
+    retained_images = sorted(evidence_dir.glob("*.jpg"))
+    assert len(retained_images) == 5
 
 
 # ==============================================================================
@@ -326,6 +599,7 @@ async def test_evidence_publisher_bounds_retention(tmp_path: Path) -> None:
 @pytest.mark.anyio
 async def test_evidence_publisher_rejects_exceeded_jpeg_size(tmp_path: Path) -> None:
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     # Set limit tiny (50 bytes)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir, max_jpeg_bytes=50)
 
@@ -395,6 +669,7 @@ async def test_worker_publishes_evidence_when_configured(tmp_path: Path) -> None
         )
 
     evidence_dir = tmp_path / "evidence"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = LocalEvidencePublisher(root_dir=evidence_dir)
 
     store = RegionConfigurationStore()
@@ -430,7 +705,7 @@ async def test_worker_publishes_evidence_when_configured(tmp_path: Path) -> None
     assert payload["evidence"][0]["uri"].startswith(f"local://evidence/{SESSION_ID}/1/")
 
     # File exists on disk
-    saved = list(evidence_dir.glob("*/*.jpg"))
+    saved = list(evidence_dir.glob("*.jpg"))
     assert len(saved) == 1
 
 
@@ -455,7 +730,7 @@ async def test_worker_publisher_failure_fails_open_with_safe_diagnostic(
             frame: FrameEnvelope,
             event: TechnicalObservationEvent,
         ) -> TechnicalObservationEvent:
-            raise OSError("simulated disk full / I/O error")
+            raise OSError("failed writing C:/secrets/token.pem with secret_token_xyz")
 
     store = RegionConfigurationStore()
     await store.apply(_configuration())
@@ -496,11 +771,20 @@ async def test_worker_publisher_failure_fails_open_with_safe_diagnostic(
         stored_payload = json.loads(row[0])
         assert stored_payload["evidence"] == []
 
-    # 4. Safe diagnostic logged
+    # 4. Safe diagnostic logged: no sensitive strings or file paths in any log record
     assert any("evidence" in record.message.lower() for record in caplog.records)
-    # No raw sensitive tokens in log
-    for record in caplog.records:
-        assert "service_token" not in record.message
+    assert "secret_token_xyz" not in caplog.text
+    assert "token.pem" not in caplog.text
+    assert "C:/secrets" not in caplog.text
+
+    warning_records = [r for r in caplog.records if "evidence publication failed" in r.message]
+    assert len(warning_records) == 1
+    record = warning_records[0]
+    assert getattr(record, "exception_type", None) == "OSError"
+    assert getattr(record, "stream_id", None) == "gate-stream"
+    assert getattr(record, "sequence_number", None) == 1
+    assert getattr(record, "event_id", None) is not None
+    assert not hasattr(record, "error")
 
 
 def test_build_parser_evidence_arguments() -> None:
@@ -525,10 +809,36 @@ def test_build_parser_evidence_arguments() -> None:
             "C:/evidence",
             "--evidence-max-bytes",
             "2048",
-            "--evidence-retention-limit",
-            "50",
         ]
     )
     assert args.evidence_dir == Path("C:/evidence")
     assert args.evidence_max_bytes == 2048
-    assert args.evidence_retention_limit == 50
+    # --evidence-retention-limit must not exist on parser
+    assert not hasattr(args, "evidence_retention_limit")
+
+
+def test_cli_requires_existing_directory_without_mkdir(tmp_path: Path) -> None:
+    from smartsite_ai.tools.run_camera_worker import CameraWorkerRunError, _absolute_existing_dir
+
+    # Relative path
+    with pytest.raises(CameraWorkerRunError, match="must be absolute"):
+        _absolute_existing_dir(Path("relative/path"), "test")
+
+    # Non-existent directory
+    with pytest.raises(
+        CameraWorkerRunError, match="must identify an existing regular non-symlink directory"
+    ):
+        _absolute_existing_dir(tmp_path / "missing", "test")
+
+    # Regular file
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("not a dir", encoding="utf-8")
+    with pytest.raises(
+        CameraWorkerRunError, match="must identify an existing regular non-symlink directory"
+    ):
+        _absolute_existing_dir(file_path, "test")
+
+    # Valid existing directory
+    valid_dir = tmp_path / "valid"
+    valid_dir.mkdir()
+    assert _absolute_existing_dir(valid_dir, "test") == valid_dir

@@ -25,6 +25,7 @@ from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, ProcessingWorkerResult
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
+from smartsite_ai.training.dataset_integrity import is_link_like
 
 
 class CameraWorkerRunError(RuntimeError):
@@ -62,12 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=1_048_576,
         help="maximum size of single JPEG evidence image in bytes (default: 1MB)",
     )
-    parser.add_argument(
-        "--evidence-retention-limit",
-        type=int,
-        default=None,
-        help="maximum number of retained evidence items (default: unbounded)",
-    )
     return parser
 
 
@@ -76,6 +71,16 @@ def _absolute_existing_file(path: Path, label: str) -> Path:
         raise CameraWorkerRunError(f"{label} path must be absolute")
     if path.is_symlink() or not path.is_file():
         raise CameraWorkerRunError(f"{label} path must identify a regular non-symlink file")
+    return path
+
+
+def _absolute_existing_dir(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise CameraWorkerRunError(f"{label} path must be absolute")
+    if not path.is_dir() or is_link_like(path):
+        raise CameraWorkerRunError(
+            f"{label} path must identify an existing regular non-symlink directory"
+        )
     return path
 
 
@@ -191,12 +196,10 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             )
             evidence_publisher = None
             if args.evidence_dir is not None:
-                evidence_dir = args.evidence_dir.resolve()
-                evidence_dir.mkdir(parents=True, exist_ok=True)
+                evidence_dir = _absolute_existing_dir(args.evidence_dir, "evidence-dir")
                 evidence_publisher = LocalEvidencePublisher(
                     root_dir=evidence_dir,
                     max_jpeg_bytes=args.evidence_max_bytes,
-                    retention_limit=args.evidence_retention_limit,
                 )
 
             worker = HeadlessCameraProcessingWorker(

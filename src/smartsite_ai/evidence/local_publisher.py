@@ -1,12 +1,9 @@
-"""Injectable local filesystem evidence publisher with atomic storage and bounded retention."""
+"""Injectable local filesystem evidence publisher with atomic storage."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import hashlib
 import io
-import json
 import os
 import re
 import tempfile
@@ -18,8 +15,8 @@ from PIL import Image
 from smartsite_ai.domain.observations import EvidenceItem, TechnicalObservationEvent
 from smartsite_ai.evidence.models import (
     EvidenceBindingError,
+    EvidenceConflictError,
     EvidenceEncodingError,
-    EvidenceManifest,
     EvidencePathContainmentError,
     EvidenceSizeLimitError,
     build_local_evidence_uri,
@@ -31,7 +28,17 @@ _SAFE_ID_RE = re.compile(r"^[0-9a-zA-Z_-]+$")
 
 
 class LocalEvidencePublisher:
-    """Publishes exact-frame evidence to provider-neutral local storage with atomic replace."""
+    """Publishes exact-frame evidence to provider-neutral immutable local storage.
+
+    Threat Boundary:
+        Evidence artifacts are written directly into a dedicated owner-private root directory
+        using flat filenames formatted as `{sessionId}_{sequenceNumber}_{eventId}.jpg`.
+        This class strictly enforces that the root directory exists, is a regular non-symlink
+        directory, and rejects path traversal via identifiers.
+        Concurrent OS-level filesystem attacks by local unprivileged actors (e.g. TOCTOU attacks
+        swapping root_dir with a junction) are outside this application boundary and must be
+        secured by OS-level owner-private permissions (NTFS ACLs).
+    """
 
     def __init__(
         self,
@@ -39,30 +46,37 @@ class LocalEvidencePublisher:
         root_dir: Path,
         max_jpeg_bytes: int = 1_048_576,
         jpeg_quality: int = 85,
-        retention_limit: int | None = None,
         cv2_module: object | None = None,
     ) -> None:
         if max_jpeg_bytes <= 0:
             raise ValueError("max_jpeg_bytes must be positive")
         if not 1 <= jpeg_quality <= 100:
             raise ValueError("jpeg_quality must be between 1 and 100")
-        if retention_limit is not None and retention_limit <= 0:
-            raise ValueError("retention_limit must be positive if provided")
+
+        if not root_dir.exists():
+            raise EvidencePathContainmentError(f"evidence root directory must exist: {root_dir}")
+        if not root_dir.is_dir():
+            raise EvidencePathContainmentError(
+                f"evidence root directory must be a directory: {root_dir}"
+            )
+        if is_link_like(root_dir):
+            raise EvidencePathContainmentError(
+                f"evidence root directory must not be a symlink: {root_dir}"
+            )
 
         self._root_dir = root_dir.resolve()
         self._max_jpeg_bytes = max_jpeg_bytes
         self._jpeg_quality = jpeg_quality
-        self._retention_limit = retention_limit
         self._cv2_module = cv2_module
 
-    def _resolve_evidence_paths(
+    def _resolve_evidence_path(
         self,
         *,
         session_id: str,
         sequence_number: int,
         event_id: str,
-    ) -> tuple[Path, Path]:
-        """Validate path containment and return target image and manifest paths."""
+    ) -> Path:
+        """Validate path containment and return target flat image path in root directory."""
         if not _SAFE_ID_RE.fullmatch(session_id):
             raise EvidencePathContainmentError(
                 f"session_id contains unsafe path characters: {session_id}"
@@ -76,28 +90,28 @@ class LocalEvidencePublisher:
                 f"sequence_number must be non-negative: {sequence_number}"
             )
 
-        target_dir = self._root_dir / session_id
-        target_image = target_dir / f"{sequence_number}_{event_id}.jpg"
-        target_manifest = target_dir / f"{sequence_number}_{event_id}.manifest.json"
+        filename = f"{session_id}_{sequence_number}_{event_id}.jpg"
+        target_image = self._root_dir / filename
 
         try:
-            resolved_dir = target_dir.resolve()
             resolved_image = target_image.resolve()
-            resolved_manifest = target_manifest.resolve()
-            resolved_dir.relative_to(self._root_dir)
-            resolved_image.relative_to(self._root_dir)
-            resolved_manifest.relative_to(self._root_dir)
+            if resolved_image.parent != self._root_dir or not resolved_image.is_relative_to(
+                self._root_dir
+            ):
+                raise EvidencePathContainmentError(
+                    f"evidence path escapes root boundary {self._root_dir}: {target_image}"
+                )
         except (ValueError, RuntimeError) as error:
             raise EvidencePathContainmentError(
                 f"evidence path escapes root boundary {self._root_dir}: {target_image}"
             ) from error
 
-        if target_dir.exists() and is_link_like(target_dir):
+        if target_image.exists() and is_link_like(target_image):
             raise EvidencePathContainmentError(
-                f"evidence directory must not be a symlink: {target_dir}"
+                f"evidence image path must not be a symlink: {target_image}"
             )
 
-        return target_image, target_manifest
+        return target_image
 
     def _encode_jpeg(self, frame: FrameEnvelope) -> bytes:
         """Encode BGR24 frame envelope bytes to JPEG."""
@@ -123,28 +137,6 @@ class LocalEvidencePublisher:
             return buffer.getvalue()
         except Exception as error:
             raise EvidenceEncodingError(f"Pillow failed to encode JPEG: {error}") from error
-
-    def _prune_retention(self) -> None:
-        """Prune oldest evidence items if retention limit is exceeded."""
-        if self._retention_limit is None or not self._root_dir.is_dir():
-            return
-
-        all_images = sorted(
-            self._root_dir.glob("*/*.jpg"),
-            key=lambda p: (p.stat().st_mtime, p.name),
-        )
-        if len(all_images) <= self._retention_limit:
-            return
-
-        excess_count = len(all_images) - self._retention_limit
-        for image_path in all_images[:excess_count]:
-            image_path.unlink(missing_ok=True)
-            manifest_path = image_path.with_suffix(".manifest.json")
-            manifest_path.unlink(missing_ok=True)
-            parent_dir = image_path.parent
-            if parent_dir.is_dir() and not any(parent_dir.iterdir()):
-                with contextlib.suppress(OSError):
-                    parent_dir.rmdir()
 
     def _publish_sync(
         self,
@@ -176,15 +168,25 @@ class LocalEvidencePublisher:
                 f"event capturedAt {event.captured_at}"
             )
 
-        # 2. Path containment
+        # 2. Revalidate root directory before write
+        if (
+            not self._root_dir.exists()
+            or not self._root_dir.is_dir()
+            or is_link_like(self._root_dir)
+        ):
+            raise EvidencePathContainmentError(
+                f"evidence root directory is missing or invalid: {self._root_dir}"
+            )
+
+        # 3. Path containment (flat filename in root)
         session_id_str = str(frame.session_id)
-        image_path, manifest_path = self._resolve_evidence_paths(
+        image_path = self._resolve_evidence_path(
             session_id=session_id_str,
             sequence_number=frame.sequence_number,
             event_id=event.event_id,
         )
 
-        # 3. Encode JPEG and check size
+        # 4. Encode JPEG and check size
         jpeg_bytes = self._encode_jpeg(frame)
         if len(jpeg_bytes) > self._max_jpeg_bytes:
             raise EvidenceSizeLimitError(
@@ -192,79 +194,57 @@ class LocalEvidencePublisher:
                 f"maximum ({self._max_jpeg_bytes} bytes)"
             )
 
-        # 4. Atomic write temp + replace
-        target_dir = image_path.parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-
+        # 5. Atomic single JPEG write: temp + atomic link/create-if-absent (no-overwrite)
         uri = build_local_evidence_uri(
             session_id=session_id_str,
             sequence_number=frame.sequence_number,
             event_id=event.event_id,
         )
-        sha256_hash = hashlib.sha256(jpeg_bytes).hexdigest()
 
-        manifest = EvidenceManifest.create(
-            event_id=event.event_id,
-            stream_session_id=session_id_str,
-            sequence_number=frame.sequence_number,
-            camera_external_id=frame.camera_external_id,
-            captured_at=frame.captured_at.isoformat(),
-            uri=uri,
-            sha256=sha256_hash,
-            size_bytes=len(jpeg_bytes),
-            width=frame.width,
-            height=frame.height,
-        )
-
-        temp_image: Path | None = None
-        temp_manifest: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                "wb", dir=target_dir, prefix=f".{image_path.name}.", delete=False
-            ) as handle:
-                temp_image = Path(handle.name)
-                handle.write(jpeg_bytes)
-                handle.flush()
-                os.fsync(handle.fileno())
-
-            with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                dir=target_dir,
-                prefix=f".{manifest_path.name}.",
-                delete=False,
-            ) as handle:
-                temp_manifest = Path(handle.name)
-                json.dump(
-                    manifest.to_wire_dict(),
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
+        if image_path.exists():
+            existing_bytes = image_path.read_bytes()
+            if existing_bytes != jpeg_bytes:
+                raise EvidenceConflictError(
+                    f"evidence artifact already exists with conflicting content: {image_path}"
                 )
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
+        else:
+            temp_image: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "wb", dir=self._root_dir, prefix=f".{image_path.name}.", delete=False
+                ) as handle:
+                    temp_image = Path(handle.name)
+                    handle.write(jpeg_bytes)
+                    handle.flush()
+                    os.fsync(handle.fileno())
 
-            # Atomic replace
-            temp_image.replace(image_path)
-            temp_image = None
-            temp_manifest.replace(manifest_path)
-            temp_manifest = None
-        finally:
-            if temp_image is not None:
-                temp_image.unlink(missing_ok=True)
-            if temp_manifest is not None:
-                temp_manifest.unlink(missing_ok=True)
+                try:
+                    os.link(temp_image, image_path)
+                    temp_image.unlink(missing_ok=True)
+                    temp_image = None
+                except FileExistsError as error:
+                    temp_image.unlink(missing_ok=True)
+                    temp_image = None
+                    existing_bytes = image_path.read_bytes()
+                    if existing_bytes != jpeg_bytes:
+                        raise EvidenceConflictError(
+                            "evidence artifact already exists with conflicting content: "
+                            f"{image_path}"
+                        ) from error
+            finally:
+                if temp_image is not None:
+                    temp_image.unlink(missing_ok=True)
 
-        # 5. Bound retention
-        self._prune_retention()
-
-        # 6. Bind reference into event
+        # 6. Bind reference into event preserving existing items and deduplicating
         evidence_item = EvidenceItem(
             kind="FRAME",
             uri=uri,
         )
+        if any(item.uri == uri for item in event.evidence):
+            combined_evidence = list(event.evidence)
+        else:
+            combined_evidence = [*event.evidence, evidence_item]
+
         return TechnicalObservationEvent.create(
             event_id=event.event_id,
             camera_external_id=event.camera_external_id,
@@ -272,7 +252,7 @@ class LocalEvidencePublisher:
             captured_at=event.captured_at,
             frame_dimensions=event.frame_dimensions,
             observations=event.observations,
-            evidence=[evidence_item],
+            evidence=combined_evidence,
             schema_version=event.schema_version,
         )
 

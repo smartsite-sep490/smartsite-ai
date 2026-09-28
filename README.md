@@ -540,6 +540,38 @@ marked ineligible. Tool validation proves structural consistency and traceabilit
 replace a second-person review of the visual labels. Pass the generated
 `evaluation.manifest.json` and `indexes/test-episodes.jsonl` to `smartsite-ai-evaluate`.
 
+### Shared-runner multistream benchmark
+
+Measure the verified local YOLO11s detector with one shared, serialized model runner and one to
+three concurrent local video replays. The command performs no rendering, output-video writing,
+Backend calls, or network requests. Its JSON is a report-only baseline: `COMPLETE` means the run
+finished and its provenance is intact; it does not mean a performance threshold passed.
+
+```powershell
+uv sync --frozen --extra cuda126
+uv run --frozen --extra cuda126 smartsite-ai-benchmark-multistream `
+  --input C:\SmartSiteData\benchmark\ppe.mp4 `
+  --artifact-spec C:\SmartSiteData\runtime\artifact.json `
+  --output C:\SmartSiteData\benchmark\yolo11s-multistream.json `
+  --stream-counts 1 2 3 `
+  --warmup-seconds 10 `
+  --measurement-seconds 60 `
+  --target-fps 10
+```
+
+Run the command from a clean Git commit; a dirty or unavailable repository is rejected so a
+`COMPLETE` report always identifies the exact implementation. One input is replayed as independent
+logical streams and is marked `syntheticConcurrentReplay: true` for the two- and three-stream
+scenarios. Supply three distinct `--input` values to benchmark three different videos. The report
+records processed/dropped frames, effective FPS, p50/p95/p99 decode-and-pack, queue, full detector,
+pipeline and scheduled-replay-to-detection
+latency, sampled RSS/CPU, synchronized Torch allocator VRAM, NVIDIA driver and hardware/runtime
+versions, Git commit, and exact input/artifact/checkpoint hashes. A frame completed after the fixed
+measurement window is counted as dropped instead of inflating throughput, and skipped schedules
+also advance the replay source. The report records the actual execution time separately when a
+slow inference drains beyond the measurement window. It deliberately does not claim
+physical-camera-to-alert latency or total process VRAM outside the Torch allocator.
+
 After a training run reaches `COMPLETE`, generate the artifact spec from its manifest. The command
 verifies `weights/best.pt`, its exact path, size and SHA-256, the prepared dataset aggregate, and the
 canonical class map. It requires an explicit public HTTPS artifact URL and an explicitly confirmed

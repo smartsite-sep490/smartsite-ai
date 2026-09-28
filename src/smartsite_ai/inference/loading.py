@@ -252,7 +252,7 @@ def load_detector_artifact(
             metadata = _provider_metadata(runner.provider_metadata)
             _validate_provider_matches_spec(metadata, artifact)
         detector = Yolo11Detector(artifact, runner)
-    except Exception:
+    except BaseException:
         _close_safely(runner)
         raise
 
@@ -325,5 +325,5 @@ def _reject_secret_fields(value: Any) -> None:
 
 
 def _close_safely(runner: LoadedYoloRunnerProtocol) -> None:
-    with suppress(Exception):
+    with suppress(BaseException):
         runner.close()

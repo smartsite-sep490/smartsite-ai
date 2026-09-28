@@ -313,3 +313,47 @@ def test_shared_loader_closes_runner_when_load_fails(tmp_path: Path) -> None:
         load_yolo11_detector(spec_path, runner_factory=lambda: runner)
 
     assert runner.closed is True
+
+
+def test_shared_loader_closes_runner_when_load_is_interrupted(tmp_path: Path) -> None:
+    spec_path, _ = write_spec(tmp_path)
+
+    class InterruptedRunner(FakeRunner):
+        def load(self, artifact: Any) -> None:
+            del artifact
+            raise KeyboardInterrupt
+
+    runner = InterruptedRunner(valid_metadata())
+
+    with pytest.raises(KeyboardInterrupt):
+        load_yolo11_detector(spec_path, runner_factory=lambda: runner)
+
+    assert runner.closed is True
+
+
+def test_loader_rejects_checkpoint_through_linked_parent_before_factory(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "model-store"
+    target.mkdir()
+    checkpoint = target / "model.pt"
+    checkpoint.write_bytes(b"verified-yolo11s")
+    linked_parent = tmp_path / "linked-model-store"
+    try:
+        linked_parent.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symlinks are unavailable: {error}")
+    linked_checkpoint = linked_parent / "model.pt"
+    spec_path = tmp_path / "artifact.json"
+    spec_path.write_text(json.dumps(artifact_document(linked_checkpoint)), encoding="utf-8")
+    factory_called = False
+
+    def factory() -> FakeRunner:
+        nonlocal factory_called
+        factory_called = True
+        return FakeRunner(valid_metadata())
+
+    with pytest.raises(ArtifactValidationError, match="must not traverse"):
+        load_yolo11_detector(spec_path, runner_factory=factory)
+
+    assert factory_called is False

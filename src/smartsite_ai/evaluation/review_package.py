@@ -11,6 +11,12 @@ from smartsite_ai.evaluation.models import EvaluationBoundingBox
 
 MAX_REVIEW_FLAGS = 16
 ReviewFlags = Annotated[tuple[str, ...], BeforeValidator(lambda value: tuple(value))]
+_PPE_CLASS_SEMANTICS = {
+    "hardhat": ("HARD_HAT", "PRESENT"),
+    "no-hardhat": ("HARD_HAT", "MISSING"),
+    "safety vest": ("SAFETY_VEST", "PRESENT"),
+    "no-safety vest": ("SAFETY_VEST", "MISSING"),
+}
 
 
 class _StrictDraftModel(BaseModel):
@@ -26,7 +32,7 @@ class _StrictDraftModel(BaseModel):
 class ProposalDetection(_StrictDraftModel):
     """One detector proposal tied to a sampled frame."""
 
-    proposal_id: str = Field(alias="proposalId", min_length=1, max_length=32)
+    proposal_id: str = Field(alias="proposalId", min_length=1, max_length=256)
     class_id: int = Field(alias="classId", ge=0, le=2_147_483_647)
     class_name: str = Field(alias="className", min_length=1, max_length=128)
     confidence: float = Field(ge=0.0, le=1.0)
@@ -45,6 +51,9 @@ class ProposalPpeAssociation(_StrictDraftModel):
     """A technical PPE proposal associated to one provisional person track."""
 
     provisional_track_id: int = Field(alias="provisionalTrackId", ge=1)
+    source_detection_proposal_id: str = Field(
+        alias="sourceDetectionProposalId", min_length=1, max_length=256
+    )
     ppe_item: Literal["HARD_HAT", "SAFETY_VEST"] = Field(alias="ppeItem")
     proposed_status: Literal["PRESENT", "MISSING"] = Field(alias="proposedStatus")
     confidence: float = Field(ge=0.0, le=1.0)
@@ -56,6 +65,7 @@ class DraftFrameProposal(_StrictDraftModel):
 
     schema_version: Literal["1.0.0"] = Field(alias="schemaVersion")
     status: Literal["DRAFT"]
+    frame_proposal_id: str = Field(alias="frameProposalId", min_length=1, max_length=192)
     clip_id: str = Field(alias="clipId", min_length=1, max_length=128)
     frame_index: int = Field(alias="frameIndex", ge=0, le=10_000_000)
     video_time_seconds: float = Field(alias="videoTimeSeconds", ge=0.0, le=604_800.0)
@@ -79,6 +89,30 @@ class DraftFrameProposal(_StrictDraftModel):
             raise ValueError("reviewFlags must be unique")
         if "PROVISIONAL_TRACK_IDS" not in self.review_flags:
             raise ValueError("reviewFlags must disclose provisional track IDs")
+        detections = {detection.proposal_id: detection for detection in self.detections}
+        if len(detections) != len(self.detections):
+            raise ValueError("detection proposalId values must be unique")
+        track_ids = {person.provisional_track_id for person in self.persons}
+        if len(track_ids) != len(self.persons):
+            raise ValueError("person provisionalTrackId values must be unique")
+        association_keys: set[tuple[int, str]] = set()
+        for association in self.ppe_associations:
+            if association.provisional_track_id not in track_ids:
+                raise ValueError("PPE association references an unknown provisional track")
+            source = detections.get(association.source_detection_proposal_id)
+            if source is None:
+                raise ValueError("PPE association references an unknown source detection")
+            expected = _PPE_CLASS_SEMANTICS.get(source.class_name.casefold())
+            if expected != (association.ppe_item, association.proposed_status):
+                raise ValueError("PPE association contradicts source detection class semantics")
+            if source.confidence != association.confidence:
+                raise ValueError("PPE association confidence differs from its source detection")
+            if source.bounding_box != association.bounding_box:
+                raise ValueError("PPE association box differs from its source detection")
+            key = (association.provisional_track_id, association.ppe_item)
+            if key in association_keys:
+                raise ValueError("PPE associations must be unique per track and PPE item")
+            association_keys.add(key)
         return self
 
 
@@ -101,12 +135,8 @@ class DraftArtifactProvenance(_StrictDraftModel):
         alias="artifactSpecSha256After", pattern=r"^[0-9a-f]{64}$"
     )
     checkpoint_path: str = Field(alias="checkpointPath", min_length=1, max_length=4096)
-    checkpoint_sha256_before: str = Field(
-        alias="checkpointSha256Before", pattern=r"^[0-9a-f]{64}$"
-    )
-    checkpoint_sha256_after: str = Field(
-        alias="checkpointSha256After", pattern=r"^[0-9a-f]{64}$"
-    )
+    checkpoint_sha256_before: str = Field(alias="checkpointSha256Before", pattern=r"^[0-9a-f]{64}$")
+    checkpoint_sha256_after: str = Field(alias="checkpointSha256After", pattern=r"^[0-9a-f]{64}$")
     artifact_id: str = Field(alias="artifactId", min_length=1, max_length=128)
     version: str = Field(min_length=1, max_length=64)
     model_family: Literal["yolo11s"] = Field(alias="modelFamily")
@@ -152,9 +182,7 @@ class DraftReviewPackageManifest(_StrictDraftModel):
 
     schema_version: Literal["1.0.0"] = Field(alias="schemaVersion")
     status: Literal["DRAFT"]
-    package_type: Literal["PPE_TEMPORAL_PRELABEL_REVIEW_PACKAGE"] = Field(
-        alias="packageType"
-    )
+    package_type: Literal["PPE_TEMPORAL_PRELABEL_REVIEW_PACKAGE"] = Field(alias="packageType")
     ground_truth: Literal[False] = Field(alias="groundTruth")
     human_review_required: Literal[True] = Field(alias="humanReviewRequired")
     warning: Literal["Machine proposals only. This package is not reviewed ground truth."]

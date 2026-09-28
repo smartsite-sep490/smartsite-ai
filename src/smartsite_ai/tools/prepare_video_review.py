@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,13 @@ _MAX_SAMPLES = 20_000
 _MIN_CADENCE_SECONDS = 0.1
 _MAX_CADENCE_SECONDS = 1.0
 _REGION_ID = "00000000-0000-4000-8000-000000000001"
+_PUBLICATION_OWNER_FILE = ".smartsite-publication-owner"
+_PPE_CLASS_SEMANTICS = {
+    "hardhat": ("HARD_HAT", "PRESENT"),
+    "no-hardhat": ("HARD_HAT", "MISSING"),
+    "safety vest": ("SAFETY_VEST", "PRESENT"),
+    "no-safety vest": ("SAFETY_VEST", "MISSING"),
+}
 
 
 class ReviewPackageError(RuntimeError):
@@ -87,23 +95,25 @@ class ReviewVideo(Protocol):
 class OpenCvReviewVideo:
     """Lazy OpenCV reader/writer for deterministic sampled review evidence."""
 
-    def __init__(self, path: Path) -> None:
-        try:
-            import cv2
-        except ImportError as error:  # pragma: no cover - selected runtime extra
-            raise ReviewPackageError("OpenCV runtime is unavailable") from error
+    def __init__(self, path: Path, *, cv2_module: object | None = None) -> None:
+        if cv2_module is None:
+            try:
+                import cv2
+            except ImportError as error:  # pragma: no cover - selected runtime extra
+                raise ReviewPackageError("OpenCV runtime is unavailable") from error
+        else:
+            cv2 = cv2_module
         capture = cv2.VideoCapture(str(path))
-        if not capture.isOpened():
-            capture.release()
-            raise ReviewPackageError(f"OpenCV could not open video {path.name}")
         try:
+            if not capture.isOpened():
+                raise ReviewPackageError(f"OpenCV could not open video {path.name}")
             width = _positive_integer(capture.get(cv2.CAP_PROP_FRAME_WIDTH), "video width")
             height = _positive_integer(capture.get(cv2.CAP_PROP_FRAME_HEIGHT), "video height")
             frame_count = _positive_integer(
                 capture.get(cv2.CAP_PROP_FRAME_COUNT), "video frame count"
             )
             fps = _positive_float(capture.get(cv2.CAP_PROP_FPS), "video FPS")
-        except Exception:
+        except BaseException:
             capture.release()
             raise
         self._path = path
@@ -119,40 +129,55 @@ class OpenCvReviewVideo:
     def samples(self, cadence_seconds: float) -> Iterator[VideoSample]:
         if self._closed:
             raise ReviewPackageError("video reader is closed")
-        step = max(1, math.floor(self._facts.fps * cadence_seconds))
-        if step / self._facts.fps > _MAX_CADENCE_SECONDS:
-            raise ReviewPackageError("video FPS cannot satisfy the maximum one-second cadence")
-        sampled = 0
-        frame_index = 0
-        while frame_index < self._facts.frame_count:
+        indexes = _sample_frame_indexes(self._facts, cadence_seconds)
+        previous_time: float | None = None
+        for frame_index in indexes:
             if not self._capture.set(self._cv2.CAP_PROP_POS_FRAMES, float(frame_index)):
                 raise ReviewPackageError(f"could not seek frame {frame_index} in {self._path.name}")
+            seek_position = _finite_nonnegative(
+                self._capture.get(self._cv2.CAP_PROP_POS_FRAMES), "seek frame position"
+            )
+            if not math.isclose(seek_position, frame_index, abs_tol=0.25):
+                raise ReviewPackageError(
+                    f"OpenCV seek did not select requested frame {frame_index}"
+                )
             ok, image = self._capture.read()
             if not ok or image is None:
                 raise ReviewPackageError(
                     f"could not decode sampled frame {frame_index} in {self._path.name}"
                 )
+            next_position = _finite_nonnegative(
+                self._capture.get(self._cv2.CAP_PROP_POS_FRAMES), "decoded frame position"
+            )
+            if not math.isclose(next_position, frame_index + 1, abs_tol=0.25):
+                raise ReviewPackageError(
+                    f"decoded frame does not correspond to requested frame {frame_index}"
+                )
+            actual_time = _finite_nonnegative(
+                self._capture.get(self._cv2.CAP_PROP_POS_MSEC) / 1000.0,
+                "decoded frame timestamp",
+            )
+            if previous_time is not None:
+                if actual_time <= previous_time:
+                    raise ReviewPackageError("decoded frame timestamps must be strictly increasing")
+                if actual_time - previous_time > _MAX_CADENCE_SECONDS + 1e-9:
+                    raise ReviewPackageError("decoded sample cadence exceeds one second")
+            previous_time = actual_time
             shape = getattr(image, "shape", None)
             if shape != (self._facts.height, self._facts.width, 3):
                 raise ReviewPackageError("decoded frame shape changed during review preparation")
-            sampled += 1
-            if sampled > _MAX_SAMPLES:
-                raise ReviewPackageError(f"video {self._path.name} exceeds the sample limit")
             yield VideoSample(
                 frame_index=frame_index,
-                video_time_seconds=frame_index / self._facts.fps,
+                video_time_seconds=actual_time,
                 payload=bytes(image.tobytes()),
                 drawable=image.copy(),
             )
-            frame_index += step
 
     def write_jpeg(self, path: Path, drawable: object) -> None:
         if not self._cv2.imwrite(str(path), drawable, [self._cv2.IMWRITE_JPEG_QUALITY, 92]):
             raise ReviewPackageError("OpenCV could not write sampled JPEG")
 
-    def write_overlay(
-        self, path: Path, drawable: object, proposal: DraftFrameProposal
-    ) -> object:
+    def write_overlay(self, path: Path, drawable: object, proposal: DraftFrameProposal) -> object:
         image = drawable.copy()
         height, width = image.shape[:2]
         for detection in proposal.detections:
@@ -208,6 +233,13 @@ class OpenCvReviewVideo:
 
 
 DetectorLoader = Callable[[Path, RunnerFactory], tuple[Any, Any, Any, Mapping[int, str]]]
+PackagePublisher = Callable[[Path, Path], None]
+
+
+def _rename_new_directory(source: Path, target: Path) -> None:
+    if target.exists() or target.is_symlink():
+        raise ReviewPackageError("output directory appeared before atomic publication")
+    source.rename(target)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +249,7 @@ class ReviewPackageServices:
     detector_loader: DetectorLoader
     video_factory: Callable[[Path], ReviewVideo]
     git_facts: Callable[[Path], Mapping[str, object]]
+    publisher: PackagePublisher = _rename_new_directory
 
 
 def _default_detector_loader(path: Path, factory: RunnerFactory) -> tuple[Any, Any, Any, Any]:
@@ -232,6 +265,7 @@ def _default_services() -> ReviewPackageServices:
         detector_loader=_default_detector_loader,
         video_factory=OpenCvReviewVideo,
         git_facts=git_facts,
+        publisher=_rename_new_directory,
     )
 
 
@@ -277,12 +311,17 @@ def _regular_input(
 def _new_output(path: Path, *, repository_root: Path) -> Path:
     if not path.is_absolute():
         raise ReviewPackageError("output directory must be absolute")
-    output = path.resolve(strict=False)
-    if output.exists() or output.is_symlink():
+    absolute = path.absolute()
+    if absolute.exists() or absolute.is_symlink():
         raise ReviewPackageError("output directory must not already exist")
-    _reject_link_components(output.parent, label="output parent")
-    if not output.parent.is_dir() or is_link_like(output.parent):
+    _reject_link_components(absolute.parent, label="output parent")
+    try:
+        resolved_parent = absolute.parent.resolve(strict=True)
+    except OSError as error:
+        raise ReviewPackageError("output parent directory does not exist") from error
+    if not resolved_parent.is_dir() or is_link_like(resolved_parent):
         raise ReviewPackageError("output parent must be an existing regular directory")
+    output = resolved_parent / absolute.name
     try:
         relative = output.relative_to(repository_root)
     except ValueError:
@@ -364,6 +403,20 @@ def _full_frame_region(camera_id: str) -> Any:
     return configuration.regions[0]
 
 
+def _sample_frame_indexes(facts: VideoFacts, cadence_seconds: float) -> tuple[int, ...]:
+    _validate_video_facts(facts)
+    step = max(1, math.floor(facts.fps * cadence_seconds))
+    if step / facts.fps > _MAX_CADENCE_SECONDS:
+        raise ReviewPackageError("video FPS cannot satisfy the maximum one-second cadence")
+    indexes = list(range(0, facts.frame_count, step))
+    final_index = facts.frame_count - 1
+    if indexes[-1] != final_index:
+        indexes.append(final_index)
+    if len(indexes) > _MAX_SAMPLES:
+        raise ReviewPackageError("video exceeds the sample limit")
+    return tuple(indexes)
+
+
 def _validate_video_facts(facts: VideoFacts) -> None:
     if not 1 <= facts.width <= 16_384 or not 1 <= facts.height <= 16_384:
         raise ReviewPackageError("video dimensions exceed detector contract bounds")
@@ -373,6 +426,16 @@ def _validate_video_facts(facts: VideoFacts) -> None:
         raise ReviewPackageError("video FPS exceeds review package bounds")
     if not math.isfinite(facts.duration_seconds) or not 0.0 < facts.duration_seconds <= 604_800:
         raise ReviewPackageError("video duration exceeds review package bounds")
+
+
+def _finite_nonnegative(value: object, label: str) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as error:
+        raise ReviewPackageError(f"{label} is invalid") from error
+    if not math.isfinite(number) or number < 0:
+        raise ReviewPackageError(f"{label} is invalid")
+    return number
 
 
 def _review_flags(batch: Any, tracked: Any, associations: Sequence[Any]) -> tuple[str, ...]:
@@ -388,10 +451,15 @@ def _review_flags(batch: Any, tracked: Any, associations: Sequence[Any]) -> tupl
         flags.add("NEGATIVE_PPE_EVIDENCE")
     for present, missing in (("hardhat", "no-hardhat"), ("safety vest", "no-safety vest")):
         if present in classes and missing in classes:
-            flags.add("CONFLICTING_PPE_EVIDENCE")
-    ppe_detections = sum(
-        item.class_name.casefold() != "person" for item in batch.detections
-    )
+            flags.add("MIXED_PPE_CLASSES_IN_FRAME")
+    resolved_items = {(item.track_id, item.ppe_item) for item in associations}
+    if any(
+        (person.track_id, ppe_item) not in resolved_items
+        for person in tracked.persons
+        for ppe_item in ("HARD_HAT", "SAFETY_VEST")
+    ):
+        flags.add("PPE_STATUS_UNKNOWN")
+    ppe_detections = sum(item.class_name.casefold() != "person" for item in batch.detections)
     if ppe_detections > len(associations):
         flags.add("UNASSOCIATED_PPE_DETECTION")
     return tuple(sorted(flags))
@@ -402,12 +470,19 @@ def _priority(flags: Sequence[str]) -> str:
         flag in flags
         for flag in (
             "NEGATIVE_PPE_EVIDENCE",
-            "CONFLICTING_PPE_EVIDENCE",
             "UNASSOCIATED_PPE_DETECTION",
         )
     ):
         return "HIGH"
-    if "LOW_CONFIDENCE_DETECTION" in flags or "NO_PERSON_DETECTED" in flags:
+    if any(
+        flag in flags
+        for flag in (
+            "LOW_CONFIDENCE_DETECTION",
+            "NO_PERSON_DETECTED",
+            "MIXED_PPE_CLASSES_IN_FRAME",
+            "PPE_STATUS_UNKNOWN",
+        )
+    ):
         return "MEDIUM"
     return "STANDARD"
 
@@ -438,10 +513,36 @@ async def _proposal(
     associations = pipeline.process(tracked, _full_frame_region(frame.camera_external_id))
     flags = _review_flags(batch, tracked, associations)
     stem = f"frame-{sample.frame_index:010d}"
+    frame_proposal_id = f"{clip_id}:{stem}"
+    detection_proposals = tuple(
+        ProposalDetection.model_validate(
+            {
+                "proposalId": f"{frame_proposal_id}:detection-{index:04d}",
+                "classId": detection.class_id,
+                "className": detection.class_name,
+                "confidence": detection.confidence,
+                "boundingBox": _box(detection.bounding_box),
+            }
+        )
+        for index, detection in enumerate(batch.detections)
+    )
+
+    def source_detection_id(item: Any) -> str:
+        expected = (item.ppe_item, item.status)
+        for proposal in detection_proposals:
+            if (
+                _PPE_CLASS_SEMANTICS.get(proposal.class_name.casefold()) == expected
+                and proposal.confidence == item.confidence
+                and proposal.bounding_box.model_dump() == _box(item.bounding_box)
+            ):
+                return proposal.proposal_id
+        raise ReviewPackageError("PPE association has no exact source detection proposal")
+
     return DraftFrameProposal.model_validate(
         {
             "schemaVersion": "1.0.0",
             "status": "DRAFT",
+            "frameProposalId": frame_proposal_id,
             "clipId": clip_id,
             "frameIndex": sample.frame_index,
             "videoTimeSeconds": sample.video_time_seconds,
@@ -449,18 +550,7 @@ async def _proposal(
             "height": facts.height,
             "imagePath": str(PurePosixPath("frames", clip_id, f"{stem}.jpg")),
             "overlayPath": str(PurePosixPath("overlays", clip_id, f"{stem}.jpg")),
-            "detections": tuple(
-                ProposalDetection.model_validate(
-                    {
-                        "proposalId": f"d{index:04d}",
-                        "classId": detection.class_id,
-                        "className": detection.class_name,
-                        "confidence": detection.confidence,
-                        "boundingBox": _box(detection.bounding_box),
-                    }
-                )
-                for index, detection in enumerate(batch.detections)
-            ),
+            "detections": detection_proposals,
             "persons": tuple(
                 ProposalPerson.model_validate(
                     {
@@ -475,6 +565,7 @@ async def _proposal(
                 ProposalPpeAssociation.model_validate(
                     {
                         "provisionalTrackId": item.track_id,
+                        "sourceDetectionProposalId": source_detection_id(item),
                         "ppeItem": item.ppe_item,
                         "proposedStatus": item.status,
                         "confidence": item.confidence,
@@ -505,6 +596,22 @@ def _atomic_text(path: Path, text: str) -> None:
         raise
 
 
+def _cleanup_owned_publication(output: Path, owner_token: str) -> None:
+    """Remove only an output proven to be the staging directory published by this run."""
+
+    try:
+        if is_link_like(output) or not output.is_dir():
+            return
+        marker = output / _PUBLICATION_OWNER_FILE
+        if is_link_like(marker) or not marker.is_file() or marker.stat().st_size > 256:
+            return
+        if marker.read_text(encoding="ascii") != owner_token:
+            return
+        shutil.rmtree(output)
+    except Exception:
+        return
+
+
 def _publish_package(
     *,
     output: Path,
@@ -522,6 +629,7 @@ def _publish_package(
     rows: list[str] = []
     clip_manifests: list[dict[str, object]] = []
     total_samples = 0
+    publication_owner: str | None = None
     try:
         (working / "frames").mkdir()
         (working / "overlays").mkdir()
@@ -544,29 +652,43 @@ def _publish_package(
                     try:
                         facts = reader.facts
                         _validate_video_facts(facts)
-                        sample_step = max(1, math.floor(facts.fps * cadence_seconds))
-                        expected = math.ceil(facts.frame_count / sample_step)
+                        expected_indexes = _sample_frame_indexes(facts, cadence_seconds)
+                        expected = len(expected_indexes)
                         if expected > _MAX_SAMPLES or total_samples + expected > _MAX_SAMPLES:
                             raise ReviewPackageError(
                                 "requested package exceeds the total sample limit"
                             )
                         tracker = IoUPersonTracker()
                         pipeline = PpePipeline()
-                        session_id = uuid5(
-                            NAMESPACE_URL, f"smartsite-draft-review:{media_hash}"
-                        )
+                        session_id = uuid5(NAMESPACE_URL, f"smartsite-draft-review:{media_hash}")
                         previous_time: float | None = None
+                        first_frame_index: int | None = None
+                        last_frame_index: int | None = None
                         for sample in reader.samples(cadence_seconds):
-                            gap = (
-                                sample.video_time_seconds - previous_time
-                                if previous_time is not None
-                                else 0.0
+                            if sampled >= expected:
+                                raise ReviewPackageError(
+                                    "video reader returned more samples than requested"
+                                )
+                            if sample.frame_index != expected_indexes[sampled]:
+                                raise ReviewPackageError(
+                                    "video reader returned an unexpected frame index"
+                                )
+                            sample_time = _finite_nonnegative(
+                                sample.video_time_seconds, "decoded frame timestamp"
                             )
+                            if first_frame_index is None:
+                                first_frame_index = sample.frame_index
+                            last_frame_index = sample.frame_index
+                            gap = sample_time - previous_time if previous_time is not None else 0.0
+                            if previous_time is not None and sample_time <= previous_time:
+                                raise ReviewPackageError(
+                                    "decoded frame timestamps must be strictly increasing"
+                                )
                             if gap > 1.0 + 1e-9:
                                 raise ReviewPackageError(
                                     "decoded sample cadence exceeds one second"
                                 )
-                            previous_time = sample.video_time_seconds
+                            previous_time = sample_time
                             proposal = asyncio.run(
                                 _proposal(
                                     detector=detector,
@@ -594,6 +716,19 @@ def _publish_package(
                             total_samples += 1
                         if sampled == 0:
                             raise ReviewPackageError("video produced no review samples")
+                        if sampled != expected:
+                            raise ReviewPackageError(
+                                "video reader returned an unexpected sample count"
+                            )
+                        if first_frame_index != 0 or last_frame_index != facts.frame_count - 1:
+                            raise ReviewPackageError(
+                                "review samples do not cover both clip boundaries"
+                            )
+                        nominal_end = (facts.frame_count - 1) / facts.fps
+                        if previous_time is None or abs(previous_time - nominal_end) > 1.0:
+                            raise ReviewPackageError(
+                                "final decoded timestamp does not cover the clip end"
+                            )
                         clip_manifests.append(
                             {
                                 "clipId": clip_id,
@@ -628,38 +763,40 @@ def _publish_package(
         if git_finish != git_start:
             raise ReviewPackageError("Git provenance changed during review preparation")
         _atomic_text(working / "proposals.jsonl", "\n".join(rows) + "\n")
-        manifest = DraftReviewPackageManifest.model_validate({
-            "schemaVersion": "1.0.0",
-            "status": "DRAFT",
-            "packageType": "PPE_TEMPORAL_PRELABEL_REVIEW_PACKAGE",
-            "groundTruth": False,
-            "humanReviewRequired": True,
-            "warning": "Machine proposals only. This package is not reviewed ground truth.",
-            "generatedAtUtc": datetime.now(UTC),
-            "configuration": {
-                "cadenceSeconds": cadence_seconds,
-                "maximumAllowedGapSeconds": 1.0,
-                "trackerScope": "reset-at-each-clip-boundary",
-                "trackIdSemantics": "provisional-clip-local-not-worker-identity",
-                "localOnly": True,
-            },
-            "artifact": {
-                "artifactSpecPath": str(artifact_spec),
-                "artifactSpecSha256Before": artifact_spec_hash,
-                "artifactSpecSha256After": spec_after,
-                "checkpointPath": str(artifact.resolved_path),
-                "checkpointSha256Before": artifact.actual_sha256,
-                "checkpointSha256After": checkpoint_after,
-                "artifactId": artifact.artifact_id,
-                "version": artifact.version,
-                "modelFamily": artifact.model_family,
-                "classMap": {str(key): value for key, value in artifact.class_map},
-            },
-            "clips": tuple(clip_manifests),
-            "proposalCount": total_samples,
-            "proposalsPath": "proposals.jsonl",
-            "git": git_finish,
-        })
+        manifest = DraftReviewPackageManifest.model_validate(
+            {
+                "schemaVersion": "1.0.0",
+                "status": "DRAFT",
+                "packageType": "PPE_TEMPORAL_PRELABEL_REVIEW_PACKAGE",
+                "groundTruth": False,
+                "humanReviewRequired": True,
+                "warning": "Machine proposals only. This package is not reviewed ground truth.",
+                "generatedAtUtc": datetime.now(UTC),
+                "configuration": {
+                    "cadenceSeconds": cadence_seconds,
+                    "maximumAllowedGapSeconds": 1.0,
+                    "trackerScope": "reset-at-each-clip-boundary",
+                    "trackIdSemantics": "provisional-clip-local-not-worker-identity",
+                    "localOnly": True,
+                },
+                "artifact": {
+                    "artifactSpecPath": str(artifact_spec),
+                    "artifactSpecSha256Before": artifact_spec_hash,
+                    "artifactSpecSha256After": spec_after,
+                    "checkpointPath": str(artifact.resolved_path),
+                    "checkpointSha256Before": artifact.actual_sha256,
+                    "checkpointSha256After": checkpoint_after,
+                    "artifactId": artifact.artifact_id,
+                    "version": artifact.version,
+                    "modelFamily": artifact.model_family,
+                    "classMap": {str(key): value for key, value in artifact.class_map},
+                },
+                "clips": tuple(clip_manifests),
+                "proposalCount": total_samples,
+                "proposalsPath": "proposals.jsonl",
+                "git": git_finish,
+            }
+        )
         _atomic_text(
             working / "manifest.json",
             json.dumps(
@@ -670,8 +807,38 @@ def _publish_package(
             )
             + "\n",
         )
-        working.replace(output)
+        publication_owner = secrets.token_hex(32)
+        _atomic_text(working / _PUBLICATION_OWNER_FILE, publication_owner)
+
+        # This is deliberately the final operation before publication. It closes the gap
+        # between the provenance recorded above and the bytes exposed to a reviewer.
+        if _stable_sha256(artifact_spec) != artifact_spec_hash:
+            raise ReviewPackageError("artifact spec changed before package publication")
+        if _stable_sha256(artifact.resolved_path) != checkpoint_after:
+            raise ReviewPackageError("model checkpoint changed before package publication")
+        if any(
+            _stable_sha256(video) != str(item["sha256After"])
+            for video, item in zip(videos, clip_manifests, strict=True)
+        ):
+            raise ReviewPackageError("source video changed before package publication")
+        if _verified_git(services.git_facts(repository_root)) != git_finish:
+            raise ReviewPackageError("Git provenance changed before package publication")
+
+        # Atomic rename is the commit point. Keep the private ownership marker so an
+        # asynchronous interruption between rename and return can still clean only this run.
+        services.publisher(working, output)
+        if working.exists() or not output.exists() or is_link_like(output) or not output.is_dir():
+            raise ReviewPackageError("atomic package publication did not consume staging")
+        published_marker = output / _PUBLICATION_OWNER_FILE
+        if (
+            is_link_like(published_marker)
+            or not published_marker.is_file()
+            or published_marker.read_text(encoding="ascii") != publication_owner
+        ):
+            raise ReviewPackageError("published package ownership could not be verified")
     except BaseException:
+        if publication_owner is not None:
+            _cleanup_owned_publication(output, publication_owner)
         with suppress(OSError):
             shutil.rmtree(working)
         raise

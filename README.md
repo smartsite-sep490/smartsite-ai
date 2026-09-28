@@ -540,6 +540,33 @@ marked ineligible. Tool validation proves structural consistency and traceabilit
 replace a second-person review of the visual labels. Pass the generated
 `evaluation.manifest.json` and `indexes/test-episodes.jsonl` to `smartsite-ai-evaluate`.
 
+### DRAFT temporal PPE review package
+
+Use the verified YOLO11s detector to reduce the first pass of manual video labeling. This command
+samples and decodes real local frames at a cadence no greater than one second, resets provisional
+tracking at every clip boundary, and exports original JPEGs, clearly marked overlay JPEGs, and a
+strict `proposals.jsonl` worklist. It runs in the offline Ultralytics sandbox and never treats a
+missing detection as proof that PPE is missing.
+
+```powershell
+uv run --frozen --extra cuda126 smartsite-ai-prepare-video-review `
+  --input C:\SmartSiteData\review-source\ppe-shift-a.mp4 `
+  --artifact-spec C:\SmartSiteData\runtime\yolo11s-ppe-artifact.json `
+  --output-dir C:\SmartSiteData\review-packages\ppe-shift-a-draft `
+  --cadence-seconds 0.5
+```
+
+The output directory must be new and either outside the repository or ignored by Git. Every
+manifest and proposal row is permanently marked `DRAFT`; provisional track IDs are clip-local and
+are not worker identities. The package deliberately omits reviewer identity, review time,
+ground-truth annotations, and PPE episodes, so it cannot be passed to the official reviewed-corpus
+builder. A person must correct the boxes, identities, PPE labels, and temporal episodes in a
+separate review step before `smartsite-ai-build-video-evaluation-corpus` can accept the data. The
+manifest records the clean Git commit and exact before/after hashes of the artifact spec,
+checkpoint, and every source video. Failure or interruption removes the staged package.
+The hidden `.smartsite-publication-owner` file is internal ownership metadata used only to make
+interruption cleanup safe; it is not an annotation, review result, or ground-truth record.
+
 ### Shared-runner multistream benchmark
 
 Measure the verified local YOLO11s detector with one shared, serialized model runner and one to

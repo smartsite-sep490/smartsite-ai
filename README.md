@@ -564,6 +564,8 @@ builder. A person must correct the boxes, identities, PPE labels, and temporal e
 separate review step before `smartsite-ai-build-video-evaluation-corpus` can accept the data. The
 manifest records the clean Git commit and exact before/after hashes of the artifact spec,
 checkpoint, and every source video. Failure or interruption removes the staged package.
+The hidden `.smartsite-publication-owner` file is internal ownership metadata used only to make
+interruption cleanup safe; it is not an annotation, review result, or ground-truth record.
 
 ### Shared-runner multistream benchmark
 

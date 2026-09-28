@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -11,6 +12,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.evidence.protocol import EvidencePublisherProtocol
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.envelope import FrameEnvelope
@@ -22,6 +24,8 @@ from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
     filter_event_for_delivery,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class TechnicalPipelineProtocol(Protocol):
@@ -60,6 +64,7 @@ class HeadlessCameraProcessingWorker:
         dispatcher: OutboxDispatcher,
         configuration_guard: Callable[[], None] | None = None,
         delivery_interval_seconds: float = 0.25,
+        evidence_publisher: EvidencePublisherProtocol | None = None,
     ) -> None:
         if delivery_interval_seconds <= 0:
             raise ValueError("delivery interval must be positive")
@@ -74,6 +79,7 @@ class HeadlessCameraProcessingWorker:
         self._dispatcher = dispatcher
         self._configuration_guard = configuration_guard
         self._delivery_interval_seconds = delivery_interval_seconds
+        self._evidence_publisher = evidence_publisher
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
@@ -230,7 +236,25 @@ class HeadlessCameraProcessingWorker:
             return
         delivery_event = filter_event_for_delivery(event, confirmed_candidates)
         if delivery_event is not None:
-            await self._outbox.enqueue(delivery_event)
+            event_to_enqueue = delivery_event
+            if self._evidence_publisher is not None:
+                try:
+                    event_to_enqueue = await self._evidence_publisher.publish(
+                        frame=frame,
+                        event=delivery_event,
+                    )
+                except Exception as error:
+                    _LOGGER.warning(
+                        "evidence publication failed; continuing durable event delivery",
+                        extra={
+                            "event_id": delivery_event.event_id,
+                            "stream_id": frame.stream_id,
+                            "sequence_number": frame.sequence_number,
+                            "error": f"{type(error).__name__}: {error}",
+                        },
+                    )
+                    event_to_enqueue = delivery_event
+            await self._outbox.enqueue(event_to_enqueue)
             self._last_frame_enqueued = True
 
 

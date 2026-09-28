@@ -39,6 +39,7 @@ tmp/
 datasets/
 recordings/
 evidence/
+!src/smartsite_ai/evidence/
 face-data/
 embeddings/
 runs/

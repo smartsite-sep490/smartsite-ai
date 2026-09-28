@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -11,6 +12,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.evidence.models import FrameBatchBindingError
+from smartsite_ai.evidence.protocol import EvidencePublisherProtocol
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.envelope import FrameEnvelope
@@ -22,6 +25,30 @@ from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
     filter_event_for_delivery,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def validate_frame_batch_binding(frame: FrameEnvelope, batch: DetectionBatch) -> None:
+    """Validate strict exact-frame binding between ingested frame and detection batch."""
+    if (
+        batch.stream_id != frame.stream_id
+        or batch.camera_external_id != frame.camera_external_id
+        or batch.session_id != frame.session_id
+        or batch.sequence_number != frame.sequence_number
+        or batch.captured_at != frame.captured_at
+        or batch.frame_width != frame.width
+        or batch.frame_height != frame.height
+    ):
+        raise FrameBatchBindingError(
+            f"frame (stream={frame.stream_id}, camera={frame.camera_external_id}, "
+            f"session={frame.session_id}, seq={frame.sequence_number}, "
+            f"captured_at={frame.captured_at.isoformat()}, dims={frame.width}x{frame.height}) "
+            f"does not match detection batch (stream={batch.stream_id}, "
+            f"camera={batch.camera_external_id}, session={batch.session_id}, "
+            f"seq={batch.sequence_number}, captured_at={batch.captured_at.isoformat()}, "
+            f"dims={batch.frame_width}x{batch.frame_height})"
+        )
 
 
 class TechnicalPipelineProtocol(Protocol):
@@ -60,6 +87,7 @@ class HeadlessCameraProcessingWorker:
         dispatcher: OutboxDispatcher,
         configuration_guard: Callable[[], None] | None = None,
         delivery_interval_seconds: float = 0.25,
+        evidence_publisher: EvidencePublisherProtocol | None = None,
     ) -> None:
         if delivery_interval_seconds <= 0:
             raise ValueError("delivery interval must be positive")
@@ -74,6 +102,7 @@ class HeadlessCameraProcessingWorker:
         self._dispatcher = dispatcher
         self._configuration_guard = configuration_guard
         self._delivery_interval_seconds = delivery_interval_seconds
+        self._evidence_publisher = evidence_publisher
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
@@ -187,6 +216,7 @@ class HeadlessCameraProcessingWorker:
             raise RuntimeError("required PPE region is absent from active camera configuration")
 
         batch = await self._detector.detect(frame)
+        validate_frame_batch_binding(frame, batch)
         if (
             self._current_session_id != batch.session_id
             or self._current_ppe_geometry_version != ppe_region.geometry_version
@@ -230,7 +260,25 @@ class HeadlessCameraProcessingWorker:
             return
         delivery_event = filter_event_for_delivery(event, confirmed_candidates)
         if delivery_event is not None:
-            await self._outbox.enqueue(delivery_event)
+            event_to_enqueue = delivery_event
+            if self._evidence_publisher is not None:
+                try:
+                    event_to_enqueue = await self._evidence_publisher.publish(
+                        frame=frame,
+                        event=delivery_event,
+                    )
+                except Exception as error:
+                    _LOGGER.warning(
+                        "evidence publication failed; continuing durable event delivery",
+                        extra={
+                            "event_id": delivery_event.event_id,
+                            "stream_id": frame.stream_id,
+                            "sequence_number": frame.sequence_number,
+                            "exception_type": type(error).__name__,
+                        },
+                    )
+                    event_to_enqueue = delivery_event
+            await self._outbox.enqueue(event_to_enqueue)
             self._last_frame_enqueued = True
 
 
@@ -238,4 +286,5 @@ __all__ = [
     "HeadlessCameraProcessingWorker",
     "ProcessingWorkerResult",
     "ProcessingWorkerSourceError",
+    "validate_frame_batch_binding",
 ]

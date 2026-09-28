@@ -10,6 +10,7 @@ from uuid import UUID
 
 from smartsite_ai.config import Settings
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.loading import load_yolo11_detector
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
@@ -24,6 +25,7 @@ from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, ProcessingWorkerResult
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
+from smartsite_ai.training.dataset_integrity import is_link_like
 
 
 class CameraWorkerRunError(RuntimeError):
@@ -49,6 +51,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--stale-after", type=float, default=60.0)
     parser.add_argument("--delivery-interval", type=float, default=0.25)
+    parser.add_argument(
+        "--evidence-dir",
+        type=Path,
+        default=None,
+        help="root directory for local evidence storage (disabled by default)",
+    )
+    parser.add_argument(
+        "--evidence-max-bytes",
+        type=int,
+        default=1_048_576,
+        help="maximum size of single JPEG evidence image in bytes (default: 1MB)",
+    )
     return parser
 
 
@@ -57,6 +71,16 @@ def _absolute_existing_file(path: Path, label: str) -> Path:
         raise CameraWorkerRunError(f"{label} path must be absolute")
     if path.is_symlink() or not path.is_file():
         raise CameraWorkerRunError(f"{label} path must identify a regular non-symlink file")
+    return path
+
+
+def _absolute_existing_dir(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise CameraWorkerRunError(f"{label} path must be absolute")
+    if not path.is_dir() or is_link_like(path):
+        raise CameraWorkerRunError(
+            f"{label} path must identify an existing regular non-symlink directory"
+        )
     return path
 
 
@@ -170,6 +194,14 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
                 zones=RestrictedZonePipeline(),
                 ppe_region_id=str(args.ppe_region_id),
             )
+            evidence_publisher = None
+            if args.evidence_dir is not None:
+                evidence_dir = _absolute_existing_dir(args.evidence_dir, "evidence-dir")
+                evidence_publisher = LocalEvidencePublisher(
+                    root_dir=evidence_dir,
+                    max_jpeg_bytes=args.evidence_max_bytes,
+                )
+
             worker = HeadlessCameraProcessingWorker(
                 stream=stream,
                 detector=detector,
@@ -180,6 +212,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
                 dispatcher=OutboxDispatcher(outbox, backend_client),
                 configuration_guard=poller.ensure_fresh,
                 delivery_interval_seconds=args.delivery_interval,
+                evidence_publisher=evidence_publisher,
             )
             result = await _coordinate(worker, poller)
         finally:

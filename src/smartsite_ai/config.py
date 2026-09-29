@@ -21,3 +21,4 @@ class Settings(BaseSettings):
 
     backend_ingestion_url: str | None = None
     backend_service_token: SecretStr | None = None
+    identity_service_token: SecretStr | None = None

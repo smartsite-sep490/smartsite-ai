@@ -62,7 +62,13 @@ def test_development_openapi_describes_real_endpoints():
         response = client.get("/openapi.json")
 
     assert response.status_code == 200
-    assert set(response.json()["paths"]) == {"/health/live", "/health/ready", "/v1/capabilities"}
+    assert set(response.json()["paths"]) == {
+        "/health/live",
+        "/health/ready",
+        "/v1/capabilities",
+        "/v1/identity/enrollments/{enrollment_id}/samples/{sample_index}",
+        "/v1/identity/enrollments/{enrollment_id}/complete",
+    }
     assert "503" in response.json()["paths"]["/health/ready"]["get"]["responses"]
 
 

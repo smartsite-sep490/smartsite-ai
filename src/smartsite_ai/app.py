@@ -8,6 +8,9 @@ from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
 from smartsite_ai.config import Settings
+from smartsite_ai.identity_api import _EnrollmentBuffer
+from smartsite_ai.identity_api import router as identity_router
+from smartsite_ai.inference.identity import UnavailableFaceRecognizer
 
 
 class LiveHealth(BaseModel):
@@ -57,6 +60,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if expose_docs else None,
     )
     app.state.api_ready = False
+    app.state.identity_service_token = (
+        settings.identity_service_token.get_secret_value()
+        if settings.identity_service_token is not None
+        else None
+    )
+    app.state.identity_enrollment_buffer = _EnrollmentBuffer()
+    app.state.face_recognizer = UnavailableFaceRecognizer()
 
     @app.get("/health/live", response_model=LiveHealth, tags=["health"])
     async def live() -> LiveHealth:
@@ -101,5 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             }
         )
+
+    app.include_router(identity_router)
 
     return app

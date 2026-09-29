@@ -13,7 +13,7 @@ Foundation hiện chỉ chạy HTTP. Hướng đã chốt là FastAPI + YOLO11s 
 5. Bắt đầu video đã được phép dùng, rồi tăng 1 → 2 → 3 camera; cố định resolution, sampling FPS, batch size và thời gian chạy. Đo cả decode, detector, tracker, Zone/identity và hàng đợi, không chỉ thời gian forward model. Ghi p50/p95 latency, FPS mỗi camera, dropped frames, VRAM/RAM, nhiệt và reconnect behavior.
 6. So sánh chất lượng PPE/identity theo điều kiện bên dưới, đặc biệt unknown/occlusion. Chỉ thêm capability trạng thái sẵn sàng khi worker thực được kiểm tra. API health 200 riêng không cho phép kết luận camera đang hoạt động.
 
-Kết quả foundation: optional vision đã resolve vào lockfile; chưa cài Torch/CUDA/InsightFace, chưa tải weights, chưa có benchmark RTX 4060 hoặc gọi OpenAI. Việc lựa chọn/kiểm tra identity và OpenAI adapter nằm ở milestone tiếp theo.
+Kết quả foundation: optional vision đã resolve vào lockfile; chưa cài Torch/CUDA/InsightFace, chưa tải weights, chưa có benchmark RTX 4060 hoặc gọi OpenAI. Việc lựa chọn/kiểm tra identity và OpenAI adapter nằm ở milestone tiếp theo. Runtime `smartsite-ai-camera-runtime` giám sát 1–3 stream đã khai báo trong một manifest; phép đo năng lực 1–3 camera trên RTX 4060 ở mục 5 vẫn chưa chạy.
 
 ## MF05
 

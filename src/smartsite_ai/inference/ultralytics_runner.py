@@ -23,7 +23,13 @@ ProviderVersionFactory = Callable[[], str]
 
 
 class UltralyticsYoloRunner:
-    """Run a verified local Ultralytics model only after explicit loading."""
+    """Run a verified local Ultralytics model only after explicit loading.
+
+    ``predict`` mutates provider state and ``Yolo11Detector`` dispatches it with
+    ``asyncio.to_thread``. Concurrent calls are not proven safe.
+    """
+
+    concurrent_inference_safe = False
 
     def __init__(
         self,

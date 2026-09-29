@@ -90,7 +90,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 "identity": Capability(
                     provider="insightface (candidate)",
-                    reason="Candidate only; no identity adapter, model or enrollment store.",
+                    reason=(
+                        "Fail-closed adapter boundary only; no reviewed model, enrollment store "
+                        "or verification worker is configured."
+                    ),
                 ),
                 "openai": Capability(
                     provider="openai",

@@ -1,6 +1,8 @@
 """Local realtime stream: verified YOLO detector, MF05/MF06 pipeline, optional backend post."""
 
 import asyncio
+import base64
+import io
 import json
 from collections.abc import Callable
 from contextlib import suppress
@@ -11,6 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
+from PIL import Image
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
@@ -19,6 +22,7 @@ from smartsite_ai.inference.loading import load_detector_artifact
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
+from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
@@ -136,6 +140,54 @@ def _ui_frame(
         "detections": detections,
         "zoneDetections": zone_detections,
     }
+
+
+def build_realtime_preview(
+    event: Any,
+    frame: FrameEnvelope,
+    *,
+    configuration: CameraRegionConfiguration | None = None,
+    ppe_region_id: str = "",
+    confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
+    occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+) -> dict[str, Any]:
+    """Bind diagnostic detections and bounded JPEG pixels in one socket message.
+
+    This preview is not retained evidence and does not change the ingestion contract.
+    Decimal sequence strings preserve the full source integer range in JavaScript.
+    """
+    image = Image.frombytes("RGB", (frame.width, frame.height), frame.payload, "raw", "BGR")
+    image.thumbnail((1280, 1280))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=75)
+    encoded = buffer.getvalue()
+    if len(encoded) > 1_048_576:
+        raise ValueError("realtime preview exceeds image size limit")
+    payload = _ui_frame(
+        event,
+        image.width,
+        image.height,
+        confirmed_ppe_items=confirmed_ppe_items,
+        occupied_zone_regions=occupied_zone_regions,
+    )
+    payload.update(
+        previewVersion=1,
+        cameraExternalId=frame.camera_external_id,
+        sessionId=str(frame.session_id),
+        sequenceNumber=str(frame.sequence_number),
+        capturedAt=frame.captured_at_iso,
+        imageDataUrl="data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"),
+        zonePolygons=[
+            {
+                "regionId": region.region_id,
+                "geometryVersion": region.geometry_version,
+                "coordinates": [list(point) for point in region.polygon.coordinates],
+            }
+            for region in (configuration.regions if configuration is not None else ())
+            if region.region_id.casefold() != ppe_region_id.casefold()
+        ],
+    )
+    return payload
 
 
 def parse_zone_polygon(raw: str) -> list[tuple[float, float]]:
@@ -386,10 +438,12 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 active_track_ids=active_track_ids,
             )
             await websocket.send_json(
-                _ui_frame(
+                await asyncio.to_thread(
+                    build_realtime_preview,
                     event,
-                    envelope.width,
-                    envelope.height,
+                    envelope,
+                    configuration=configuration,
+                    ppe_region_id=settings.realtime_ppe_region_id,
                     confirmed_ppe_items=confirmed_ppe_items,
                     occupied_zone_regions=occupied_zone_regions,
                 )

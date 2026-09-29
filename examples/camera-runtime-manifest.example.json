@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "1",
+  "modelSpec": "C:\\SmartSiteData\\config\\yolo11s-ppe-artifact.json",
+  "pollIntervalSeconds": 5,
+  "staleAfterSeconds": 60,
+  "deliveryIntervalSeconds": 0.25,
+  "evidenceMaxBytes": 1048576,
+  "cameras": [
+    {
+      "streamId": "gate-01",
+      "cameraId": "11111111-1111-4111-8111-111111111111",
+      "cameraExternalId": "CAM-GATE-01",
+      "ppeRegionId": "22222222-2222-4222-8222-222222222222",
+      "source": {
+        "kind": "path",
+        "path": "C:\\SmartSiteData\\recordings\\gate-01.mp4"
+      },
+      "live": false,
+      "targetFps": 10,
+      "outbox": "C:\\SmartSiteData\\runtime\\gate-01.sqlite3",
+      "evidenceDir": "C:\\SmartSiteData\\runtime\\evidence-gate-01"
+    },
+    {
+      "streamId": "yard-02",
+      "cameraId": "33333333-3333-4333-8333-333333333333",
+      "cameraExternalId": "CAM-YARD-02",
+      "ppeRegionId": "44444444-4444-4444-8444-444444444444",
+      "source": {
+        "kind": "env",
+        "name": "SMARTSITE_AI_CAMERA_YARD_02_SOURCE"
+      },
+      "live": true,
+      "outbox": "C:\\SmartSiteData\\runtime\\yard-02.sqlite3",
+      "evidenceDir": "C:\\SmartSiteData\\runtime\\evidence-yard-02"
+    }
+  ]
+}

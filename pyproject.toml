@@ -36,6 +36,7 @@ cuda126 = [
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
 smartsite-ai-camera-worker = "smartsite_ai.tools.run_camera_worker:main"
+smartsite-ai-camera-runtime = "smartsite_ai.tools.run_camera_runtime:main"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
 smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
 smartsite-ai-build-evaluation-dataset = "smartsite_ai.tools.build_evaluation_dataset:main"

@@ -152,7 +152,7 @@ Not yet implemented:
 - PPE model weights;
 - production tracker/model calibration and evaluation on representative site data;
 - InsightFace integration;
-- multi-camera runtime supervision and dynamic camera discovery;
+- dynamic camera discovery;
 - an operational retention/pruning policy for delivered outbox rows;
 - Safety Alert list/detail/review APIs and Web integration;
 - exact processed-frame synchronization for live Web overlays;
@@ -235,6 +235,35 @@ For a laptop webcam, use `--source 0 --live`. For credentialed RTSP, set
 or put them in command history. A finite video exits after EOF. Exit code `0` means the run ended
 with no pending or terminal outbox entries; exit code `2` means events remain pending or a
 non-retryable Backend response requires operator review.
+
+### Multi-camera runtime
+
+`smartsite-ai-camera-runtime` supervises one to three cameras declared in a strict manifest. It
+loads one verified YOLO11s artifact and closes that runner once. Each camera keeps its own region
+store, configuration poller, tracker, PPE temporal gate, outbox, and optional evidence directory.
+Ultralytics inference is serialized: `UltralyticsYoloRunner.concurrent_inference_safe` is false, so
+one `predict` runs at a time. A failed stream is recorded and does not stop a camera that is still
+healthy. Credentialed RTSP belongs in an environment reference such as
+`SMARTSITE_AI_CAMERA_YARD_02_SOURCE`; the manifest stores the variable name, not the URL.
+
+Exit `0` means every camera finished with no pending or terminal outbox rows. Exit `2` means every
+camera finished and at least one outbox still needs operator review. Exit `1` means a camera failed
+during preflight or while running, including a camera left `not_started` after an earlier preflight
+failure. The manifest shape is `examples/camera-runtime-manifest.example.json`.
+
+```powershell
+uv run --frozen --extra cuda126 smartsite-ai-camera-runtime `
+  --manifest 'C:\SmartSiteData\config\camera-runtime.json'
+```
+
+Vision import and configuration smoke. This checks that the runner is not marked thread-safe and
+that the example manifest parses. It does not download weights, open a camera, or measure GPU
+capacity:
+
+```powershell
+uv sync --frozen --extra vision
+uv run --frozen --extra vision python -c "from pathlib import Path; from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner; from smartsite_ai.runtime.manifest import load_manifest_bytes; assert UltralyticsYoloRunner.concurrent_inference_safe is False; manifest = load_manifest_bytes(Path('examples/camera-runtime-manifest.example.json').read_bytes()); assert len(manifest.cameras) == 2 and manifest.cameras[1].source.kind == 'env'"
+```
 
 This slice provides durable technical event production. It does not yet provide the Safety Alert
 review screen or frame-perfect browser streaming.

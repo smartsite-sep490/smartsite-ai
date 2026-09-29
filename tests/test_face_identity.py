@@ -6,6 +6,9 @@ import pytest
 from pydantic import ValidationError
 
 from smartsite_ai.inference.identity import (
+    FaceEnrollmentRequest,
+    FaceEnrollmentResult,
+    FaceEnrollmentSample,
     FaceRecognizerProtocol,
     FaceVerificationFrame,
     FaceVerificationResult,
@@ -90,3 +93,41 @@ def test_matched_result_never_contains_a_worker_or_access_decision() -> None:
         "score_band",
         "reason_code",
     }
+
+
+def test_unavailable_recognizer_rejects_enrollment_without_creating_profile() -> None:
+    request = FaceEnrollmentRequest(
+        enrollment_id=VERIFICATION_ID,
+        samples=tuple(
+            FaceEnrollmentSample(
+                **make_frame().model_dump(),
+                content=b"synthetic-jpeg",
+                sample_index=index,
+            )
+            for index in (1, 2, 3)
+        ),
+    )
+
+    result = asyncio.run(UnavailableFaceRecognizer().enroll(request))
+
+    assert result.model_dump() == {
+        "enrollment_id": VERIFICATION_ID,
+        "status": "AI_UNAVAILABLE",
+        "model_version": None,
+        "profile_reference": None,
+        "reason_code": "FACE_MODEL_NOT_CONFIGURED",
+    }
+
+
+def test_enrollment_requires_exactly_three_ordered_samples() -> None:
+    sample = FaceEnrollmentSample(
+        **make_frame().model_dump(), content=b"synthetic-jpeg", sample_index=1
+    )
+    with pytest.raises(ValidationError):
+        FaceEnrollmentRequest(enrollment_id=VERIFICATION_ID, samples=(sample, sample, sample))
+    with pytest.raises(ValidationError):
+        FaceEnrollmentResult(
+            enrollment_id=VERIFICATION_ID,
+            status="ENROLLED",
+            reason_code="ENROLLED",
+        )

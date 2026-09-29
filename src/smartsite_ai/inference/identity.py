@@ -33,10 +33,30 @@ class FaceVerificationFrame(_StrictFrozenModel):
         return value.astimezone(UTC)
 
 
+class FaceEnrollmentSample(FaceVerificationFrame):
+    """One ephemeral sample in the required three-frame enrollment sequence."""
+
+    sample_index: Literal[1, 2, 3]
+
+
+class FaceEnrollmentRequest(_StrictFrozenModel):
+    """Three permitted samples, kept in memory only for an enrollment operation."""
+
+    enrollment_id: UUID
+    samples: tuple[FaceEnrollmentSample, FaceEnrollmentSample, FaceEnrollmentSample]
+
+    @model_validator(mode="after")
+    def validate_sample_indices(self) -> "FaceEnrollmentRequest":
+        if tuple(sample.sample_index for sample in self.samples) != (1, 2, 3):
+            raise ValueError("samples must have indices 1, 2 and 3 in order")
+        return self
+
+
 FaceVerificationStatus = Literal[
     "MATCHED", "UNKNOWN", "LOW_CONFIDENCE", "QUALITY_FAILED", "AI_UNAVAILABLE"
 ]
 FaceScoreBand = Literal["LOW", "MEDIUM", "HIGH"]
+FaceEnrollmentStatus = Literal["ENROLLED", "QUALITY_FAILED", "AI_UNAVAILABLE"]
 
 
 class FaceVerificationResult(_StrictFrozenModel):
@@ -61,12 +81,35 @@ class FaceVerificationResult(_StrictFrozenModel):
         return self
 
 
+class FaceEnrollmentResult(_StrictFrozenModel):
+    """Enrollment outcome without image, embedding, worker or access data."""
+
+    enrollment_id: UUID
+    status: FaceEnrollmentStatus
+    model_version: str | None = Field(default=None, min_length=1, max_length=128)
+    profile_reference: str | None = Field(default=None, min_length=1, max_length=128)
+    reason_code: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
+
+    @model_validator(mode="after")
+    def validate_enrolled_fields(self) -> "FaceEnrollmentResult":
+        enrolled = self.status == "ENROLLED"
+        if enrolled and (self.model_version is None or self.profile_reference is None):
+            raise ValueError("ENROLLED requires model_version and profile_reference")
+        if not enrolled and (self.model_version is not None or self.profile_reference is not None):
+            raise ValueError("non-enrolled results must not carry model or profile references")
+        return self
+
+
 @runtime_checkable
 class FaceRecognizerProtocol(Protocol):
     """One-frame verification against private enrollment templates."""
 
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
         """Return technical evidence without authorization semantics."""
+        ...
+
+    async def enroll(self, request: FaceEnrollmentRequest) -> FaceEnrollmentResult:
+        """Create a private template from exactly three samples, or fail closed."""
         ...
 
 
@@ -76,6 +119,13 @@ class UnavailableFaceRecognizer:
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
         return FaceVerificationResult(
             verification_id=frame.verification_id,
+            status="AI_UNAVAILABLE",
+            reason_code="FACE_MODEL_NOT_CONFIGURED",
+        )
+
+    async def enroll(self, request: FaceEnrollmentRequest) -> FaceEnrollmentResult:
+        return FaceEnrollmentResult(
+            enrollment_id=request.enrollment_id,
             status="AI_UNAVAILABLE",
             reason_code="FACE_MODEL_NOT_CONFIGURED",
         )

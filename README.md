@@ -256,6 +256,25 @@ uv run --frozen --extra cuda126 smartsite-ai-camera-runtime `
   --manifest 'C:\SmartSiteData\config\camera-runtime.json'
 ```
 
+### Source probe
+
+`smartsite-ai-source-probe` checks one video or camera source before the runtime opens a model.
+Pass the environment variable name, never the URI. The variable name must match
+`SMARTSITE_AI_[A-Z0-9_]{1,80}`. `--max-frames` is 1..300 and `--timeout-seconds` is 1..120.
+A successful run prints one JSON line with `status`, `framesRead`, `width`, `height`, and
+`elapsedMs`. Failures print `error`, `code`, and an allowlisted `message`. Exit `0` is success,
+`1` is a closed failure, and `130` is interruption. The process releases the capture on EOF,
+timeout, failure, and Ctrl-C. A real OpenCV source needs the `vision` extra; this command does
+not load a model or claim that a camera is healthy beyond the frames it decoded.
+
+```powershell
+$env:SMARTSITE_AI_CAMERA_TAPO_SOURCE = '<rtsp-url>'
+uv run --frozen --extra vision smartsite-ai-source-probe `
+  --source-env SMARTSITE_AI_CAMERA_TAPO_SOURCE `
+  --max-frames 30 `
+  --timeout-seconds 15
+```
+
 Vision import and configuration smoke. This checks that the runner is not marked thread-safe and
 that the example manifest parses. It does not download weights, open a camera, or measure GPU
 capacity:

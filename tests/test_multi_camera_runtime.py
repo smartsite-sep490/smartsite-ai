@@ -250,6 +250,35 @@ def test_manifest_binds_isolated_paths_without_printing_secrets(tmp_path: Path) 
     assert "s3cret" not in rendered
 
 
+def test_manifest_binding_rejects_an_existing_link_like_outbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = _video(tmp_path, "gate.mp4")
+    outbox = tmp_path / "gate.sqlite3"
+    outbox.write_bytes(b"not-a-database")
+    document = _document(
+        tmp_path,
+        [
+            _entry(
+                "gate-01",
+                CAMERA_A,
+                "CAM-A",
+                source={"kind": "path", "path": video},
+                outbox=str(outbox),
+            )
+        ],
+    )
+
+    monkeypatch.setattr(
+        "smartsite_ai.runtime.manifest.is_link_like",
+        lambda path: path == outbox,
+    )
+
+    with pytest.raises(CameraRuntimeError, match="regular non-symlink file"):
+        bind_manifest(parse_manifest(document), {})
+
+
 def test_example_manifest_parses_without_reading_its_paths() -> None:
     example = (
         Path(__file__).parents[1] / "examples" / "camera-runtime-manifest.example.json"
@@ -257,6 +286,29 @@ def test_example_manifest_parses_without_reading_its_paths() -> None:
     manifest = load_manifest_bytes(example)
     assert len(manifest.cameras) == 2
     assert manifest.cameras[1].source.kind == "env"
+
+
+def test_manifest_parsing_accepts_posix_absolute_paths_on_a_windows_host(
+    tmp_path: Path,
+) -> None:
+    document = _document(
+        tmp_path,
+        [
+            _entry(
+                "gate-01",
+                CAMERA_A,
+                "CAM-A",
+                source={"kind": "path", "path": "/srv/smartsite/gate-01.mp4"},
+                outbox="/var/lib/smartsite/gate-01.sqlite3",
+                evidence_dir="/var/lib/smartsite/evidence-gate-01",
+            )
+        ],
+    )
+    document["modelSpec"] = "/opt/smartsite/yolo11s-ppe-artifact.json"
+
+    manifest = parse_manifest(document)
+
+    assert manifest.model_spec == "/opt/smartsite/yolo11s-ppe-artifact.json"
 
 
 def test_ultralytics_runner_is_not_marked_thread_safe() -> None:

@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -80,9 +80,9 @@ class CameraManifestEntry(_StrictModel):
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
-        if not Path(self.outbox).is_absolute():
+        if not _is_portable_absolute_path(self.outbox):
             raise ValueError("camera runtime manifest is invalid")
-        if self.evidence_dir is not None and not Path(self.evidence_dir).is_absolute():
+        if self.evidence_dir is not None and not _is_portable_absolute_path(self.evidence_dir):
             raise ValueError("camera runtime manifest is invalid")
         return self
 
@@ -107,7 +107,7 @@ class CameraRuntimeManifest(_StrictModel):
         if self.stale_after_seconds < self.poll_interval_seconds:
             raise ValueError("camera runtime manifest is invalid")
         _reject_duplicates(self.cameras)
-        if not Path(self.model_spec).is_absolute():
+        if not _is_portable_absolute_path(self.model_spec):
             raise ValueError("camera runtime manifest is invalid")
         return self
 
@@ -287,6 +287,12 @@ def _path_key(value: str | Path) -> str:
     return os.path.normcase(str(Path(value).resolve(strict=False)))
 
 
+def _is_portable_absolute_path(value: str) -> bool:
+    """Recognize explicit POSIX and Windows absolute paths on either host OS."""
+
+    return PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
 def _existing_file(path: Path, label: str) -> Path:
     if not path.is_absolute():
         raise CameraRuntimeError(f"{label} path must be absolute")
@@ -312,6 +318,8 @@ def _outbox_path(path: Path) -> Path:
         raise CameraRuntimeError("outbox path must be absolute")
     if not path.parent.is_dir() or is_link_like(path.parent):
         raise CameraRuntimeError("outbox parent directory must already exist")
+    if path.is_symlink() or (path.exists() and (not path.is_file() or is_link_like(path))):
+        raise CameraRuntimeError("outbox path must identify a regular non-symlink file")
     return path
 
 

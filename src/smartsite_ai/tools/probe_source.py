@@ -8,8 +8,10 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from time import monotonic
 from typing import TypeVar
@@ -31,6 +33,10 @@ _MESSAGES = {
 }
 _T = TypeVar("_T")
 _WaitFor = Callable[[Awaitable[_T], float], Awaitable[_T]]
+_PROCESS_ALLOWANCE_SECONDS = 1.0
+_TERMINATE_GRACE_SECONDS = 0.5
+_MAX_CHILD_OUTPUT_BYTES = 4096
+_PopenFactory = Callable[..., object]
 
 
 class SourceProbeError(Exception):
@@ -139,8 +145,71 @@ async def execute_probe(
         await _release(source)
 
 
-def main() -> None:
-    raise SystemExit(run_probe(sys.argv[1:], os.environ))
+def supervise_probe(
+    argv: list[str],
+    environ: Mapping[str, str],
+    *,
+    popen: _PopenFactory | None = None,
+    executable: str | None = None,
+    emit: Callable[[str], None] | None = None,
+    allowance_seconds: float = _PROCESS_ALLOWANCE_SECONDS,
+    terminate_grace_seconds: float = _TERMINATE_GRACE_SECONDS,
+) -> int:
+    """Run the probe in a child process and stop that process at a hard deadline.
+
+    The child inherits ``environ``. Its command carries the variable name and numeric
+    bounds only. ``allowance_seconds`` is extra startup time after ``timeout_seconds``.
+    A forced stop terminates, kills if needed, and waits; it does not claim that the
+    worker closed its capture.
+    """
+
+    writer = emit or print
+    try:
+        source_env, max_frames, timeout_seconds = _parse_args(argv)
+    except SourceProbeError as exc:
+        writer(_error_line(exc.code))
+        return 1
+    command = _worker_command(
+        executable or sys.executable,
+        source_env,
+        max_frames,
+        timeout_seconds,
+    )
+    launcher = popen or subprocess.Popen
+    try:
+        process = launcher(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=dict(environ),
+            creationflags=_creationflags(),
+        )
+    except Exception:
+        writer(_error_line("SOURCE_UNAVAILABLE"))
+        return 1
+    budget = timeout_seconds + allowance_seconds
+    try:
+        process.wait(timeout=budget)  # type: ignore[attr-defined]
+    except KeyboardInterrupt:
+        _halt_process(process, terminate_grace_seconds)
+        writer(_error_line("INTERRUPTED"))
+        return 130
+    except subprocess.TimeoutExpired:
+        _halt_process(process, terminate_grace_seconds)
+        writer(_error_line("TIMEOUT"))
+        return 1
+    stdout, _stderr = _drain(process)
+    line, code = _validated_child_output(stdout, _returncode(process))
+    writer(line)
+    return code
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if args[:1] == ["--worker"]:
+        raise SystemExit(run_probe(args[1:], os.environ))
+    raise SystemExit(supervise_probe(args, os.environ))
 
 
 def _parse_args(argv: list[str]) -> tuple[str, int, float]:
@@ -281,6 +350,166 @@ async def _release(source: object) -> None:
         if task is not None:
             for _ in range(suspended):
                 task.cancel()
+
+
+def _worker_command(
+    executable: str,
+    source_env: str,
+    max_frames: int,
+    timeout_seconds: float,
+) -> list[str]:
+    return [
+        executable,
+        "-m",
+        "smartsite_ai.tools.probe_source",
+        "--worker",
+        "--source-env",
+        source_env,
+        "--max-frames",
+        str(max_frames),
+        "--timeout-seconds",
+        format(timeout_seconds, "g"),
+    ]
+
+
+def _creationflags() -> int:
+    return int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _halt_process(process: object, grace_seconds: float) -> None:
+    terminate = getattr(process, "terminate", None)
+    kill = getattr(process, "kill", None)
+    if terminate is not None:
+        with suppress(Exception):
+            terminate()
+    if _wait_for_exit(process, grace_seconds):
+        _drain(process)
+        return
+    if kill is not None:
+        with suppress(Exception):
+            kill()
+    if not _wait_for_exit(process, grace_seconds):
+        wait = getattr(process, "wait", None)
+        if wait is not None:
+            try:
+                wait()
+            except KeyboardInterrupt:
+                if kill is not None:
+                    kill()
+                wait()
+    _drain(process)
+
+
+def _wait_for_exit(process: object, grace_seconds: float) -> bool:
+    wait = getattr(process, "wait", None)
+    if wait is None:
+        return False
+    try:
+        wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        return False
+    except KeyboardInterrupt:
+        return False
+    return True
+
+
+def _drain(process: object) -> tuple[bytes, bytes]:
+    return _read_pipe(getattr(process, "stdout", None)), _read_pipe(
+        getattr(process, "stderr", None)
+    )
+
+
+def _read_pipe(pipe: object) -> bytes:
+    if pipe is None:
+        return b""
+    read = getattr(pipe, "read", None)
+    if read is None:
+        return b""
+    try:
+        chunk = read()
+    except Exception:
+        return b""
+    return chunk if isinstance(chunk, bytes) else b""
+
+
+def _returncode(process: object) -> int | None:
+    code = getattr(process, "returncode", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def _validated_child_output(stdout: bytes, returncode: int | None) -> tuple[str, int]:
+    payload = _child_payload(stdout)
+    if payload is None or returncode is None:
+        return _error_line("SOURCE_UNAVAILABLE"), 1
+    keys = set(payload)
+    if keys == {"status", "framesRead", "width", "height", "elapsedMs"}:
+        result = _success_payload(payload)
+        if result is None or returncode != 0:
+            return _error_line("SOURCE_UNAVAILABLE"), 1
+        return _success_line(result), 0
+    if keys == {"error", "code", "message"}:
+        code = payload.get("code")
+        if (
+            payload.get("error") != "SourceProbeError"
+            or not isinstance(code, str)
+            or payload.get("message") != _MESSAGES.get(code)
+        ):
+            return _error_line("SOURCE_UNAVAILABLE"), 1
+        expected = 130 if code == "INTERRUPTED" else 1
+        if returncode != expected:
+            return _error_line("SOURCE_UNAVAILABLE"), 1
+        return _error_line(code), expected
+    return _error_line("SOURCE_UNAVAILABLE"), 1
+
+
+def _child_payload(stdout: bytes) -> dict[str, object] | None:
+    if len(stdout) > _MAX_CHILD_OUTPUT_BYTES or b"\x00" in stdout:
+        return None
+    try:
+        text = stdout.decode("utf-8")
+    except UnicodeError:
+        return None
+    lines = text.splitlines()
+    if len(lines) != 1:
+        return None
+    try:
+        payload = json.loads(lines[0])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _success_payload(payload: Mapping[str, object]) -> ProbeResult | None:
+    frames_read = payload.get("framesRead")
+    width = payload.get("width")
+    height = payload.get("height")
+    elapsed_ms = payload.get("elapsedMs")
+    if payload.get("status") != "ok":
+        return None
+    if not _bounded_int(frames_read, 1, 300):
+        return None
+    if not _bounded_int(width, 1, 16_384):
+        return None
+    if not _bounded_int(height, 1, 16_384):
+        return None
+    if not _bounded_int(elapsed_ms, 0, 3_600_000):
+        return None
+    assert isinstance(frames_read, int)
+    assert isinstance(width, int)
+    assert isinstance(height, int)
+    assert isinstance(elapsed_ms, int)
+    return ProbeResult(
+        frames_read=frames_read,
+        width=width,
+        height=height,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def _bounded_int(value: object, lower: int, upper: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and lower <= value <= upper
 
 
 def _success_line(result: ProbeResult) -> str:

@@ -256,6 +256,32 @@ uv run --frozen --extra cuda126 smartsite-ai-camera-runtime `
   --manifest 'C:\SmartSiteData\config\camera-runtime.json'
 ```
 
+### Source probe
+
+`smartsite-ai-source-probe` checks one video or camera source before the runtime opens a model.
+Pass the environment variable name, never the URI. The variable name must match
+`SMARTSITE_AI_[A-Z0-9_]{1,80}`. `--max-frames` is 1..300 and `--timeout-seconds` is 1..120.
+A successful run prints one JSON line with `status`, `framesRead`, `width`, `height`, and
+`elapsedMs`. Failures print `error`, `code`, and an allowlisted `message`. Exit `0` is success,
+`1` is a closed failure, and `130` is interruption. The installed command supervises the read in
+a child process. The child inherits the environment and its command receives only the variable
+name and numeric bounds. The parent waits for `--timeout-seconds` plus 1 second of startup
+allowance. If the child is still alive, the parent terminates it, kills it when terminate does
+not finish, and waits until that process has exited. A normal worker exit closes the capture.
+Forced timeout or Ctrl-C ends the worker process so the operating system reclaims it; that path
+does not gracefully release the capture. The parent repeats the child's stdout only when it is
+exactly one allowlisted JSON object, and it never prints the child's stderr. A real OpenCV
+source needs the `vision` extra; this command does not load a model or claim that a camera is
+healthy beyond the frames it decoded.
+
+```powershell
+$env:SMARTSITE_AI_CAMERA_TAPO_SOURCE = '<rtsp-url>'
+uv run --frozen --extra vision smartsite-ai-source-probe `
+  --source-env SMARTSITE_AI_CAMERA_TAPO_SOURCE `
+  --max-frames 30 `
+  --timeout-seconds 15
+```
+
 Vision import and configuration smoke. This checks that the runner is not marked thread-safe and
 that the example manifest parses. It does not download weights, open a camera, or measure GPU
 capacity:

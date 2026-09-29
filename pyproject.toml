@@ -9,9 +9,13 @@ description = "SmartSite AI service foundation and capability contract"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "cryptography==46.0.5",
   "fastapi==0.141.1",
   "httpx==0.28.1",
+  "insightface==0.7.3",
   "jcs==0.2.1",
+  "onnxruntime==1.24.2",
+  "opencv-python-headless==4.11.0.86",
   "pydantic-settings==2.15.0",
   "uvicorn==0.53.0",
 ]
@@ -22,6 +26,7 @@ vision = ["ultralytics==8.4.155", "supervision==0.30.4"]
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:run"
+smartsite-ai-install-demo-model = "smartsite_ai.tools.install_demo_face_model:run"
 
 [dependency-groups]
 dev = [

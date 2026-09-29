@@ -116,6 +116,9 @@ class FaceRecognizerProtocol(Protocol):
 class UnavailableFaceRecognizer:
     """Default adapter while no reviewed model and private enrollment store exist."""
 
+    capability_reason = "No configured local model, encrypted template store, or approved provider."
+    capability_status = "not_configured"
+
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
         return FaceVerificationResult(
             verification_id=frame.verification_id,

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from smartsite_ai.config import Settings
 from smartsite_ai.identity_api import _EnrollmentBuffer
 from smartsite_ai.identity_api import router as identity_router
-from smartsite_ai.inference.identity import UnavailableFaceRecognizer
+from smartsite_ai.inference.insightface_recognizer import build_face_recognizer
 
 
 class LiveHealth(BaseModel):
@@ -26,7 +26,7 @@ class ReadyHealth(BaseModel):
 
 
 class Capability(BaseModel):
-    status: Literal["not_configured"] = "not_configured"
+    status: Literal["not_configured", "configured_demo"] = "not_configured"
     provider: str | None = None
     reason: str
 
@@ -66,7 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else None
     )
     app.state.identity_enrollment_buffer = _EnrollmentBuffer()
-    app.state.face_recognizer = UnavailableFaceRecognizer()
+    app.state.face_recognizer = build_face_recognizer(settings)
 
     @app.get("/health/live", response_model=LiveHealth, tags=["health"])
     async def live() -> LiveHealth:
@@ -99,11 +99,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     reason="No zones, tracking worker or backend policy contract configured.",
                 ),
                 "identity": Capability(
+                    status=app.state.face_recognizer.capability_status,
                     provider="insightface (candidate)",
-                    reason=(
-                        "Fail-closed adapter boundary only; no reviewed model, enrollment store "
-                        "or verification worker is configured."
-                    ),
+                    reason=app.state.face_recognizer.capability_reason,
                 ),
                 "openai": Capability(
                     provider="openai",

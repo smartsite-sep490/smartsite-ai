@@ -18,6 +18,8 @@ from smartsite_ai.inference.identity import (
     FaceEnrollmentResult,
     FaceEnrollmentSample,
     FaceRecognizerProtocol,
+    FaceVerificationFrame,
+    FaceVerificationResult,
 )
 
 _MAX_JPEG_BYTES: Final = 5 * 1024 * 1024
@@ -37,6 +39,18 @@ class EnrollmentCompletionResponse(BaseModel):
     status: str
     model_version: str | None = Field(default=None, serialization_alias="modelVersion")
     profile_reference: str | None = Field(default=None, serialization_alias="profileReference")
+    reason_code: str = Field(serialization_alias="reasonCode")
+
+
+class VerificationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: str
+    model_version: str | None = Field(default=None, serialization_alias="modelVersion")
+    candidate_profile_reference: str | None = Field(
+        default=None, serialization_alias="candidateProfileReference"
+    )
+    score_band: str | None = Field(default=None, serialization_alias="scoreBand")
     reason_code: str = Field(serialization_alias="reasonCode")
 
 
@@ -145,5 +159,31 @@ async def complete_enrollment(
         status=result.status,
         model_version=result.model_version,
         profile_reference=result.profile_reference,
+        reason_code=result.reason_code,
+    )
+
+
+@router.post("/verifications/{verification_id}", response_model=VerificationResponse)
+async def verify_face(verification_id: UUID, request: Request) -> VerificationResponse:
+    """Compare one transient JPEG against encrypted local enrollment templates."""
+    _authorized(request)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "image/jpeg":
+        raise HTTPException(status_code=415, detail="Only JPEG face frames are accepted")
+    content = await request.body()
+    if not content or len(content) > _MAX_JPEG_BYTES:
+        raise HTTPException(status_code=413, detail="Face frame exceeds the size limit")
+    frame = FaceVerificationFrame(
+        verification_id=verification_id,
+        captured_at=datetime.now(UTC),
+        mime_type="image/jpeg",
+        content=content,
+    )
+    recognizer: FaceRecognizerProtocol = request.app.state.face_recognizer
+    result: FaceVerificationResult = await recognizer.verify(frame)
+    return VerificationResponse(
+        status=result.status,
+        model_version=result.model_version,
+        candidate_profile_reference=result.candidate_profile_reference,
+        score_band=result.score_band,
         reason_code=result.reason_code,
     )

@@ -374,6 +374,36 @@ This YOLOv8 command is a **smoke reference only**. It proves that the local vide
 annotation path can run; it is not the selected production model and its output must not be reported
 as YOLO11s evaluation evidence.
 
+## Reviewed tracking-continuity diagnostics
+
+This local tool counts continuity failures in an **already matched, reviewed ledger**. It does
+not run a detector or tracker, perform bounding-box matching, resolve Workers, or calculate
+IDF1/HOTA. The output always identifies its scope as `MATCHED_LEDGER_DIAGNOSTICS`.
+
+```powershell
+uv run --frozen python -m smartsite_ai.tools.evaluate_tracking_continuity `
+  --input examples/tracking-continuity-ledger.example.json
+```
+
+The synthetic crossing example produces two `identitySwitches` and two `trackSubjectChanges`.
+These are fixture results, not evidence of model accuracy. For real inputs, record review metadata
+and source rights, then associate anonymized ground-truth people with predicted tracks per frame.
+Use a null predicted track for an explicitly unmatched person. Omitted frames are not inferred
+misses. Frame indices refer to the source clip across session restarts; each file describes one
+inference run per camera/clip. Overlapping sessions and conflicting frame associations are rejected.
+
+`identitySwitches` counts changes of matched track for a ground-truth person within a session.
+`trackSubjectChanges` counts one track changing ground-truth people. `fragmentsAfterMiss` requires
+matched/missed/matched observations; `sessionBoundaryContinuations` describes ground-truth matches
+across session boundaries, without proving online recovery. Counts use sampled ledger rows; no
+unseen frames, accuracy denominator, false-alert rate, or cross-camera identity is invented.
+
+The loader rejects unknown properties, duplicate JSON keys, invalid types, non-UTC review times,
+link/reparse paths, files over 4 MiB, and more than 20,000 rows. Review/source metadata are recorded
+attestations, not automated certification. Real recordings and review ledgers remain outside Git.
+Full tracker selection still requires independently annotated media, boxes/occlusion review,
+held-out splits, and integrated PPE/event measurements.
+
 ## Official YOLO11s PPE evaluation gate
 
 The selected gate evaluates a locally fine-tuned **official Ultralytics YOLO11s detector** against

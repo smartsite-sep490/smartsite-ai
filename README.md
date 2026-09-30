@@ -605,6 +605,10 @@ ignored local directory, then replace every example value. Frame labels use stab
 `personInstanceId` values throughout a clip and connect every PPE object to that frame's Person
 annotation with `relatedPersonAnnotationId`. `observablePpeItems` records which body-area evidence
 was actually reviewable; absence of a PPE box is not a missing-PPE label.
+The official video dataset loader also rejects repeated Person identities within one frame,
+PPE labels outside their owner's `observablePpeItems`, and both positive and negative labels for
+the same person and PPE item in one frame. Integer and string identities remain distinct;
+identities may continue across frames. These checks do not change legacy image-only label rules.
 
 The builder runs no model inference and makes no network request. It verifies source hashes,
 probes actual video dimensions/frame count/duration, decodes each selected frame to verify its

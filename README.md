@@ -132,7 +132,11 @@ Implemented:
 - verified local model-artifact metadata, a lazy Ultralytics YOLO runner, and normalized `DetectionBatch` output;
 - local annotated-video validation with an optional MF05/MF06 UI timeline export;
 - deterministic IoU person tracking with stream/session-scoped track IDs;
-- PPE-to-person association with technical `PRESENT`/observable `MISSING` observations;
+- PPE-to-person association with explicit `PRESENT`/`MISSING` evidence; boxes fitting multiple
+  current person tracks remain unknown, including competitors outside the observation region.
+  Ambiguous items cannot use the legacy absence fallback; independent clear items still emit.
+  Unknown evidence interrupts pending temporal confirmation but does not clear an already
+  confirmed missing episode or establish Worker identity;
 - configured polygon restricted-zone transition detection with geometry-version handling;
 - MF05/MF06 orchestration into the locked technical observation event, with synthetic fixtures and behavior tests;
 - liveness endpoint;

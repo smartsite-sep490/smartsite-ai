@@ -61,8 +61,23 @@ class Yolo11Detector:
         if frame.pixel_format != "BGR24":
             raise DetectorUnavailableError("YOLO runner requires BGR24 frames")
 
+        prediction = asyncio.create_task(asyncio.to_thread(self._predict_rows, frame))
         try:
-            raw_detections = await asyncio.to_thread(self._predict_rows, frame)
+            raw_detections = await asyncio.shield(prediction)
+        except asyncio.CancelledError:
+            # Cancelling the waiter cannot stop native predict(). Finish owning
+            # that work before a shared lane unlocks or the caller closes the
+            # runner. Repeated cancellation must not cancel the draining task.
+            while not prediction.done():
+                try:
+                    await asyncio.shield(prediction)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not prediction.cancelled():
+                prediction.exception()
+            raise
         except InferenceResultError:
             raise
         except Exception as error:

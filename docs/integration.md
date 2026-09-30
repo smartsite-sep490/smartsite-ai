@@ -47,6 +47,13 @@ Provider construction serializes its process-wide offline guards with a threadin
 a replacement connection cannot restore download/auto-install defaults while a cancelled
 connection's native model loader is still constructing a checkpoint.
 
+Cancelling a YOLO detection waits for its already-started native prediction to finish before
+propagating cancellation. This preserves the shared inference lane and prevents single-camera,
+multicamera, or preview cleanup from closing the runner while prediction is active. Repeated
+cancellation does not abandon that work; a late provider error is consumed while cancellation
+remains the caller outcome. This is graceful ownership, not a hard shutdown timeout: a permanently
+hung native provider still requires process-level recovery.
+
 ## Release
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.

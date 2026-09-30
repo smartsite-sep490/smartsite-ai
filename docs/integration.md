@@ -26,6 +26,27 @@ Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit sche
 
 Client có timeout riêng cho connect/read/write/pool; retry tối đa ba lần chỉ với lỗi transport, 408, 429 và 5xx. 4xx nghiệp vụ không retry. Mọi request dict được Pydantic validate trước khi gửi; acknowledgement phải có status hợp lệ, `alertIds` và cùng `eventId`.
 
+## Local diagnostic camera preview
+
+The authenticated `/ws/realtime` demo endpoint sends `previewVersion: 1` messages containing
+the exact inference frame as `imageDataUrl` (JPEG), its detections, and the configured restricted
+`zonePolygons`. Each message includes `cameraExternalId`, `sessionId`, decimal-string
+`sequenceNumber`, `capturedAt`, and encoded image `width`/`height`. JPEG output is bounded to
+1280 pixels per dimension and 1 MiB before Base64 encoding. Normalized boxes and polygons use
+the same image coordinate space. Empty detection frames still carry pixels and source identity.
+
+Clients must display the image and its boxes together, bound image decoding, and discard stale
+work after disconnect/session changes. A separately playing MP4 cannot be used as the background
+for realtime boxes. These transient diagnostic pixels do not replace authenticated retained
+evidence or change `TechnicalObservationEvent` v1.0.0. The controlled laptop/Tapo profiles remain
+exclusive to the durable worker; shared live-camera preview fan-out is not implemented here.
+Model/artifact initialization runs in a background thread after the client connects, so it does
+not occupy the API event loop. Cancellation preserves ownership of the loading task and closes
+a model that finishes loading after cancellation, including repeated cancellation requests.
+Provider construction serializes its process-wide offline guards with a threading lock:
+a replacement connection cannot restore download/auto-install defaults while a cancelled
+connection's native model loader is still constructing a checkpoint.
+
 ## Release
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.

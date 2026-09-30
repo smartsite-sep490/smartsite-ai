@@ -17,6 +17,12 @@ MAX_MANIFEST_BYTES: int = 256 * 1024
 MAX_JSONL_LINE_BYTES: int = 512 * 1024
 MAX_FRAMES_PER_SPLIT: int = 100_000
 FILE_HASH_CHUNK_BYTES: int = 1024 * 1024
+_PPE_ITEM_BY_CLASS = {
+    "Hardhat": "HARD_HAT",
+    "NO-Hardhat": "HARD_HAT",
+    "Safety Vest": "SAFETY_VEST",
+    "NO-Safety Vest": "SAFETY_VEST",
+}
 
 
 class DatasetValidationError(Exception):
@@ -314,6 +320,18 @@ def load_evaluation_dataset(
                                     f"personInstanceId ({ann.person_instance_id}) does not match "
                                     "related person's personInstanceId "
                                     f"({target.person_instance_id})"
+                                )
+                            ppe_item = _PPE_ITEM_BY_CLASS.get(ann.class_name)
+                            observable = target.observable_ppe_items
+                            if (
+                                frame.frame_index is not None
+                                and ppe_item is not None
+                                and (observable is None or ppe_item not in observable)
+                            ):
+                                raise DatasetValidationError(
+                                    f"Video frame '{frame.frame_id}' PPE annotation "
+                                    f"'{ann.annotation_id}' labels {ppe_item} for a person "
+                                    "whose observablePpeItems omits it"
                                 )
 
                     # Sort annotations stably by annotation_id

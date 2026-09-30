@@ -1273,6 +1273,139 @@ def test_video_annotations_require_identity_and_person_relationship(tmp_path: Pa
         load_evaluation_dataset(missing_relationship_manifest)
 
 
+def _video_owned_ppe_row(
+    *,
+    frame_id: str,
+    class_name: str,
+    observable: list[str] | None,
+    frame_index: int = 0,
+    video_time_seconds: float = 0.0,
+    image: bool = False,
+) -> dict[str, object]:
+    person: dict[str, object] = {
+        "annotationId": "person-1",
+        "className": "Person",
+        "boundingBox": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.9},
+        "personInstanceId": "person-a",
+    }
+    if observable is not None:
+        person["observablePpeItems"] = observable
+    row: dict[str, object] = {
+        "frameId": frame_id,
+        "mediaPath": "images/still.jpg" if image else "videos/camera.mp4",
+        "sha256": "0" * 64,
+        "width": 640,
+        "height": 480,
+        "annotations": [
+            person,
+            {
+                "annotationId": "ppe-1",
+                "className": class_name,
+                "boundingBox": {"x1": 0.12, "y1": 0.12, "x2": 0.3, "y2": 0.3},
+                "personInstanceId": "person-a",
+                "relatedPersonAnnotationId": "person-1",
+            },
+        ],
+    }
+    if not image:
+        row["frameIndex"] = frame_index
+        row["videoTimeSeconds"] = video_time_seconds
+    return row
+
+
+def test_video_ppe_requires_declared_observability_before_a_label(tmp_path: Path) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "absent-observability",
+        train_rows=[
+            _video_owned_ppe_row(frame_id="video-frame", class_name="Hardhat", observable=None)
+        ],
+    )
+    with pytest.raises(DatasetValidationError, match="must declare observablePpeItems") as raised:
+        load_evaluation_dataset(manifest)
+    assert "videos/" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "item", "observable"),
+    [
+        ("Hardhat", "HARD_HAT", []),
+        ("NO-Hardhat", "HARD_HAT", []),
+        ("Safety Vest", "SAFETY_VEST", []),
+        ("NO-Safety Vest", "SAFETY_VEST", []),
+        ("Hardhat", "HARD_HAT", ["SAFETY_VEST"]),
+        ("NO-Hardhat", "HARD_HAT", ["SAFETY_VEST"]),
+        ("Safety Vest", "SAFETY_VEST", ["HARD_HAT"]),
+        ("NO-Safety Vest", "SAFETY_VEST", ["HARD_HAT"]),
+    ],
+)
+def test_video_ppe_label_outside_observable_items_is_rejected(
+    tmp_path: Path,
+    class_name: str,
+    item: str,
+    observable: list[str],
+) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "omitted-item",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="video-frame",
+                class_name=class_name,
+                observable=observable,
+            )
+        ],
+    )
+    with pytest.raises(DatasetValidationError, match="observablePpeItems omits it") as raised:
+        load_evaluation_dataset(manifest)
+    message = str(raised.value)
+    assert "video-frame" in message
+    assert "ppe-1" in message
+    assert item in message
+    assert "videos/" not in message
+
+
+@pytest.mark.parametrize(
+    ("class_name", "observable"),
+    [
+        ("Hardhat", ["HARD_HAT"]),
+        ("NO-Hardhat", ["HARD_HAT"]),
+        ("Safety Vest", ["SAFETY_VEST"]),
+        ("NO-Safety Vest", ["SAFETY_VEST"]),
+    ],
+)
+def test_video_ppe_label_is_allowed_when_the_item_is_observable(
+    tmp_path: Path,
+    class_name: str,
+    observable: list[str],
+) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "allowed-item",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="video-frame",
+                class_name=class_name,
+                observable=observable,
+            )
+        ],
+    )
+    loaded = load_evaluation_dataset(manifest)
+    assert loaded.get_split("train")[0].annotations[1].class_name == class_name
+
+
+def test_image_ppe_label_keeps_current_rules_without_observable_items(tmp_path: Path) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "image-rules",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="still-frame", class_name="Hardhat", observable=None, image=True
+            )
+        ],
+    )
+    loaded = load_evaluation_dataset(manifest)
+    annotation = loaded.get_split("train")[0].annotations[1]
+    assert annotation.class_name == "Hardhat"
+    assert annotation.related_person_annotation_id == "person-1"
+
+
 def test_loader_bounds_frames_per_split(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("smartsite_ai.evaluation.dataset.MAX_FRAMES_PER_SPLIT", 1)
     rows = [

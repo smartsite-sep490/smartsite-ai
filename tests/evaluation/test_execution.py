@@ -11,11 +11,13 @@ import pytest
 
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.evaluation.alert_metrics import PredictedPpeEpisode
 from smartsite_ai.evaluation.dataset import LoadedEvaluationDataset
 from smartsite_ai.evaluation.execution import (
     EvaluationExecutionError,
     EvaluationExecutionMetadata,
     EvaluationExecutionRequest,
+    EvaluationExecutionResult,
     EvaluationExecutionServices,
     execute_evaluation,
     load_ground_truth_episodes,
@@ -30,7 +32,7 @@ from smartsite_ai.evaluation.report import GitReportMetadata, RuntimeReportMetad
 from smartsite_ai.inference.artifacts import ModelArtifactSpec
 from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.pipelines.ppe_temporal import ConfirmedPpeCandidate
+from smartsite_ai.pipelines.ppe_temporal import ConfirmedPpeCandidate, TemporalPpeCandidateGate
 
 SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 REGION_ID = "22222222-2222-4222-8222-222222222222"
@@ -260,13 +262,13 @@ class _Gate:
         active_track_ids: tuple[int, ...],
         observations: tuple[object, ...],
     ) -> tuple[ConfirmedPpeCandidate, ...]:
-        assert active_track_ids == (7,)
+        assert len(active_track_ids) == 1
         assert len(observations) == 1
         return (
             ConfirmedPpeCandidate(
                 stream_id=stream_id,
                 session_id=session_id,
-                track_id=7,
+                track_id=active_track_ids[0],
                 ppe_item="HARD_HAT",
                 first_seen_at=observed_at,
                 confirmed_at=observed_at,
@@ -415,6 +417,297 @@ def test_executor_rejects_non_yolo11s_before_publishing(tmp_path: Path) -> None:
         asyncio.run(execute_evaluation(request, metadata=metadata, services=services))
     assert not request.accuracy_report_path.exists()
     assert not request.predictions_path.exists()
+
+
+def _run_subject_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subjects: tuple[int | str | None, ...],
+    *,
+    tracks: tuple[tuple[int, ...], ...] | None = None,
+    confirmation_frames: int = 2,
+    extra_person: str | None = None,
+    omit_ppe: tuple[bool, ...] | None = None,
+    sessions: tuple[UUID, ...] | None = None,
+    short_episodes: bool = False,
+) -> tuple[EvaluationExecutionResult, list[PredictedPpeEpisode]]:
+    """Exercise the real temporal gate with synthetic labelled video subjects."""
+    from smartsite_ai.evaluation import execution
+
+    frames = []
+    for index, subject in enumerate(subjects):
+        frame = _frame(f"f-{index}", index, index / 10.0)
+        annotations = (
+            ()
+            if subject is None
+            else (frame.annotations[0].model_copy(update={"person_instance_id": subject}),)
+        )
+        if extra_person is not None:
+            annotations += (
+                frame.annotations[0].model_copy(
+                    update={"annotation_id": "person-b", "person_instance_id": extra_person}
+                ),
+            )
+        frames.append(frame.model_copy(update={"annotations": annotations}))
+    dataset = LoadedEvaluationDataset(
+        manifest=_manifest(),
+        splits=MappingProxyType({"test": tuple(frames)}),
+        dataset_root=tmp_path,
+    )
+    labels = dict.fromkeys(subject for subject in subjects if subject is not None)
+    if extra_person is not None:
+        labels[extra_person] = None
+    (tmp_path / "episodes.jsonl").write_text(
+        "".join(
+            json.dumps(
+                {
+                    "clipId": "clip.mp4",
+                    "personInstanceId": subject,
+                    "ppeItem": "HARD_HAT",
+                    "startTimeSeconds": (subjects.index(subject) / 10.0 if short_episodes else 0.0),
+                    "endTimeSeconds": (
+                        max(index for index, value in enumerate(subjects) if value == subject)
+                        / 10.0
+                        if short_episodes
+                        else (len(subjects) - 1) / 10.0
+                    ),
+                }
+            )
+            + "\n"
+            for subject in labels
+        ),
+        encoding="utf-8",
+    )
+
+    class SequencePipeline(_Pipeline):
+        def process(self, batch, **kwargs):
+            event = super().process(batch, **kwargs)
+            active_tracks = (7,) if tracks is None else tracks[batch.sequence_number]
+            observations = tuple(
+                item.model_copy(update={"track_id": track_id})
+                for track_id in active_tracks
+                for item in event.observations
+                if not (
+                    omit_ppe is not None and omit_ppe[batch.sequence_number] and item.type == "PPE"
+                )
+            )
+            if not observations:
+                return None
+            return event.model_copy(update={"observations": observations})
+
+    class SequenceReader(_Reader):
+        def read(self, dataset_root: Path, frame: EvaluationFrame) -> FrameEnvelope:
+            source = super().read(dataset_root, frame)
+            if sessions is not None:
+                source = source.model_copy(update={"session_id": sessions[frame.frame_index]})
+            return source
+
+    captured: list[PredictedPpeEpisode] = []
+    original_match = execution.match_candidate_episodes
+
+    def capture(ground_truth, predictions, **kwargs):
+        captured.extend(predictions)
+        return original_match(ground_truth, predictions, **kwargs)
+
+    monkeypatch.setattr(execution, "match_candidate_episodes", capture)
+    services = EvaluationExecutionServices(
+        dataset_loader=lambda path: dataset,
+        region_loader=lambda path: _region_configuration(),
+        frame_reader=SequenceReader(),
+        detector=_Detector(),
+        pipeline=SequencePipeline(),
+        temporal_gate=TemporalPpeCandidateGate(confirmation_frames=confirmation_frames),
+        provider_validation=lambda: _provider_report(tmp_path),
+    )
+    metadata = EvaluationExecutionMetadata(
+        git=GitReportMetadata(commit_sha="d" * 40, dirty_worktree=False),
+        runtime=RuntimeReportMetadata(
+            python_version="3.13", platform="test", device="cpu", package_versions={}, hardware={}
+        ),
+        command_arguments=(),
+    )
+    result = asyncio.run(
+        execute_evaluation(
+            _request(tmp_path, _artifact(tmp_path)), metadata=metadata, services=services
+        )
+    )
+    return result, captured
+
+
+@pytest.mark.parametrize("track_order", [(7, 19), (19, 7)])
+def test_duplicate_tracks_remain_duplicate_candidates(tmp_path, monkeypatch, track_order):
+    result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A", "A"), tracks=(track_order,) * 2
+    )
+    assert result.episode_metrics.true_positives == 1
+    assert result.episode_metrics.false_positives == 1
+    assert result.episode_metrics.duplicate_count == 1
+    assert result.episode_metrics.fragmentation_count == 1
+    assert {episode.person_instance_id for episode in episodes} == {"A"}
+    assert {episode.track_id for episode in episodes} == {7, 19}
+
+
+@pytest.mark.parametrize("track_order", [(7, 19), (19, 7)])
+def test_two_tracks_two_people_use_distinct_primary_matches(tmp_path, monkeypatch, track_order):
+    result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A", "A"), tracks=(track_order,) * 2, extra_person="B"
+    )
+    assert result.episode_metrics.true_positives == 2
+    assert result.episode_metrics.false_positives == 0
+    assert result.episode_metrics.duplicate_count == 0
+    assert {episode.person_instance_id for episode in episodes} == {"A", "B"}
+
+
+@pytest.mark.parametrize("second_subject", ["B", 7, "7"])
+@pytest.mark.parametrize("short_episodes", [False, True])
+def test_track_subject_switch_closes_previous_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    second_subject: int | str,
+    short_episodes: bool,
+) -> None:
+    result, episodes = _run_subject_sequence(
+        tmp_path,
+        monkeypatch,
+        ("A", "A", second_subject, second_subject),
+        short_episodes=short_episodes,
+    )
+    assert result.episode_metrics.true_positives == 2
+    assert len(episodes) == 2
+    first, second = sorted(episodes, key=lambda item: item.start_time_seconds)
+    assert (first.person_instance_id, first.start_time_seconds, first.end_time_seconds) == (
+        "A",
+        0.0,
+        0.1,
+    )
+    assert second.person_instance_id == second_subject
+    assert second.start_time_seconds == pytest.approx(0.2)
+    assert second.confirmed_time_seconds == pytest.approx(0.3)
+    assert {episode.track_id for episode in episodes} == {7}
+    assert {episode.stream_session_id for episode in episodes} == {SESSION_ID}
+    matches = sorted(
+        result.episode_metrics.matches, key=lambda item: item.person_instance_id == "A"
+    )
+    assert all(item.overlap_seconds == pytest.approx(0.1) for item in matches)
+    if short_episodes:
+        assert all(item.onset_difference_seconds == 0.0 for item in matches)
+
+
+def test_pending_evidence_is_not_inherited_by_next_subject(tmp_path, monkeypatch):
+    result, episodes = _run_subject_sequence(tmp_path, monkeypatch, ("A", "B", "B"))
+    assert result.episode_metrics.true_positives == 1
+    assert len(episodes) == 1
+    assert episodes[0].person_instance_id == "B"
+    assert episodes[0].start_time_seconds == pytest.approx(0.1)
+    assert episodes[0].confirmed_time_seconds == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("gap", ["B", None])
+def test_return_to_subject_starts_new_segment_inside_old_cooldown(tmp_path, monkeypatch, gap):
+    _result, episodes = _run_subject_sequence(tmp_path, monkeypatch, ("A", "A", gap, "A", "A"))
+    a_episodes = sorted(
+        (item for item in episodes if item.person_instance_id == "A"),
+        key=lambda item: item.start_time_seconds,
+    )
+    assert len(a_episodes) == 2
+    assert a_episodes[0].end_time_seconds == pytest.approx(0.1)
+    assert a_episodes[1].start_time_seconds == pytest.approx(0.3)
+    assert a_episodes[1].confirmed_time_seconds == pytest.approx(0.4)
+    assert a_episodes[0].candidate_id != a_episodes[1].candidate_id
+
+
+def test_absent_person_breaks_subject_segment(tmp_path, monkeypatch):
+    _result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A",) * 5, tracks=((7,), (7,), (), (7,), (7,))
+    )
+    assert len(episodes) == 2
+    assert sorted(item.start_time_seconds for item in episodes) == pytest.approx([0.0, 0.3])
+
+
+def test_offline_report_identifies_attribution_method_and_preserves_episode_ledger(
+    tmp_path, monkeypatch
+):
+    result, episodes = _run_subject_sequence(tmp_path, monkeypatch, ("A", "A"))
+    payload = json.loads((tmp_path / "candidates.json").read_text(encoding="utf-8"))
+    assert payload["attributionPolicy"] == "gt-primary-duplicate-fallback-subject-segments-v2"
+    assert payload["predictedEpisodes"] == [
+        episode.model_dump(mode="json", by_alias=True) for episode in episodes
+    ]
+    assert any(payload["attributionPolicy"] in item for item in result.report.metric_definitions)
+
+
+def test_unmatched_confirmed_segment_stays_false_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A", "A", None, None, "A", "A")
+    )
+    assert len(episodes) == 3
+    unmatched = [item for item in episodes if item.person_instance_id != "A"]
+    assert len(unmatched) == 1
+    assert unmatched[0].start_time_seconds == pytest.approx(0.2)
+    assert unmatched[0].confirmed_time_seconds == pytest.approx(0.3)
+    assert unmatched[0] in result.episode_metrics.false_candidates
+
+
+def test_omitted_ppe_resets_pending_without_changing_same_subject_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A",) * 4, omit_ppe=(False, True, False, False)
+    )
+    assert len(episodes) == 1
+    assert episodes[0].start_time_seconds == pytest.approx(0.2)
+    assert episodes[0].confirmed_time_seconds == pytest.approx(0.3)
+
+
+def test_omitted_ppe_does_not_clear_already_confirmed_same_subject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _result, episodes = _run_subject_sequence(
+        tmp_path, monkeypatch, ("A",) * 5, omit_ppe=(False, False, True, False, False)
+    )
+    assert len(episodes) == 1
+    assert episodes[0].start_time_seconds == 0.0
+    assert episodes[0].end_time_seconds == pytest.approx(0.4)
+
+
+def test_session_change_does_not_inherit_pending_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _result, episodes = _run_subject_sequence(
+        tmp_path,
+        monkeypatch,
+        ("A", "A"),
+        sessions=(SESSION_ID, UUID("33333333-3333-4333-8333-333333333333")),
+    )
+    assert episodes == []
+
+
+def test_integer_and_string_subject_ids_do_not_share_gate_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _result, episodes = _run_subject_sequence(tmp_path, monkeypatch, (7, "7", "7"))
+    assert len(episodes) == 1
+    assert episodes[0].person_instance_id == "7"
+    assert episodes[0].start_time_seconds == pytest.approx(0.1)
+
+
+def test_episode_id_does_not_depend_on_other_tracks_allocating_gate_namespaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    alone = tmp_path / "alone"
+    together = tmp_path / "together"
+    alone.mkdir()
+    together.mkdir()
+    with monkeypatch.context() as isolated:
+        _result, episodes = _run_subject_sequence(alone, isolated, ("A", "A"))
+        candidate_id = episodes[0].candidate_id
+    with monkeypatch.context() as isolated:
+        _result, episodes = _run_subject_sequence(
+            together, isolated, ("A", "A"), tracks=((3, 7),) * 2
+        )
+    assert next(item.candidate_id for item in episodes if item.track_id == 7) == candidate_id
 
 
 def test_executor_rejects_batch_from_a_different_artifact_version(tmp_path: Path) -> None:

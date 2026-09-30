@@ -633,6 +633,24 @@ marked ineligible. Tool validation proves structural consistency and traceabilit
 replace a second-person review of the visual labels. Pass the generated
 `evaluation.manifest.json` and `indexes/test-episodes.jsonl` to `smartsite-ai-evaluate`.
 
+Candidate scoring uses the offline attribution policy
+`gt-primary-duplicate-fallback-subject-segments-v2`. Person boxes first receive deterministic
+one-to-one GT matches using `matchIoU`; an extra track overlapping an already matched subject
+retains that subject for duplicate/fragmentation scoring. Unmatched tracks remain false candidates.
+Ties are scoring conventions, not evidence of physical identity. When a track's attributed subject
+changes, becomes unmatched, or disappears, its next contiguous visit gets a separate temporal-gate
+namespace. Pending evidence, confirmation, and cooldown cannot transfer between visits; each new
+visit must satisfy the unchanged confirmation settings. Omitted PPE for a still-visible, unchanged
+subject keeps the existing gate semantics: reset pending streaks without clearing confirmed state.
+
+The candidate JSON records `attributionPolicy` and the complete `predictedEpisodes` ledger,
+including original track/session IDs and segment start/confirmation/end times. The accuracy report
+records the policy in `metricDefinitions`. These GT-conditioned candidates are offline diagnostics;
+they are **not raw runtime alert counts**, Worker identification, cross-camera correlation, or
+proof that a matched GT episode's entire duration was covered. Keep the policy version with any
+comparison; older unversioned results use different attribution semantics. Runtime tracking,
+Backend grouping, and the technical-event contract are unchanged.
+
 ### DRAFT temporal PPE review package
 
 Use the verified YOLO11s detector to reduce the first pass of manual video labeling. This command

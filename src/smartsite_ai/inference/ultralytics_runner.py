@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping
 from importlib.metadata import version as distribution_version
 from math import isfinite
 from pathlib import Path
+from threading import Lock
 
 from smartsite_ai.inference.artifacts import VerifiedModelArtifact
 from smartsite_ai.inference.yolo import (
@@ -16,6 +17,8 @@ from smartsite_ai.ingestion.envelope import FrameEnvelope
 
 _MAX_RAW_DETECTIONS = 1_024
 _RAW_RESULT_LIMIT = _MAX_RAW_DETECTIONS + 1
+# Provider construction patches process-global offline guards, including after cancellation.
+_PROVIDER_LOAD_LOCK = Lock()
 
 ModelFactory = Callable[[Path], object]
 ImageFactory = Callable[[FrameEnvelope], object]
@@ -184,55 +187,56 @@ def _require_exact_local_file(path: Path) -> None:
 def _load_exact_ultralytics_model(path: Path) -> object:
     """Construct YOLO from the exact local path with network and auto-install closed."""
 
-    import ultralytics.nn.tasks as tasks
-    import ultralytics.utils as ultralytics_utils
-    import ultralytics.utils.checks as checks
-    import ultralytics.utils.downloads as downloads
-    from ultralytics import YOLO
+    with _PROVIDER_LOAD_LOCK:
+        import ultralytics.nn.tasks as tasks
+        import ultralytics.utils as ultralytics_utils
+        import ultralytics.utils.checks as checks
+        import ultralytics.utils.downloads as downloads
+        from ultralytics import YOLO
 
-    exact = Path(path)
+        exact = Path(path)
 
-    def exact_asset(file: str | Path, *_args: object, **_kwargs: object) -> str:
-        if _path_key(file) != _path_key(exact):
-            raise DetectorUnavailableError("provider requested a different model file")
-        _require_exact_local_file(exact)
-        return str(exact)
+        def exact_asset(file: str | Path, *_args: object, **_kwargs: object) -> str:
+            if _path_key(file) != _path_key(exact):
+                raise DetectorUnavailableError("provider requested a different model file")
+            _require_exact_local_file(exact)
+            return str(exact)
 
-    original_requirements = checks.check_requirements
+        original_requirements = checks.check_requirements
 
-    def offline_requirements(*args: object, **kwargs: object) -> bool:
-        install = bool(kwargs.get("install", True))
-        satisfied = original_requirements(*args, **{**kwargs, "install": False})
-        if install and satisfied is False:
-            raise DetectorUnavailableError(
-                "verified model requires a missing dependency and auto-install is disabled"
-            )
-        return bool(satisfied)
+        def offline_requirements(*args: object, **kwargs: object) -> bool:
+            install = bool(kwargs.get("install", True))
+            satisfied = original_requirements(*args, **{**kwargs, "install": False})
+            if install and satisfied is False:
+                raise DetectorUnavailableError(
+                    "verified model requires a missing dependency and auto-install is disabled"
+                )
+            return bool(satisfied)
 
-    previous_autoinstall = os.environ.get("YOLO_AUTOINSTALL")
-    original_download = downloads.attempt_download_asset
-    original_tasks_requirements = tasks.check_requirements
-    original_utils_autoinstall = ultralytics_utils.AUTOINSTALL
-    original_checks_autoinstall = checks.AUTOINSTALL
-    os.environ["YOLO_AUTOINSTALL"] = "false"
-    downloads.attempt_download_asset = exact_asset
-    checks.check_requirements = offline_requirements
-    tasks.check_requirements = offline_requirements
-    ultralytics_utils.AUTOINSTALL = False
-    checks.AUTOINSTALL = False
-    try:
-        _require_exact_local_file(exact)
-        return YOLO(exact)
-    finally:
-        downloads.attempt_download_asset = original_download
-        checks.check_requirements = original_requirements
-        tasks.check_requirements = original_tasks_requirements
-        ultralytics_utils.AUTOINSTALL = original_utils_autoinstall
-        checks.AUTOINSTALL = original_checks_autoinstall
-        if previous_autoinstall is None:
-            os.environ.pop("YOLO_AUTOINSTALL", None)
-        else:
-            os.environ["YOLO_AUTOINSTALL"] = previous_autoinstall
+        previous_autoinstall = os.environ.get("YOLO_AUTOINSTALL")
+        original_download = downloads.attempt_download_asset
+        original_tasks_requirements = tasks.check_requirements
+        original_utils_autoinstall = ultralytics_utils.AUTOINSTALL
+        original_checks_autoinstall = checks.AUTOINSTALL
+        os.environ["YOLO_AUTOINSTALL"] = "false"
+        downloads.attempt_download_asset = exact_asset
+        checks.check_requirements = offline_requirements
+        tasks.check_requirements = offline_requirements
+        ultralytics_utils.AUTOINSTALL = False
+        checks.AUTOINSTALL = False
+        try:
+            _require_exact_local_file(exact)
+            return YOLO(exact)
+        finally:
+            downloads.attempt_download_asset = original_download
+            checks.check_requirements = original_requirements
+            tasks.check_requirements = original_tasks_requirements
+            ultralytics_utils.AUTOINSTALL = original_utils_autoinstall
+            checks.AUTOINSTALL = original_checks_autoinstall
+            if previous_autoinstall is None:
+                os.environ.pop("YOLO_AUTOINSTALL", None)
+            else:
+                os.environ["YOLO_AUTOINSTALL"] = previous_autoinstall
 
 
 def _path_key(path: str | Path) -> str:

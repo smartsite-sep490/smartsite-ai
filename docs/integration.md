@@ -43,6 +43,9 @@ exclusive to the durable worker; shared live-camera preview fan-out is not imple
 Model/artifact initialization runs in a background thread after the client connects, so it does
 not occupy the API event loop. Cancellation preserves ownership of the loading task and closes
 a model that finishes loading after cancellation, including repeated cancellation requests.
+Provider construction serializes its process-wide offline guards with a threading lock:
+a replacement connection cannot restore download/auto-install defaults while a cancelled
+connection's native model loader is still constructing a checkpoint.
 
 ## Release
 

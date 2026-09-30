@@ -40,6 +40,9 @@ work after disconnect/session changes. A separately playing MP4 cannot be used a
 for realtime boxes. These transient diagnostic pixels do not replace authenticated retained
 evidence or change `TechnicalObservationEvent` v1.0.0. The controlled laptop/Tapo profiles remain
 exclusive to the durable worker; shared live-camera preview fan-out is not implemented here.
+Model/artifact initialization runs in a background thread after the client connects, so it does
+not occupy the API event loop. Cancellation preserves ownership of the loading task and closes
+a model that finishes loading after cancellation, including repeated cancellation requests.
 
 ## Release
 

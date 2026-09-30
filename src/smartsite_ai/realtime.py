@@ -36,6 +36,10 @@ from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
+_RealtimeStack = tuple[
+    Yolo11Detector, UltralyticsYoloRunner, Mf05Mf06Pipeline, CameraRegionConfiguration
+]
+
 
 def _ui_frame(
     event: Any,
@@ -269,7 +273,7 @@ def _load_class_map(path: Path) -> dict[int, str]:
 
 def _load_realtime_stack(
     settings: Settings,
-) -> tuple[Yolo11Detector, UltralyticsYoloRunner, Mf05Mf06Pipeline, CameraRegionConfiguration]:
+) -> _RealtimeStack:
     if not settings.realtime_model_path or not settings.realtime_class_map_path:
         raise ValueError("Realtime model and class map are not configured")
     if not settings.realtime_region_configuration_path:
@@ -310,6 +314,31 @@ def _load_realtime_stack(
     return detector, runner, pipeline, configuration
 
 
+async def _load_realtime_stack_async(
+    settings: Settings,
+) -> _RealtimeStack:
+    """Keep blocking artifact/provider initialization off the API loop.
+
+    Cancellation cannot stop native loading. Wait for its result and release the
+    model before propagating cancellation instead of abandoning a live runner.
+    """
+    loading = asyncio.create_task(asyncio.to_thread(_load_realtime_stack, settings))
+    try:
+        return await asyncio.shield(loading)
+    except asyncio.CancelledError:
+
+        def release_model_when_loaded(task: asyncio.Task[_RealtimeStack]) -> None:
+            with suppress(Exception, asyncio.CancelledError):
+                _detector, runner, _pipeline, _configuration = task.result()
+                runner.close()
+
+        # Repeated cancellation must not cancel the task that owns native loading.
+        loading.add_done_callback(release_model_when_loaded)
+        with suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(loading)
+        raise
+
+
 class RealtimeStreamGateTracker:
     """Manage TemporalPpeCandidateGate lifecycle across replay stream sessions."""
 
@@ -346,7 +375,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
     backend: BackendClient | None = None
     try:
         try:
-            detector, runner, pipeline, configuration = _load_realtime_stack(settings)
+            detector, runner, pipeline, configuration = await _load_realtime_stack_async(settings)
         except Exception:
             await websocket.send_json({"type": "error", "message": "Realtime model is unavailable"})
             return

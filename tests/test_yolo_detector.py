@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from math import inf, nan
 from pathlib import Path
+from threading import Event, Lock
 from uuid import UUID
 
 import pytest
@@ -17,6 +18,7 @@ from smartsite_ai.inference.yolo import (
     YoloRunnerProtocol,
 )
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.runtime.inference_lane import SerializingDetector
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 MODEL_SHA256 = "a" * 64
@@ -71,6 +73,95 @@ class FakeRunner:
 class FailingRunner:
     def predict(self, frame: FrameEnvelope) -> Iterable[RawYoloDetection]:
         raise RuntimeError("provider unavailable")
+
+
+class BlockingRunner:
+    """A native prediction cannot be cancelled by its asyncio waiter."""
+
+    def __init__(self, *, fail_first: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.release = Event()
+        self._loop = asyncio.get_running_loop()
+        self._guard = Lock()
+        self.fail_first = fail_first
+        self.calls = 0
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    def predict(self, frame: FrameEnvelope) -> Iterable[RawYoloDetection]:
+        with self._guard:
+            self.calls += 1
+            call = self.calls
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        try:
+            if call == 1:
+                self._loop.call_soon_threadsafe(self.started.set)
+                if not self.release.wait(5):
+                    raise RuntimeError("test prediction was not released")
+                if self.fail_first:
+                    raise RuntimeError("provider failed after cancellation")
+            return ()
+        finally:
+            with self._guard:
+                self.in_flight -= 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_cancelled_prediction_keeps_shared_lane_until_native_work_finishes(
+    fail_first: bool,
+) -> None:
+    runner = BlockingRunner(fail_first=fail_first)
+    lane = SerializingDetector(Yolo11Detector(make_artifact(), runner))
+    first = asyncio.create_task(lane.detect(make_frame()))
+    second = None
+    try:
+        await asyncio.wait_for(runner.started.wait(), 1)
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        second = asyncio.create_task(lane.detect(make_frame(sequence_number=5)))
+        await asyncio.sleep(0.05)
+        assert not first.done(), "cancellation returned while native prediction was active"
+        assert runner.calls == 1, "another camera entered the active native model"
+        runner.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 1)
+        batch = await asyncio.wait_for(second, 1)
+        assert batch.sequence_number == 5
+        assert runner.max_in_flight == 1 and runner.in_flight == 0
+    finally:
+        runner.release.set()
+        await asyncio.gather(
+            first, *([second] if second is not None else []), return_exceptions=True
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("fail_first", [False, True])
+async def test_single_camera_cancellation_returns_only_after_native_prediction_finishes(
+    fail_first: bool,
+) -> None:
+    runner = BlockingRunner(fail_first=fail_first)
+    detector = Yolo11Detector(make_artifact(), runner)
+    prediction = asyncio.create_task(detector.detect(make_frame()))
+    try:
+        await asyncio.wait_for(runner.started.wait(), 1)
+        prediction.cancel()
+        await asyncio.sleep(0)
+        prediction.cancel()
+        await asyncio.sleep(0.05)
+        assert not prediction.done(), "caller could close the runner before prediction finished"
+        runner.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(prediction, 1)
+        assert runner.in_flight == 0
+    finally:
+        runner.release.set()
+        await asyncio.gather(prediction, return_exceptions=True)
 
 
 def make_detector(rows: Iterable[RawYoloDetection]) -> Yolo11Detector:

@@ -132,8 +132,10 @@ async def test_dispatch_success_marks_delivered_and_sends_exact_payload(tmp_path
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("status", [400, 409, 413, 415, 422])
 async def test_dispatch_nonretryable_4xx_marks_terminal_without_payload_leak(
     tmp_path: Path,
+    status: int,
 ) -> None:
     event = _event()
     calls = 0
@@ -141,7 +143,7 @@ async def test_dispatch_nonretryable_4xx_marks_terminal_without_payload_leak(
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(422, json={"error": "invalid"})
+        return httpx.Response(status, json={"error": "invalid"})
 
     outbox = SqliteEventOutbox((tmp_path / "events.sqlite3").resolve())
     await outbox.enqueue(event)
@@ -157,6 +159,7 @@ async def test_dispatch_nonretryable_4xx_marks_terminal_without_payload_leak(
     counts = await outbox.counts()
     assert counts.terminal == 1
     assert counts.pending == 0
+    assert await outbox.ready() == ()
 
 
 @pytest.mark.anyio

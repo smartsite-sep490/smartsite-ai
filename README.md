@@ -810,6 +810,51 @@ See [models/README.md](models/README.md).
 
 ## Performance Validation
 
+### Read-only dataset split audit
+
+Before a training/evaluation run, prepare a local metadata manifest and audit declared
+source groups and candidate similarity links:
+
+```sh
+uv run --frozen python -m smartsite_ai.tools.audit_dataset_splits \
+  --manifest /absolute/path/split-input.json \
+  --output /absolute/path/new-split-report.json
+```
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "samples": [
+    {"sampleId": "train/a.jpg", "split": "train", "sha256": "<64 lowercase hex>", "sourceGroupId": "dataset-v1:scene-a"},
+    {"sampleId": "test/b.jpg", "split": "test", "sha256": "<64 lowercase hex>", "sourceGroupId": null}
+  ],
+  "links": [
+    {"leftSampleId": "train/a.jpg", "rightSampleId": "test/b.jpg", "reason": "visual-similarity-candidate"}
+  ]
+}
+```
+
+Use unique, unpadded sample IDs and globally namespaced source/video/scene groups.
+Replace the illustrative hash placeholders with hashes verified from the source files.
+The CLI reads metadata only: it does **not** verify image bytes, approve annotations,
+infer source groups, move samples, train a model, or integrate automatically with training.
+Filename-derived original-image groups may catch augmentation leakage but cannot prove
+independence between videos/sites. Unknown source groups remain `null`.
+
+Equal declared hashes or source groups crossing splits produce `BLOCKED_KNOWN_OVERLAP`.
+Similarity links, including transitive chains, stay candidates (`REVIEW_REQUIRED`),
+never confirmed duplicates. Otherwise missing groups produce `INCOMPLETE_SOURCE_GROUPS`.
+Exit codes are 2 for those findings, 1 for invalid input/I/O, and 0 for
+`NO_KNOWN_OVERLAP`. Status priority follows that order; inspect all report sections.
+Missing splits are reported separately. Even exit 0 always has `datasetAccepted: false`
+and `fileBytesVerified: false`; it is not an independent-holdout or model acceptance gate.
+
+Input is bounded to 32 MiB, 100,000 samples and 250,000 links. Duplicate JSON keys,
+unknown fields and invalid references are rejected. Paths must be absolute and contain
+no symlinks/junctions. The output parent must exist; a report is published only to a
+new path without replacing an existing or concurrent writer's file. Keep manifests,
+reports, image/label data and personal review decisions outside Git.
+
 The current prototype target is an NVIDIA RTX 4060 with approximately 1–3 camera streams.
 
 No FPS, latency, throughput, or accuracy claim is considered guaranteed until benchmarked using representative SmartSite footage. See [docs/feasibility.md](docs/feasibility.md).

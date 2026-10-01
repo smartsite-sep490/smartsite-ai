@@ -85,10 +85,17 @@ class TemporalPpeCandidateGate:
         for key, state in list(self._states.items()):
             if key[0] == stream_id and key[1] == session_id:
                 track_id = key[2]
-                if track_id not in active_track_set and (
-                    observed_at - state.last_seen_at > self._track_expiry
-                ):
-                    del self._states[key]
+                if track_id not in active_track_set:
+                    if observed_at - state.last_seen_at > self._track_expiry:
+                        del self._states[key]
+                    else:
+                        # An absent person provides no PPE evidence. Retain an already
+                        # confirmed episode until expiry, but neither confirmation nor
+                        # clearing evidence is consecutive across this frame.
+                        state.consecutive_clear = 0
+                        if not state.confirmed:
+                            state.consecutive_missing = 0
+                            state.first_seen_at = None
 
         obs_by_track_item: dict[tuple[int, PpeItem], PpeObservation] = {
             (obs.track_id, obs.ppe_item): obs for obs in observations if obs.type == "PPE"

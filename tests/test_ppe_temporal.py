@@ -399,6 +399,109 @@ def test_absent_item_does_not_clear_a_confirmed_missing_episode() -> None:
     )
 
 
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize("gap_tracks", [(), (2,)])
+def test_absent_person_breaks_pending_missing_streak(
+    item: str, gap_tracks: tuple[int, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate()
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+    for ms in (0, 200):
+        assert (
+            gate.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0 + timedelta(milliseconds=ms),
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, item),),
+            )
+            == ()
+        )
+    assert (
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=400),
+            active_track_ids=gap_tracks,
+            observations=(),
+        )
+        == ()
+    )
+    for ms in (600, 800):
+        assert (
+            gate.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0 + timedelta(milliseconds=ms),
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, item),),
+            )
+            == ()
+        )
+    candidates = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=1000),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, item),),
+    )
+    assert len(candidates) == 1
+    assert candidates[0].ppe_item == item
+    assert candidates[0].first_seen_at == t0 + timedelta(milliseconds=600)
+
+
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize("gap_tracks", [(), (2,)])
+def test_absent_person_breaks_clearing_streak_but_retains_confirmed_episode(
+    item: str, gap_tracks: tuple[int, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate()
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+    for ms in (0, 200, 400):
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=ms),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, item),),
+        )
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=600),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, item, "PRESENT"),),
+    )
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=800),
+        active_track_ids=gap_tracks,
+        observations=(),
+    )
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=1000),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, item, "PRESENT"),),
+    )
+    confirmed = gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+    assert confirmed == {(1, item)}
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(milliseconds=1200),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, item, "PRESENT"),),
+    )
+    assert not gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+
+
 def test_track_expiry_exact_and_over_one_second_boundary() -> None:
     # 1. Exact 1.0s boundary: not expired (<= 1s)
     gate_exact = TemporalPpeCandidateGate(track_expiry=timedelta(seconds=1))
@@ -411,13 +514,26 @@ def test_track_expiry_exact_and_over_one_second_boundary() -> None:
         active_track_ids=(1,),
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
-    # Track 1 seen at t0 + 200ms (count = 2)
+    # Confirm the episode before disappearance, so retention is distinct from
+    # retaining an interrupted pending evidence streak.
     gate_exact.update(
         stream_id=STREAM_ID,
         session_id=SESSION_ID,
         observed_at=t0 + timedelta(milliseconds=200),
         active_track_ids=(1,),
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert (
+        len(
+            gate_exact.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0 + timedelta(milliseconds=400),
+                active_track_ids=(1,),
+                observations=(ppe_obs(1),),
+            )
+        )
+        == 1
     )
 
     # Intermediate batch with empty track at t0 + 800ms
@@ -428,17 +544,18 @@ def test_track_expiry_exact_and_over_one_second_boundary() -> None:
         active_track_ids=(),
         observations=(),
     )
-    # Track 1 reappears at exactly t0 + 1200ms (delta from last seen t0+200ms is exactly 1.000s)
-    # Since delta is <= 1.0s, state is retained, so 3rd consecutive missing confirms!
+    # Exactly 1s since last seen: the confirmed episode survives, without re-emission.
     c_exact = gate_exact.update(
         stream_id=STREAM_ID,
         session_id=SESSION_ID,
-        observed_at=t0 + timedelta(seconds=1, milliseconds=200),
+        observed_at=t0 + timedelta(seconds=1, milliseconds=400),
         active_track_ids=(1,),
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
-    assert len(c_exact) == 1
-    assert c_exact[0].confirmed_at == t0 + timedelta(seconds=1, milliseconds=200)
+    assert c_exact == ()
+    assert gate_exact.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    ) == {(1, "HARD_HAT")}
 
     # 2. Over 1.0s boundary: expired (> 1s)
     gate_over = TemporalPpeCandidateGate(track_expiry=timedelta(seconds=1))
@@ -456,6 +573,18 @@ def test_track_expiry_exact_and_over_one_second_boundary() -> None:
         active_track_ids=(1,),
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
+    assert (
+        len(
+            gate_over.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0 + timedelta(milliseconds=400),
+                active_track_ids=(1,),
+                observations=(ppe_obs(1),),
+            )
+        )
+        == 1
+    )
 
     # Intermediate batch with empty track at t0 + 800ms
     gate_over.update(
@@ -465,16 +594,19 @@ def test_track_expiry_exact_and_over_one_second_boundary() -> None:
         active_track_ids=(),
         observations=(),
     )
-    # Track 1 reappears at t0 + 1205ms (delta is 1.005s > 1.0s) -> expired!
+    # Track 1 reappears at t0 + 1405ms (delta is 1.005s > 1.0s) -> expired!
     # Missing count restarts at 1, so no confirmation here.
     c_over = gate_over.update(
         stream_id=STREAM_ID,
         session_id=SESSION_ID,
-        observed_at=t0 + timedelta(seconds=1, milliseconds=205),
+        observed_at=t0 + timedelta(seconds=1, milliseconds=405),
         active_track_ids=(1,),
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
     assert c_over == ()
+    assert not gate_over.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
 
 
 def test_reappearance_expiry_without_intermediate_frames() -> None:

@@ -135,7 +135,8 @@ Implemented:
 - PPE-to-person association with explicit `PRESENT`/`MISSING` evidence; boxes fitting multiple
   current person tracks remain unknown, including competitors outside the observation region.
   Ambiguous items cannot use the legacy absence fallback; independent clear items still emit.
-  Unknown evidence interrupts pending temporal confirmation but does not clear an already
+  Unknown evidence, including a processed frame without the person, interrupts pending
+  confirmation and consecutive clearing evidence but does not clear an already
   confirmed missing episode or establish Worker identity;
 - configured polygon restricted-zone transition detection with geometry-version handling;
 - MF05/MF06 orchestration into the locked technical observation event, with synthetic fixtures and behavior tests;

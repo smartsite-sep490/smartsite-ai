@@ -27,7 +27,6 @@ class Settings(BaseSettings):
     # non-commercial research; application startup never downloads a model.
     identity_demo_mode: bool = False
     identity_model_root: Path | None = None
-    identity_template_store_path: Path | None = None
     identity_template_encryption_key: SecretStr | None = None
     identity_match_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     worker_source: SecretStr | None = None

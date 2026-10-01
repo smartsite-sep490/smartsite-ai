@@ -3,7 +3,6 @@
 import argparse
 import hashlib
 import shutil
-import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -15,12 +14,16 @@ REQUIRED = ("det_10g.onnx", "w600k_r50.onnx")
 
 
 def run() -> None:
-    parser = argparse.ArgumentParser(description="Install InsightFace buffalo_l academic demo model")
+    parser = argparse.ArgumentParser(
+        description="Install InsightFace buffalo_l academic demo model"
+    )
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--accept-non-commercial-license", action="store_true")
     arguments = parser.parse_args()
     if not arguments.accept_non_commercial_license:
-        parser.error("buffalo_l public weights are non-commercial research only; explicitly accept first")
+        parser.error(
+            "buffalo_l public weights are non-commercial research only; explicitly accept first"
+        )
     root = arguments.model_root.resolve()
     if not root.is_absolute():
         parser.error("model root must be an absolute path")
@@ -46,7 +49,9 @@ def run() -> None:
                 package.extract(item, staging)
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             if target.exists():
-                raise RuntimeError("model target already exists but is incomplete; inspect it manually")
+                raise RuntimeError(
+                    "model target already exists but is incomplete; inspect it manually"
+                )
             shutil.move(str(staging), str(target))
     print(f"Installed verified buffalo_l demo artifacts at {target}")
 

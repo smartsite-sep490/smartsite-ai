@@ -1,19 +1,22 @@
 """Authenticated, fail-closed HTTP boundary for face enrollment.
 
-The temporary samples live only in bounded process memory.  This endpoint does
-not create a business worker record, template, embedding, or access decision.
+Samples live in bounded process memory. Enrollment returns encrypted templates
+for Backend PostgreSQL persistence; this service never decides business access.
 """
 
 import asyncio
+import base64
+import binascii
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
 from typing import Final
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from smartsite_ai.inference.identity import (
+    EncryptedFaceTemplate,
     FaceEnrollmentRequest,
     FaceEnrollmentResult,
     FaceEnrollmentSample,
@@ -40,6 +43,25 @@ class EnrollmentCompletionResponse(BaseModel):
     model_version: str | None = Field(default=None, serialization_alias="modelVersion")
     profile_reference: str | None = Field(default=None, serialization_alias="profileReference")
     reason_code: str = Field(serialization_alias="reasonCode")
+    encrypted_template: str | None = Field(
+        default=None, serialization_alias="encryptedTemplate", repr=False
+    )
+
+
+class DatabaseTemplate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_reference_hash: str = Field(alias="profileReferenceHash", pattern=r"^[0-9a-f]{64}$")
+    encrypted_template: str = Field(
+        alias="encryptedTemplate", min_length=100, max_length=32768, repr=False
+    )
+
+
+class DatabaseVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    jpeg_base64: str = Field(
+        alias="jpegBase64", min_length=1, max_length=7 * 1024 * 1024, repr=False
+    )
+    templates: list[DatabaseTemplate] = Field(max_length=1000, repr=False)
 
 
 class VerificationResponse(BaseModel):
@@ -155,21 +177,50 @@ async def complete_enrollment(
     enrollment = await request.app.state.identity_enrollment_buffer.request(enrollment_id)
     recognizer: FaceRecognizerProtocol = request.app.state.face_recognizer
     result: FaceEnrollmentResult = await recognizer.enroll(enrollment)
+    if result.status == "ENROLLED":
+        async with request.app.state.identity_enrollment_buffer._lock:
+            request.app.state.identity_enrollment_buffer._entries.pop(enrollment_id, None)
     return EnrollmentCompletionResponse(
         status=result.status,
         model_version=result.model_version,
         profile_reference=result.profile_reference,
         reason_code=result.reason_code,
+        encrypted_template=result.encrypted_template,
     )
 
 
 @router.post("/verifications/{verification_id}", response_model=VerificationResponse)
 async def verify_face(verification_id: UUID, request: Request) -> VerificationResponse:
-    """Compare one transient JPEG against encrypted local enrollment templates."""
+    """Compare a transient JPEG against Backend-selected encrypted DB templates."""
     _authorized(request)
-    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "image/jpeg":
-        raise HTTPException(status_code=415, detail="Only JPEG face frames are accepted")
-    content = await request.body()
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in ("image/jpeg", "application/json"):
+        raise HTTPException(
+            status_code=415, detail="Only JPEG or database verification is accepted"
+        )
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > 48 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Face verification exceeds the size limit")
+    templates: tuple[EncryptedFaceTemplate, ...] = ()
+    if content_type == "application/json":
+        try:
+            payload = DatabaseVerification.model_validate_json(body)
+            content = base64.b64decode(payload.jpeg_base64, validate=True)
+            templates = tuple(
+                EncryptedFaceTemplate(
+                    profile_reference_hash=item.profile_reference_hash,
+                    encrypted_template=item.encrypted_template,
+                )
+                for item in payload.templates
+            )
+        except (ValidationError, ValueError, binascii.Error) as exc:
+            raise HTTPException(
+                status_code=422, detail="Invalid face verification payload"
+            ) from exc
+    else:
+        content = bytes(body)
     if not content or len(content) > _MAX_JPEG_BYTES:
         raise HTTPException(status_code=413, detail="Face frame exceeds the size limit")
     frame = FaceVerificationFrame(
@@ -177,6 +228,7 @@ async def verify_face(verification_id: UUID, request: Request) -> VerificationRe
         captured_at=datetime.now(UTC),
         mime_type="image/jpeg",
         content=content,
+        templates=templates,
     )
     recognizer: FaceRecognizerProtocol = request.app.state.face_recognizer
     result: FaceVerificationResult = await recognizer.verify(frame)

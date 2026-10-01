@@ -24,6 +24,9 @@ class FaceVerificationFrame(_StrictFrozenModel):
     captured_at: datetime
     mime_type: Literal["image/jpeg"]
     content: bytes = Field(min_length=1, max_length=5 * 1024 * 1024, exclude=True, repr=False)
+    templates: tuple["EncryptedFaceTemplate", ...] = Field(
+        default=(), max_length=1000, exclude=True, repr=False
+    )
 
     @field_validator("captured_at")
     @classmethod
@@ -37,6 +40,11 @@ class FaceEnrollmentSample(FaceVerificationFrame):
     """One ephemeral sample in the required three-frame enrollment sequence."""
 
     sample_index: Literal[1, 2, 3]
+
+
+class EncryptedFaceTemplate(_StrictFrozenModel):
+    profile_reference_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    encrypted_template: str = Field(min_length=100, max_length=32768, exclude=True, repr=False)
 
 
 class FaceEnrollmentRequest(_StrictFrozenModel):
@@ -88,14 +96,27 @@ class FaceEnrollmentResult(_StrictFrozenModel):
     status: FaceEnrollmentStatus
     model_version: str | None = Field(default=None, min_length=1, max_length=128)
     profile_reference: str | None = Field(default=None, min_length=1, max_length=128)
+    encrypted_template: str | None = Field(
+        default=None, min_length=100, max_length=32768, exclude=True, repr=False
+    )
     reason_code: str = Field(min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$")
 
     @model_validator(mode="after")
     def validate_enrolled_fields(self) -> "FaceEnrollmentResult":
         enrolled = self.status == "ENROLLED"
-        if enrolled and (self.model_version is None or self.profile_reference is None):
-            raise ValueError("ENROLLED requires model_version and profile_reference")
-        if not enrolled and (self.model_version is not None or self.profile_reference is not None):
+        if enrolled and (
+            self.model_version is None
+            or self.profile_reference is None
+            or self.encrypted_template is None
+        ):
+            raise ValueError(
+                "ENROLLED requires model version, profile reference and encrypted template"
+            )
+        if not enrolled and (
+            self.model_version is not None
+            or self.profile_reference is not None
+            or self.encrypted_template is not None
+        ):
             raise ValueError("non-enrolled results must not carry model or profile references")
         return self
 
@@ -116,7 +137,7 @@ class FaceRecognizerProtocol(Protocol):
 class UnavailableFaceRecognizer:
     """Default adapter while no reviewed model and private enrollment store exist."""
 
-    capability_reason = "No configured local model, encrypted template store, or approved provider."
+    capability_reason = "No configured local model, template encryption key, or approved provider."
     capability_status = "not_configured"
 
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:

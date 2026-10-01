@@ -759,6 +759,24 @@ No FPS, latency, throughput, or accuracy claim is considered guaranteed until be
 
 ## Backend Integration
 
+### Database-backed face templates
+
+The opt-in face demo no longer stores templates in a local file. Enrollment returns a Fernet-encrypted
+template over the authenticated service endpoint; the Backend persists it in PostgreSQL together
+with an explicit account/worker link. The AI runtime retains the encryption key, not DB credentials.
+`SMARTSITE_AI_IDENTITY_TEMPLATE_STORE_PATH` is no longer used.
+
+The existing verification endpoint also accepts authenticated JSON containing `jpegBase64` and
+`templates` (`profileReferenceHash`, `encryptedTemplate`). The Backend selects active, site-scoped
+account profiles from PostgreSQL. AI decrypts them transiently and returns only technical match
+evidence. Corruption, wrong keys, incompatible dimensions and ambiguous matches fail closed.
+JPEG requests remain supported for quality assessment, with no database candidates.
+
+Deploy with the paired Backend account-template migration. Legacy local profiles require explicit
+account linking and reenrollment; old files are preserved. Configure the same
+`SMARTSITE_AI_IDENTITY_TEMPLATE_ENCRYPTION_KEY` and compatible model on every AI instance. Startup
+still does not load or download a model; missing model files return unavailable during inference.
+
 Integration notes live in [docs/integration.md](docs/integration.md).
 
 The AI service emits technical detection evidence through `POST /api/v1/integrations/ai/events`. The client validates both request and acknowledgement contracts, retries only transport/408/429/5xx failures, and checks that the returned `eventId` matches the submitted event. The SmartSite backend is responsible for validating events, enforcing business rules, resolving access permission, deduplicating detections, creating Safety Alerts, and maintaining Incident lifecycle.

@@ -48,5 +48,26 @@ def test_identity_enrollment_accepts_exactly_three_ordered_ephemeral_jpegs() -> 
         "status": "AI_UNAVAILABLE",
         "modelVersion": None,
         "profileReference": None,
+        "encryptedTemplate": None,
         "reasonCode": "FACE_MODEL_NOT_CONFIGURED",
     }
+
+
+def test_database_verification_requires_auth_and_does_not_echo_sensitive_payload():
+    url = f"/v1/identity/verifications/{ENROLLMENT_ID}"
+    with make_client() as client:
+        assert client.post(url, json={"jpegBase64": "YQ==", "templates": []}).status_code == 401
+        response = client.post(
+            url,
+            json={"jpegBase64": "invalid-private-face", "templates": []},
+            headers={"authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 422
+        assert "invalid-private-face" not in response.text
+        response = client.post(
+            url,
+            json={"jpegBase64": "YQ==", "templates": []},
+            headers={"authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "AI_UNAVAILABLE"

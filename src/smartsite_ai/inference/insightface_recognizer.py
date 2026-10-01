@@ -1,24 +1,17 @@
-"""Local, opt-in InsightFace adapter for an academic demo.
-
-No model import, download or image/template logging occurs at module import or
-application startup.  The public model is only usable for non-commercial
-research.  Production must replace this adapter with approved licensed models
-and a calibrated threshold/evaluation record.
-"""
+"""Opt-in face inference; Backend PostgreSQL owns encrypted enrollment templates."""
 
 import asyncio
+import hashlib
 import json
 import math
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from cryptography.fernet import Fernet, InvalidToken
 
 from smartsite_ai.config import Settings
 from smartsite_ai.inference.identity import (
+    EncryptedFaceTemplate,
     FaceEnrollmentRequest,
     FaceEnrollmentResult,
     FaceRecognizerProtocol,
@@ -32,68 +25,50 @@ _MODEL_VERSION = "insightface-buffalo_l-public-demo"
 _MODEL_FILES = ("det_10g.onnx", "w600k_r50.onnx")
 
 
-class EncryptedTemplateStore:
-    """Small encrypted template store; it never accepts raw image bytes."""
+class TemplateCipher:
+    """Encrypt for PostgreSQL; never read or write local template files."""
 
-    def __init__(self, path: Path, key: str) -> None:
-        self._path = path
+    def __init__(self, key: str) -> None:
         self._fernet = Fernet(key.encode("ascii"))
 
-    def upsert(self, profile_reference: str, embedding: list[float]) -> None:
-        templates = self._load()
-        templates[profile_reference] = embedding
-        self._write(templates)
+    def encrypt(self, reference: str, embedding: list[float]) -> str:
+        payload = {"reference": reference, "modelVersion": _MODEL_VERSION, "embedding": embedding}
+        return self._fernet.encrypt(
+            json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
 
-    def all(self) -> dict[str, list[float]]:
-        return self._load()
-
-    def _load(self) -> dict[str, list[float]]:
-        if not self._path.exists():
-            return {}
+    def decrypt(self, template: EncryptedFaceTemplate) -> tuple[str, list[float]]:
         try:
-            raw = self._fernet.decrypt(self._path.read_bytes())
-            data: Any = json.loads(raw.decode("utf-8"))
-        except (InvalidToken, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("encrypted face template store cannot be read") from exc
-        if not isinstance(data, dict) or not all(
-            isinstance(key, str)
-            and isinstance(value, list)
-            and value
-            and all(isinstance(item, (float, int)) and math.isfinite(item) for item in value)
-            for key, value in data.items()
+            data = json.loads(self._fernet.decrypt(template.encrypted_template.encode("ascii")))
+        except (InvalidToken, UnicodeError, ValueError) as exc:
+            raise RuntimeError("face template cannot be decrypted") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("face template is malformed")
+        reference, embedding = data.get("reference"), data.get("embedding")
+        if (
+            not isinstance(reference, str)
+            or hashlib.sha256(reference.encode("utf-8")).hexdigest()
+            != template.profile_reference_hash
+            or data.get("modelVersion") != _MODEL_VERSION
+            or not isinstance(embedding, list)
+            or not 1 <= len(embedding) <= 512
+            or not all(type(item) in (float, int) and math.isfinite(item) for item in embedding)
+            or _normalize(embedding) is None
         ):
-            raise RuntimeError("encrypted face template store is malformed")
-        return {key: [float(item) for item in value] for key, value in data.items()}
-
-    def _write(self, templates: dict[str, list[float]]) -> None:
-        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        encrypted = self._fernet.encrypt(
-            json.dumps(templates, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        )
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".templates-", dir=self._path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as output:
-                os.chmod(temporary, 0o600)
-                output.write(encrypted)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(temporary, self._path)
-        finally:
-            if temporary.exists():
-                temporary.unlink(missing_ok=True)
+            raise RuntimeError("face template is malformed or incompatible")
+        return reference, embedding
 
 
 class InsightFaceDemoRecognizer:
     capability_status = "configured_demo"
     capability_reason = (
-        "Academic/non-commercial local InsightFace demo configured. Model loads lazily; "
-        "no liveness detection and no production authorization claim."
+        "Academic/non-commercial InsightFace demo with encrypted database templates. "
+        "Model loads lazily; no liveness detection or production authorization claim."
     )
 
-    def __init__(self, model_root: Path, store: EncryptedTemplateStore, threshold: float) -> None:
+    def __init__(self, model_root: Path, cipher: TemplateCipher, threshold: float) -> None:
         self._model_root = model_root
-        self._store = store
+        self._cipher = cipher
         self._threshold = threshold
         self._analysis: Any | None = None
         self._load_lock = asyncio.Lock()
@@ -120,24 +95,25 @@ class InsightFaceDemoRecognizer:
                 status="QUALITY_FAILED",
                 reason_code="FACE_QUALITY_INSUFFICIENT",
             )
-        profile_reference = f"fp_{request.enrollment_id.hex}"
-        await asyncio.to_thread(self._store.upsert, profile_reference, centroid)
+        reference = f"fp_{request.enrollment_id.hex}"
         return FaceEnrollmentResult(
             enrollment_id=request.enrollment_id,
             status="ENROLLED",
             model_version=_MODEL_VERSION,
-            profile_reference=profile_reference,
+            profile_reference=reference,
+            encrypted_template=self._cipher.encrypt(reference, centroid),
             reason_code="ENROLLED",
         )
 
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
         try:
             embedding = await self._embedding(frame.content)
+            templates = [self._cipher.decrypt(template) for template in frame.templates]
         except RuntimeError:
             return FaceVerificationResult(
                 verification_id=frame.verification_id,
                 status="AI_UNAVAILABLE",
-                reason_code="FACE_MODEL_UNAVAILABLE",
+                reason_code="FACE_MODEL_OR_TEMPLATE_UNAVAILABLE",
             )
         if embedding is None:
             return FaceVerificationResult(
@@ -145,20 +121,30 @@ class InsightFaceDemoRecognizer:
                 status="QUALITY_FAILED",
                 reason_code="FACE_QUALITY_INSUFFICIENT",
             )
-        templates = await asyncio.to_thread(self._store.all)
         if not templates:
             return FaceVerificationResult(
-                verification_id=frame.verification_id, status="UNKNOWN", reason_code="NO_ENROLLMENTS"
+                verification_id=frame.verification_id,
+                status="UNKNOWN",
+                reason_code="NO_ENROLLMENTS",
             )
-        reference, score = max(
-            ((reference, _cosine(embedding, template)) for reference, template in templates.items()),
-            key=lambda entry: entry[1],
-        )
-        if score < self._threshold:
+        try:
+            scores = sorted(
+                ((reference, _cosine(embedding, template)) for reference, template in templates),
+                key=lambda entry: entry[1],
+                reverse=True,
+            )
+        except RuntimeError:
+            return FaceVerificationResult(
+                verification_id=frame.verification_id,
+                status="AI_UNAVAILABLE",
+                reason_code="FACE_TEMPLATE_INCOMPATIBLE",
+            )
+        reference, score = scores[0]
+        if score < self._threshold or (len(scores) > 1 and scores[1][1] >= self._threshold):
             return FaceVerificationResult(
                 verification_id=frame.verification_id,
                 status="LOW_CONFIDENCE",
-                reason_code="FACE_SCORE_BELOW_DEMO_THRESHOLD",
+                reason_code="FACE_MATCH_UNCERTAIN",
             )
         return FaceVerificationResult(
             verification_id=frame.verification_id,
@@ -187,7 +173,6 @@ class InsightFaceDemoRecognizer:
 
 
 def _load_analysis(model_root: Path) -> Any:
-    # Imported only after checked local artifacts exist, preventing model-zoo downloads.
     from insightface.app import FaceAnalysis
 
     analysis = FaceAnalysis(
@@ -215,7 +200,9 @@ def _embedding_from_jpeg(analysis: Any, jpeg: bytes) -> list[float] | None:
 
 def _normalize(values: list[float]) -> list[float] | None:
     length = math.sqrt(sum(value * value for value in values))
-    return None if length == 0.0 else [value / length for value in values]
+    return (
+        None if not math.isfinite(length) or length == 0.0 else [value / length for value in values]
+    )
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -225,21 +212,17 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 
 def build_face_recognizer(settings: Settings) -> FaceRecognizerProtocol:
-    if not settings.identity_demo_mode:
+    if not settings.identity_demo_mode or settings.identity_model_root is None:
         return UnavailableFaceRecognizer()
     if (
-        settings.identity_model_root is None
-        or settings.identity_template_store_path is None
+        not settings.identity_model_root.is_absolute()
         or settings.identity_template_encryption_key is None
     ):
         return UnavailableFaceRecognizer()
-    if not settings.identity_model_root.is_absolute() or not settings.identity_template_store_path.is_absolute():
-        return UnavailableFaceRecognizer()
     try:
-        store = EncryptedTemplateStore(
-            settings.identity_template_store_path,
-            settings.identity_template_encryption_key.get_secret_value(),
-        )
+        cipher = TemplateCipher(settings.identity_template_encryption_key.get_secret_value())
     except (ValueError, UnicodeEncodeError):
         return UnavailableFaceRecognizer()
-    return InsightFaceDemoRecognizer(settings.identity_model_root, store, settings.identity_match_threshold)
+    return InsightFaceDemoRecognizer(
+        settings.identity_model_root, cipher, settings.identity_match_threshold
+    )

@@ -308,7 +308,7 @@ def preflight_arguments(args: argparse.Namespace) -> TrainingConfiguration:
     _validate_class_map(data)
     _validate_dataset_paths(data, data_config)
     try:
-        dataset_aggregate_sha256 = verify_prepared_dataset(data_config)
+        dataset_aggregate_sha256 = verify_prepared_dataset(data_config, reject_split_overlap=True)
     except DatasetIntegrityError as error:
         raise TrainingConfigurationError(f"prepared dataset integrity failed: {error}") from error
     output_root = _validate_output_root(args.output_root)
@@ -512,7 +512,9 @@ def execute_training(
         raise TrainingConfigurationError(f"device is unavailable: {error}") from error
     configuration = replace(configuration, device=resolved_device)
     try:
-        before_dataset_aggregate = verify_prepared_dataset(configuration.data_config)
+        before_dataset_aggregate = verify_prepared_dataset(
+            configuration.data_config, reject_split_overlap=True
+        )
     except DatasetIntegrityError as error:
         raise TrainingConfigurationError(f"prepared dataset integrity failed: {error}") from error
     if before_dataset_aggregate != configuration.dataset_aggregate_sha256:
@@ -529,7 +531,9 @@ def execute_training(
     if _sha256(configuration.base_weights) != base_weights_sha256:
         raise TrainingExecutionError("base weights changed during training")
     try:
-        after_dataset_aggregate = verify_prepared_dataset(configuration.data_config)
+        after_dataset_aggregate = verify_prepared_dataset(
+            configuration.data_config, reject_split_overlap=True
+        )
     except DatasetIntegrityError as error:
         raise TrainingExecutionError(
             f"prepared dataset integrity failed after training: {error}"

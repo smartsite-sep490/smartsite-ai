@@ -531,6 +531,14 @@ SHA and dirty state, verified prepared-dataset aggregate, and fine-tuned checkpo
 recomputes every prepared file before and after provider execution; a changed, missing, extra,
 linked, or unmanifested file fails the run. A failed or interrupted run has no `COMPLETE` manifest.
 
+Training also rejects identical image bytes across `train/images`, `val/images` and
+`test/images`, and Roboflow `.rf.` variants sharing an original-image filename across
+those splits. This check uses the byte-verified inventory before provider loading and
+again before/after training. Same-split duplicates do not trigger this cross-split gate.
+It does not detect all similar images or prove scene/video/site independence; annotation,
+source-group and held-out evaluation review remain required. Historical artifact/evaluation
+inspection keeps byte-integrity checks without retroactively rewriting old provenance.
+
 The input `data.yaml` must reference existing local `train`, `val`, and `test` inputs and already
 use this exact class ID map:
 

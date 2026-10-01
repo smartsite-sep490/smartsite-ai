@@ -21,12 +21,24 @@ from smartsite_ai.tools.train_ppe import (
 from smartsite_ai.training.dataset_integrity import aggregate_inventory, inventory_record
 
 
+def test_same_split_variants_are_not_cross_split_leakage() -> None:
+    from smartsite_ai.training.dataset_integrity import _reject_cross_split_image_overlap
+
+    _reject_cross_split_image_overlap(
+        [
+            {"path": "train/images/original.rf.one.jpg", "sha256": "a" * 64},
+            {"path": "train/images/original.rf.two.jpg", "sha256": "a" * 64},
+            {"path": "val/images/unrelated.jpg", "sha256": "b" * 64},
+        ]
+    )
+
+
 def _write_inputs(tmp_path: Path, *, names: str | None = None) -> tuple[Path, Path, Path]:
     dataset_root = tmp_path / "dataset"
     for split in ("train", "val", "test"):
         (dataset_root / split / "images").mkdir(parents=True, exist_ok=True)
         (dataset_root / split / "labels").mkdir(parents=True, exist_ok=True)
-        (dataset_root / split / "images" / f"{split}.jpg").write_bytes(b"image")
+        (dataset_root / split / "images" / f"{split}.jpg").write_bytes(f"image-{split}".encode())
         (dataset_root / split / "labels" / f"{split}.txt").write_text(
             "0 0.5 0.5 0.2 0.2\n", encoding="utf-8"
         )
@@ -289,6 +301,37 @@ def test_preflight_rejects_unmanifested_dataset_file(tmp_path: Path) -> None:
 
     with pytest.raises(TrainingConfigurationError, match="differ from preparation manifest"):
         preflight_arguments(build_parser().parse_args(arguments))
+
+
+@pytest.mark.parametrize("overlap", ["bytes", "original-image"])
+def test_training_rejects_cross_split_overlap_before_loading_provider(
+    tmp_path: Path, overlap: str
+) -> None:
+    arguments = _argv(tmp_path)
+    root = tmp_path / "dataset"
+    train = root / "train" / "images" / "train.jpg"
+    test = root / "test" / "images" / "test.jpg"
+    if overlap == "bytes":
+        test.write_bytes(train.read_bytes())
+    else:
+        train.rename(train.with_name("original_jpg.rf.train123.jpg"))
+        test.rename(test.with_name("original_jpg.rf.test456.jpg"))
+    manifest_path = root / "preparation.manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    files = [
+        inventory_record(path, root)
+        for path in sorted(
+            (path for path in root.rglob("*") if path.is_file() and path != manifest_path),
+            key=lambda path: path.relative_to(root).as_posix(),
+        )
+    ]
+    manifest["outputFiles"] = files
+    manifest["outputAggregate"]["sha256"] = aggregate_inventory(files)
+    manifest_path.write_text(json.dumps(manifest))
+    provider = SuccessfulProvider()
+    assert run(arguments, services=_services(provider)) == 1
+    assert provider.received == []
+    assert not (tmp_path / "runs" / "ppe-run-001").exists()
 
 
 def test_preflight_rejects_relative_input_and_output_paths(tmp_path: Path) -> None:

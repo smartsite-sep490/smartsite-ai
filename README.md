@@ -409,6 +409,23 @@ attestations, not automated certification. Real recordings and review ledgers re
 Full tracker selection still requires independently annotated media, boxes/occlusion review,
 held-out splits, and integrated PPE/event measurements.
 
+## Reviewed frame-level Person count metrics
+
+`evaluation.person_count_metrics.compute_person_count_metrics` is a pure diagnostic for
+caller-supplied `PersonCountSample` rows (`frameId`, `predictedCount`, `groundTruthCount`,
+`reviewStatus`). Only `REVIEWED` rows with an explicit non-negative integer ground-truth count
+are scored. `UNREVIEWED` and `EXCLUDED` rows require null truth and appear in separate coverage
+lists. Missing annotations are never inferred to mean an empty frame. Duplicate frame IDs fail.
+
+The report records MAE, RMSE, signed error, exact-count fraction, over/under-count frame totals,
+and sums over reviewed frames only. No reviewed rows produce undefined metrics with a reason,
+not a perfect score. Frame totals are not unique Workers or whole-site headcounts. A correct count
+can still contain wrongly localized boxes; detection, association, tracking and event metrics
+must be assessed separately. `REVIEWED` is a caller assertion, not proof of human adjudication.
+The report always has `is_model_acceptance=false`; it does not change the existing accuracy gate,
+promote a checkpoint, or automatically mark vendor labels as reviewed. Real annotations and
+provenance stay outside Git. The existing evaluation CLI does not yet ingest these count rows.
+
 ## Official YOLO11s PPE evaluation gate
 
 The selected gate evaluates a locally fine-tuned **official Ultralytics YOLO11s detector** against

@@ -9,7 +9,7 @@ import base64
 import binascii
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
-from typing import Final
+from typing import Final, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
@@ -62,6 +62,9 @@ class DatabaseVerification(BaseModel):
         alias="jpegBase64", min_length=1, max_length=7 * 1024 * 1024, repr=False
     )
     templates: list[DatabaseTemplate] = Field(max_length=1000, repr=False)
+    enrollment_target: Literal["front", "left", "right"] | None = Field(
+        default=None, alias="enrollmentTarget"
+    )
 
 
 class VerificationResponse(BaseModel):
@@ -204,9 +207,11 @@ async def verify_face(verification_id: UUID, request: Request) -> VerificationRe
         if len(body) > 48 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="Face verification exceeds the size limit")
     templates: tuple[EncryptedFaceTemplate, ...] = ()
+    enrollment_target = None
     if content_type == "application/json":
         try:
             payload = DatabaseVerification.model_validate_json(body)
+            enrollment_target = payload.enrollment_target
             content = base64.b64decode(payload.jpeg_base64, validate=True)
             templates = tuple(
                 EncryptedFaceTemplate(
@@ -229,6 +234,7 @@ async def verify_face(verification_id: UUID, request: Request) -> VerificationRe
         mime_type="image/jpeg",
         content=content,
         templates=templates,
+        enrollment_target=enrollment_target,
     )
     recognizer: FaceRecognizerProtocol = request.app.state.face_recognizer
     result: FaceVerificationResult = await recognizer.verify(frame)

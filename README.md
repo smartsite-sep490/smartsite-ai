@@ -165,6 +165,23 @@ readiness.
 
 ## Requirements
 
+### Guided enrollment quality (demo policy v1)
+
+Authenticated verification JSON can include `enrollmentTarget: "front" | "left" | "right"`
+with `templates: []`. This is a quality-only operation, never identity matching or permission.
+It returns `UNKNOWN` + `FACE_QUALITY_ACCEPTED` on success, `QUALITY_FAILED` with a safe reason
+on rejection, or `AI_UNAVAILABLE`. Enrollment independently rechecks all three ordered poses
+and checks embedding consistency before encrypting the template.
+
+Versioned demo checks: one detected face, detector confidence >=0.70, face dimensions >=160px,
+width/frame ratio >=0.18 and <=0.75, height/frame <=0.90, horizontal/vertical center offsets
+<=0.22/0.25, grayscale mean 45..215, face-crop Laplacian variance >=45, eye distance >=20px,
+head roll <=18 degrees. Nose displacement projected onto the eye axis, normalized by eye
+distance, is within +/-0.10 for front, +0.12..+0.50 for the user's left, -0.50..-0.12 for right.
+Raw frames are unmirrored; only Web previews are mirrored. These are tunable, uncalibrated
+heuristics, not yaw-angle measurements, anti-spoofing or production biometric validation.
+Calibrate on permitted real-camera captures before making accuracy claims.
+
 - Python **3.12.x**
 - uv **0.11.6**
 

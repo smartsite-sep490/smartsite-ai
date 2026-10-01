@@ -70,7 +70,11 @@ def test_enrollment_can_be_matched_after_ai_restart_using_database_ciphertext(
     async def embedding(_self, _jpeg):
         return [0.6, 0.8]
 
+    async def quality(_self, _jpeg, _target):
+        return "FACE_QUALITY_ACCEPTED"
+
     monkeypatch.setattr(InsightFaceDemoRecognizer, "_embedding", embedding)
+    monkeypatch.setattr(InsightFaceDemoRecognizer, "_quality", quality)
     enrollment_id = uuid4()
     samples = tuple(
         FaceEnrollmentSample(
@@ -110,6 +114,54 @@ def test_enrollment_can_be_matched_after_ai_restart_using_database_ciphertext(
         tmp_path, TemplateCipher(Fernet.generate_key().decode()), 0.45
     )
     assert asyncio.run(wrong_key.verify(frame)).status == "AI_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("failure", ["pose", "identity"])
+def test_enrollment_rechecks_pose_and_same_identity_before_creating_template(
+    tmp_path, monkeypatch, failure
+):
+    from smartsite_ai.inference.identity import FaceEnrollmentRequest, FaceEnrollmentSample
+
+    recognizer = InsightFaceDemoRecognizer(
+        tmp_path, TemplateCipher(Fernet.generate_key().decode()), 0.45
+    )
+    checked = []
+
+    async def quality(_jpeg, target):
+        checked.append(target)
+        return (
+            "FACE_POSE_LEFT_REQUIRED"
+            if failure == "pose" and target == "left"
+            else "FACE_QUALITY_ACCEPTED"
+        )
+
+    async def embedding(jpeg):
+        assert failure != "pose", "Rejected quality must not create an embedding"
+        return [1.0, 0.0] if jpeg == b"1" else [0.0, 1.0]
+
+    monkeypatch.setattr(recognizer, "_quality", quality)
+    monkeypatch.setattr(recognizer, "_embedding", embedding)
+    enrollment_id = uuid4()
+    samples = tuple(
+        FaceEnrollmentSample(
+            verification_id=enrollment_id,
+            captured_at=datetime.now(UTC),
+            mime_type="image/jpeg",
+            content=str(index).encode(),
+            sample_index=index,
+        )
+        for index in (1, 2, 3)
+    )
+    result = asyncio.run(
+        recognizer.enroll(FaceEnrollmentRequest(enrollment_id=enrollment_id, samples=samples))
+    )
+    assert checked == (["front", "left"] if failure == "pose" else ["front", "left", "right"])
+    assert result.status == "QUALITY_FAILED"
+    assert result.reason_code == (
+        "FACE_POSE_LEFT_REQUIRED" if failure == "pose" else "FACE_SAMPLES_INCONSISTENT"
+    )
+    assert result.encrypted_template is None
+    assert result.profile_reference is None
 
 
 def test_cipher_rejects_template_swaps_corruption_and_incompatible_dimensions(

@@ -10,6 +10,11 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from smartsite_ai.config import Settings
+from smartsite_ai.inference.enrollment_quality import (
+    QUALITY_ACCEPTED,
+    CaptureTarget,
+    assess_enrollment_jpeg,
+)
 from smartsite_ai.inference.identity import (
     EncryptedFaceTemplate,
     FaceEnrollmentRequest,
@@ -75,8 +80,16 @@ class InsightFaceDemoRecognizer:
 
     async def enroll(self, request: FaceEnrollmentRequest) -> FaceEnrollmentResult:
         try:
+            for sample, target in zip(request.samples, ("front", "left", "right"), strict=True):
+                reason = await self._quality(sample.content, target)
+                if reason != QUALITY_ACCEPTED:
+                    return FaceEnrollmentResult(
+                        enrollment_id=request.enrollment_id,
+                        status="QUALITY_FAILED",
+                        reason_code=reason,
+                    )
             embeddings = [await self._embedding(sample.content) for sample in request.samples]
-        except RuntimeError:
+        except (RuntimeError, AttributeError, ValueError):
             return FaceEnrollmentResult(
                 enrollment_id=request.enrollment_id,
                 status="AI_UNAVAILABLE",
@@ -87,6 +100,12 @@ class InsightFaceDemoRecognizer:
                 enrollment_id=request.enrollment_id,
                 status="QUALITY_FAILED",
                 reason_code="FACE_QUALITY_INSUFFICIENT",
+            )
+        if any(_cosine(embeddings[0], embedding) < self._threshold for embedding in embeddings[1:]):
+            return FaceEnrollmentResult(
+                enrollment_id=request.enrollment_id,
+                status="QUALITY_FAILED",
+                reason_code="FACE_SAMPLES_INCONSISTENT",
             )
         centroid = _normalize([sum(items) / len(items) for items in zip(*embeddings, strict=True)])
         if centroid is None:
@@ -106,6 +125,20 @@ class InsightFaceDemoRecognizer:
         )
 
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
+        if frame.enrollment_target is not None:
+            try:
+                reason = await self._quality(frame.content, frame.enrollment_target)
+            except (RuntimeError, AttributeError, ValueError):
+                return FaceVerificationResult(
+                    verification_id=frame.verification_id,
+                    status="AI_UNAVAILABLE",
+                    reason_code="FACE_MODEL_UNAVAILABLE",
+                )
+            return FaceVerificationResult(
+                verification_id=frame.verification_id,
+                status="UNKNOWN" if reason == QUALITY_ACCEPTED else "QUALITY_FAILED",
+                reason_code=reason,
+            )
         try:
             embedding = await self._embedding(frame.content)
             templates = [self._cipher.decrypt(template) for template in frame.templates]
@@ -158,6 +191,10 @@ class InsightFaceDemoRecognizer:
     async def _embedding(self, jpeg: bytes) -> list[float] | None:
         analysis = await self._analysis_instance()
         return await asyncio.to_thread(_embedding_from_jpeg, analysis, jpeg)
+
+    async def _quality(self, jpeg: bytes, target: CaptureTarget) -> str:
+        analysis = await self._analysis_instance()
+        return await asyncio.to_thread(assess_enrollment_jpeg, analysis, jpeg, target)
 
     async def _analysis_instance(self) -> Any:
         if self._analysis is not None:

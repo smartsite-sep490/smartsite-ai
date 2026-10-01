@@ -71,3 +71,21 @@ def test_database_verification_requires_auth_and_does_not_echo_sensitive_payload
         )
         assert response.status_code == 200
         assert response.json()["status"] == "AI_UNAVAILABLE"
+        response = client.post(
+            url,
+            json={"jpegBase64": "YQ==", "templates": [], "enrollmentTarget": "left"},
+            headers={"authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "AI_UNAVAILABLE"
+        response = client.post(
+            url,
+            json={
+                "jpegBase64": "YQ==",
+                "templates": [],
+                "enrollmentTarget": "secret-invalid-target",
+            },
+            headers={"authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 422
+        assert "secret-invalid-target" not in response.text

@@ -24,6 +24,7 @@ class FaceVerificationFrame(_StrictFrozenModel):
     captured_at: datetime
     mime_type: Literal["image/jpeg"]
     content: bytes = Field(min_length=1, max_length=5 * 1024 * 1024, exclude=True, repr=False)
+    enrollment_target: Literal["front", "left", "right"] | None = None
     templates: tuple["EncryptedFaceTemplate", ...] = Field(
         default=(), max_length=1000, exclude=True, repr=False
     )

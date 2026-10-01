@@ -193,6 +193,10 @@ class StreamWorker:
                     # Ingestion inner loop
                     while not self._stop_event.is_set():
                         frame = await self.source.read_frame()
+                        # Closing the source during stop can release this read with
+                        # EOF or a late frame before the loop task is cancelled.
+                        if self._stop_event.is_set():
+                            return
 
                         if frame is None:
                             # Remote stream EOF or closed
@@ -284,6 +288,10 @@ class StreamWorker:
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
+                    # A read interrupted by intentional source closure is not a
+                    # stream failure. Terminal cleanup still verifies release.
+                    if self._stop_event.is_set():
+                        break
                     self.last_error = classify_error_reason(exc)
                     self.consecutive_failures += 1
                     self._consecutive_successful_frames = 0

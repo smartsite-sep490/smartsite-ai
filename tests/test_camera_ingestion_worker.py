@@ -8,7 +8,7 @@ import pytest
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.source import SourceConnectionError
+from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.ingestion.testing import (
     FakeBlockingSource,
@@ -26,6 +26,68 @@ async def wait_until(predicate: Callable[[], bool], max_iterations: int = 200) -
             return
         await asyncio.sleep(0)
     raise TimeoutError("Predicate condition not met within bounded cooperative iterations")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("completion", ["eof", "frame", "read_error"])
+async def test_stop_unblocks_read_without_reporting_disconnect(completion: str) -> None:
+    """An intentional close may finish an in-flight read before loop cancellation."""
+
+    class CloseUnblocksReadSource:
+        source_id = "cam-stop-read"
+
+        def __init__(self) -> None:
+            self.read_started = asyncio.Event()
+            self.close_requested = asyncio.Event()
+            self.read_completed = asyncio.Event()
+            self.connect_calls = 0
+            self.close_calls = 0
+
+        async def connect(self) -> None:
+            self.connect_calls += 1
+
+        async def read_frame(self) -> FrameEnvelope | None:
+            self.read_started.set()
+            await self.close_requested.wait()
+            self.read_completed.set()
+            if completion == "read_error":
+                raise SourceReadError("Read interrupted by source close")
+            if completion == "frame":
+                return make_test_frame(self.source_id, 0)
+            return None
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            self.close_requested.set()
+            # Force the pending read to complete before stop can cancel the loop.
+            await self.read_completed.wait()
+
+    source = CloseUnblocksReadSource()
+    worker = StreamWorker(
+        config=StreamConfig(
+            stream_id=source.source_id,
+            camera_external_id=f"ext-{source.source_id}",
+            source_url="rtsp://192.168.1.50/live",
+            is_live=True,
+        ),
+        source=source,
+    )
+    await worker.start()
+    try:
+        await asyncio.wait_for(source.read_started.wait(), timeout=1.0)
+    finally:
+        await asyncio.wait_for(worker.stop(), timeout=1.0)
+
+    status = worker.snapshot()
+    assert status.state == StreamState.STOPPED
+    assert status.metrics.connection_errors == 0
+    assert status.metrics.read_errors == 0
+    assert status.metrics.reconnect_attempts == 0
+    assert status.metrics.consecutive_failures == 0
+    assert status.metrics.last_error is None
+    assert status.metrics.frames_enqueued == 0
+    assert source.connect_calls == 1
+    assert source.close_calls == 1
 
 
 @pytest.mark.anyio

@@ -9,6 +9,7 @@ description = "SmartSite AI service foundation and capability contract"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  "cryptography==46.0.5",
   "fastapi==0.141.1",
   "httpx==0.28.1",
   "jcs==0.2.1",
@@ -19,6 +20,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+identity = [
+  "insightface==0.7.3",
+  "onnxruntime==1.24.2",
+  "opencv-python-headless==4.11.0.86",
+]
 vision = [
   "pyyaml==6.0.3",
   "supervision==0.30.4",
@@ -36,6 +42,7 @@ cuda126 = [
 
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
+smartsite-ai-install-demo-model = "smartsite_ai.tools.install_demo_face_model:run"
 smartsite-ai-camera-worker = "smartsite_ai.tools.run_camera_worker:main"
 smartsite-ai-camera-runtime = "smartsite_ai.tools.run_camera_runtime:main"
 smartsite-ai-source-probe = "smartsite_ai.tools.probe_source:main"

@@ -165,6 +165,23 @@ readiness.
 
 ## Requirements
 
+### Guided enrollment quality (demo policy v1)
+
+Authenticated verification JSON can include `enrollmentTarget: "front" | "left" | "right"`
+with `templates: []`. This is a quality-only operation, never identity matching or permission.
+It returns `UNKNOWN` + `FACE_QUALITY_ACCEPTED` on success, `QUALITY_FAILED` with a safe reason
+on rejection, or `AI_UNAVAILABLE`. Enrollment independently rechecks all three ordered poses
+and checks embedding consistency before encrypting the template.
+
+Versioned demo checks: one detected face, detector confidence >=0.70, face dimensions >=160px,
+width/frame ratio >=0.18 and <=0.75, height/frame <=0.90, horizontal/vertical center offsets
+<=0.22/0.25, grayscale mean 45..215, face-crop Laplacian variance >=45, eye distance >=20px,
+head roll <=18 degrees. Nose displacement projected onto the eye axis, normalized by eye
+distance, is within +/-0.10 for front, +0.12..+0.50 for the user's left, -0.50..-0.12 for right.
+Raw frames are unmirrored; only Web previews are mirrored. These are tunable, uncalibrated
+heuristics, not yaw-angle measurements, anti-spoofing or production biometric validation.
+Calibrate on permitted real-camera captures before making accuracy claims.
+
 - Python **3.12.x**
 - uv **0.11.6**
 
@@ -759,11 +776,31 @@ No FPS, latency, throughput, or accuracy claim is considered guaranteed until be
 
 ## Backend Integration
 
+### Database-backed face templates
+
+The opt-in face demo no longer stores templates in a local file. Enrollment returns a Fernet-encrypted
+template over the authenticated service endpoint; the Backend persists it in PostgreSQL together
+with an explicit account/worker link. The AI runtime retains the encryption key, not DB credentials.
+`SMARTSITE_AI_IDENTITY_TEMPLATE_STORE_PATH` is no longer used.
+
+The existing verification endpoint also accepts authenticated JSON containing `jpegBase64` and
+`templates` (`profileReferenceHash`, `encryptedTemplate`). The Backend selects active, site-scoped
+account profiles from PostgreSQL. AI decrypts them transiently and returns only technical match
+evidence. Corruption, wrong keys, incompatible dimensions and ambiguous matches fail closed.
+JPEG requests remain supported for quality assessment, with no database candidates.
+
+Deploy with the paired Backend account-template migration. Legacy local profiles require explicit
+account linking and reenrollment; old files are preserved. Configure the same
+`SMARTSITE_AI_IDENTITY_TEMPLATE_ENCRYPTION_KEY` and compatible model on every AI instance. Startup
+still does not load or download a model; missing model files return unavailable during inference.
+
 Integration notes live in [docs/integration.md](docs/integration.md).
 
 The AI service emits technical detection evidence through `POST /api/v1/integrations/ai/events`. The client validates both request and acknowledgement contracts, retries only transport/408/429/5xx failures, and checks that the returned `eventId` matches the submitted event. The SmartSite backend is responsible for validating events, enforcing business rules, resolving access permission, deduplicating detections, creating Safety Alerts, and maintaining Incident lifecycle.
 
 ## Security and Privacy
+
+Gate presence mode (`gatePresenceSession`, 64 hex characters scoped by Backend) cannot carry templates or enrollment targets. It returns only technical presence reasons, never identities/authorization. Two stable observations trigger a new-face signal; the same face suppresses duplicate gate verification. Confirmed absence (2 seconds) permits reentry. Continuity embeddings stay in bounded transient RAM (128 sessions, 30-second idle expiry), with no DB/file writes. Similarity thresholds 0.55 (same/stable) and 0.45 (definitely different) are demo heuristics, not calibrated person-change accuracy or liveness.
 
 AI and biometric data must be treated as sensitive. Important principles include secrets outside source control, least-privilege service authentication, encrypted transport, controlled evidence access, explicit biometric retention rules, auditability, and no identity assignment below the approved confidence policy.
 

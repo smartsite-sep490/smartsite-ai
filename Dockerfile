@@ -1,6 +1,9 @@
 FROM python:3.12.13-slim-bookworm AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src

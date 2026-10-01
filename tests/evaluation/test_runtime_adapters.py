@@ -1,3 +1,4 @@
+import importlib.util
 import os
 import subprocess
 import sys
@@ -365,6 +366,10 @@ def _validation_arguments(tmp_path: Path) -> ProviderValidationArguments:
 def test_real_ultralytics_import_and_font_lookup_stay_in_runtime_sandbox(
     tmp_path: Path,
 ) -> None:
+    # Core CI intentionally omits vision extras. Do not import the real provider
+    # here: its first import must still happen inside the subprocess sandbox.
+    if importlib.util.find_spec("ultralytics") is None:
+        pytest.skip("real-provider sandbox smoke requires the optional vision extra")
     outside = tmp_path / "outside-config"
     outside.mkdir()
     source_root = Path(__file__).parents[2] / "src"

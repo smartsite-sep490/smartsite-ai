@@ -10,6 +10,9 @@ from fastapi import FastAPI, Response, WebSocket
 from pydantic import BaseModel
 
 from smartsite_ai.config import Settings
+from smartsite_ai.identity_api import _EnrollmentBuffer
+from smartsite_ai.identity_api import router as identity_router
+from smartsite_ai.inference.insightface_recognizer import build_face_recognizer
 from smartsite_ai.realtime import parse_zone_polygon, stream_realtime
 
 
@@ -26,7 +29,7 @@ class ReadyHealth(BaseModel):
 
 
 class Capability(BaseModel):
-    status: Literal["not_configured"] = "not_configured"
+    status: Literal["not_configured", "configured_demo"] = "not_configured"
     provider: str | None = None
     reason: str
 
@@ -60,6 +63,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if expose_docs else None,
     )
     app.state.api_ready = False
+    app.state.identity_service_token = (
+        settings.identity_service_token.get_secret_value()
+        if settings.identity_service_token is not None
+        else None
+    )
+    app.state.identity_enrollment_buffer = _EnrollmentBuffer()
+    app.state.face_recognizer = build_face_recognizer(settings)
     app.state.realtime_lock = asyncio.Lock()
 
     @app.get("/health/live", response_model=LiveHealth, tags=["health"])
@@ -97,8 +107,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     reason="No zones, tracking worker or backend policy contract configured.",
                 ),
                 "identity": Capability(
+                    status=app.state.face_recognizer.capability_status,
                     provider="insightface (candidate)",
-                    reason="Candidate only; no identity adapter, model or enrollment store.",
+                    reason=app.state.face_recognizer.capability_reason,
                 ),
                 "openai": Capability(
                     provider="openai",
@@ -106,6 +117,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
             }
         )
+
+    app.include_router(identity_router)
 
     def _realtime_authorized(websocket: WebSocket) -> bool:
         expected = settings.backend_service_token

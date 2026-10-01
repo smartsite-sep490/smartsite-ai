@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from smartsite_ai.inference.enrollment_quality import (
     CaptureTarget,
     assess_enrollment_jpeg,
 )
+from smartsite_ai.inference.gate_continuity import GateContinuity
 from smartsite_ai.inference.identity import (
     EncryptedFaceTemplate,
     FaceEnrollmentRequest,
@@ -77,6 +79,8 @@ class InsightFaceDemoRecognizer:
         self._threshold = threshold
         self._analysis: Any | None = None
         self._load_lock = asyncio.Lock()
+        self._continuity = GateContinuity()
+        self._presence_lock = asyncio.Lock()
 
     async def enroll(self, request: FaceEnrollmentRequest) -> FaceEnrollmentResult:
         try:
@@ -125,6 +129,37 @@ class InsightFaceDemoRecognizer:
         )
 
     async def verify(self, frame: FaceVerificationFrame) -> FaceVerificationResult:
+        if frame.gate_presence_session is not None:
+            async with self._presence_lock:
+                try:
+                    reason = await self._quality(frame.content, None)
+                    if reason == "FACE_NOT_FOUND":
+                        self._continuity.absent(frame.gate_presence_session, time.monotonic())
+                    if reason == QUALITY_ACCEPTED:
+                        asyncio.get_running_loop().call_later(
+                            30, lambda: self._continuity.expire(time.monotonic())
+                        )
+                        embedding = await self._embedding(frame.content)
+                        reason = (
+                            self._continuity.observe(
+                                frame.gate_presence_session, embedding, time.monotonic()
+                            )
+                            if embedding is not None
+                            else "FACE_QUALITY_INSUFFICIENT"
+                        )
+                    return FaceVerificationResult(
+                        verification_id=frame.verification_id,
+                        status="UNKNOWN"
+                        if reason.startswith("FACE_PRESENCE_")
+                        else "QUALITY_FAILED",
+                        reason_code=reason,
+                    )
+                except (RuntimeError, AttributeError, ValueError):
+                    return FaceVerificationResult(
+                        verification_id=frame.verification_id,
+                        status="AI_UNAVAILABLE",
+                        reason_code="FACE_MODEL_UNAVAILABLE",
+                    )
         if frame.enrollment_target is not None:
             try:
                 reason = await self._quality(frame.content, frame.enrollment_target)
@@ -192,7 +227,7 @@ class InsightFaceDemoRecognizer:
         analysis = await self._analysis_instance()
         return await asyncio.to_thread(_embedding_from_jpeg, analysis, jpeg)
 
-    async def _quality(self, jpeg: bytes, target: CaptureTarget) -> str:
+    async def _quality(self, jpeg: bytes, target: CaptureTarget | None) -> str:
         analysis = await self._analysis_instance()
         return await asyncio.to_thread(assess_enrollment_jpeg, analysis, jpeg, target)
 

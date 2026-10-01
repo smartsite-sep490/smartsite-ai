@@ -800,6 +800,8 @@ The AI service emits technical detection evidence through `POST /api/v1/integrat
 
 ## Security and Privacy
 
+Gate presence mode (`gatePresenceSession`, 64 hex characters scoped by Backend) cannot carry templates or enrollment targets. It returns only technical presence reasons, never identities/authorization. Two stable observations trigger a new-face signal; the same face suppresses duplicate gate verification. Confirmed absence (2 seconds) permits reentry. Continuity embeddings stay in bounded transient RAM (128 sessions, 30-second idle expiry), with no DB/file writes. Similarity thresholds 0.55 (same/stable) and 0.45 (definitely different) are demo heuristics, not calibrated person-change accuracy or liveness.
+
 AI and biometric data must be treated as sensitive. Important principles include secrets outside source control, least-privilege service authentication, encrypted transport, controlled evidence access, explicit biometric retention rules, auditability, and no identity assignment below the approved confidence policy.
 
 ## Related Repository

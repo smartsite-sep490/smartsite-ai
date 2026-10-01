@@ -11,7 +11,7 @@ CaptureTarget = Literal["front", "left", "right"]
 QUALITY_ACCEPTED = "FACE_QUALITY_ACCEPTED"
 
 
-def assess_enrollment_jpeg(analysis: Any, jpeg: bytes, target: CaptureTarget) -> str:
+def assess_enrollment_jpeg(analysis: Any, jpeg: bytes, target: CaptureTarget | None) -> str:
     import cv2
     import numpy as np
 
@@ -54,6 +54,8 @@ def assess_enrollment_jpeg(analysis: Any, jpeg: bytes, target: CaptureTarget) ->
         return "FACE_TOO_BRIGHT"
     if float(cv2.Laplacian(gray, cv2.CV_64F).var()) < 45:
         return "FACE_BLURRY"
+    if target is None:
+        return QUALITY_ACCEPTED
     eyes = sorted(points[:2], key=lambda point: point[0])
     eye_axis = eyes[1] - eyes[0]
     distance = float(np.linalg.norm(eye_axis))

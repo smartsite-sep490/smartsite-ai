@@ -62,6 +62,9 @@ class DatabaseVerification(BaseModel):
         alias="jpegBase64", min_length=1, max_length=7 * 1024 * 1024, repr=False
     )
     templates: list[DatabaseTemplate] = Field(max_length=1000, repr=False)
+    gate_presence_session: str | None = Field(
+        default=None, alias="gatePresenceSession", pattern=r"^[a-f0-9]{64}$", repr=False
+    )
     enrollment_target: Literal["front", "left", "right"] | None = Field(
         default=None, alias="enrollmentTarget"
     )
@@ -208,10 +211,16 @@ async def verify_face(verification_id: UUID, request: Request) -> VerificationRe
             raise HTTPException(status_code=413, detail="Face verification exceeds the size limit")
     templates: tuple[EncryptedFaceTemplate, ...] = ()
     enrollment_target = None
+    gate_presence_session = None
     if content_type == "application/json":
         try:
             payload = DatabaseVerification.model_validate_json(body)
             enrollment_target = payload.enrollment_target
+            gate_presence_session = payload.gate_presence_session
+            if gate_presence_session is not None and (
+                enrollment_target is not None or payload.templates
+            ):
+                raise ValueError("presence mode cannot enroll or identify")
             content = base64.b64decode(payload.jpeg_base64, validate=True)
             templates = tuple(
                 EncryptedFaceTemplate(
@@ -235,6 +244,7 @@ async def verify_face(verification_id: UUID, request: Request) -> VerificationRe
         content=content,
         templates=templates,
         enrollment_target=enrollment_target,
+        gate_presence_session=gate_presence_session,
     )
     recognizer: FaceRecognizerProtocol = request.app.state.face_recognizer
     result: FaceVerificationResult = await recognizer.verify(frame)

@@ -16,23 +16,50 @@ dependencies = [
   "jcs==0.2.1",
   "onnxruntime==1.24.2",
   "opencv-python-headless==4.11.0.86",
+  "pillow==12.3.0",
   "pydantic-settings==2.15.0",
   "uvicorn==0.53.0",
+  "websockets==17.1",
 ]
 
 [project.optional-dependencies]
-vision = ["ultralytics==8.4.155", "supervision==0.30.4"]
+vision = [
+  "pyyaml==6.0.3",
+  "supervision==0.30.4",
+  "torch==2.14.0+cpu",
+  "torchvision==0.29.0+cpu",
+  "ultralytics==8.4.155",
+]
+cuda126 = [
+  "pyyaml==6.0.3",
+  "supervision==0.30.4",
+  "torch==2.14.0+cu126",
+  "torchvision==0.29.0+cu126",
+  "ultralytics==8.4.155",
+]
 
 [project.scripts]
 smartsite-ai = "smartsite_ai.main:run"
-smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:run"
 smartsite-ai-install-demo-model = "smartsite_ai.tools.install_demo_face_model:run"
+smartsite-ai-camera-worker = "smartsite_ai.tools.run_camera_worker:main"
+smartsite-ai-camera-runtime = "smartsite_ai.tools.run_camera_runtime:main"
+smartsite-ai-source-probe = "smartsite_ai.tools.probe_source:main"
+smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
+smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
+smartsite-ai-build-evaluation-dataset = "smartsite_ai.tools.build_evaluation_dataset:main"
+smartsite-ai-build-video-evaluation-corpus = "smartsite_ai.tools.build_video_evaluation_corpus:main"
+smartsite-ai-benchmark-multistream = "smartsite_ai.tools.benchmark_multistream:main"
+smartsite-ai-prepare-video-review = "smartsite_ai.tools.prepare_video_review:main"
+smartsite-ai-build-artifact-spec = "smartsite_ai.tools.build_artifact_spec:main"
+smartsite-ai-prepare-ppe-dataset = "smartsite_ai.tools.prepare_ppe_dataset:main"
+smartsite-ai-train-ppe = "smartsite_ai.tools.train_ppe:main"
 
 [dependency-groups]
 dev = [
   "httpx2==2.13.0",
   "jsonschema[format-nongpl]==4.23.0",
   "pytest==9.1.1",
+  "pyyaml==6.0.3",
   "ruff==0.16.8",
 ]
 
@@ -58,3 +85,26 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", extra = "vision" },
+  { index = "pytorch-cu126", extra = "cuda126" },
+]
+torchvision = [
+  { index = "pytorch-cpu", extra = "vision" },
+  { index = "pytorch-cu126", extra = "cuda126" },
+]
+
+[tool.uv]
+conflicts = [[{ extra = "vision" }, { extra = "cuda126" }]]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

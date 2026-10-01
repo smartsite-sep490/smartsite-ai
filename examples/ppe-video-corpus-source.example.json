@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "datasetId": "smartsite-reviewed-ppe-video",
+  "datasetVersion": "2026-09-28-v1",
+  "sourceUrl": "https://example.com/reviewed-source-provenance",
+  "license": "replace-with-reviewed-license",
+  "reviewedBy": "replace-with-reviewer-identifier",
+  "reviewedAtUtc": "2026-09-28T00:00:00Z",
+  "maxFrameGapSeconds": 0.5,
+  "episodesPath": "C:\\SmartSiteData\\ppe-video-labels\\episodes.jsonl",
+  "clips": [
+    {
+      "clipId": "site-camera-01-clip-001",
+      "mediaPath": "C:\\SmartSiteData\\ppe-video-labels\\site-camera-01-clip-001.mp4",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "framesPath": "C:\\SmartSiteData\\ppe-video-labels\\site-camera-01-clip-001.frames.jsonl"
+    }
+  ]
+}

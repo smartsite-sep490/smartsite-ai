@@ -31,6 +31,7 @@ __pycache__/
 bin/
 obj/
 *.log
+*.sqlite3
 tmp/
 .cache/
 
@@ -38,6 +39,7 @@ tmp/
 datasets/
 recordings/
 evidence/
+!src/smartsite_ai/evidence/
 face-data/
 embeddings/
 runs/

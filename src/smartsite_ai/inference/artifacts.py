@@ -2,6 +2,8 @@
 
 import hashlib
 import hmac
+import os
+import stat
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -107,8 +109,15 @@ def verify_model_artifact(spec: ModelArtifactSpec) -> VerifiedModelArtifact:
     artifact_path = spec.artifact_path
     if not artifact_path.is_absolute():
         raise ArtifactValidationError("model artifact path must be absolute")
-    if artifact_path.is_symlink():
-        raise ArtifactValidationError("model artifact path must not be a symlink")
+    try:
+        if _has_link_like_component(artifact_path):
+            raise ArtifactValidationError(
+                "model artifact path must not traverse a symlink, junction, or reparse point"
+            )
+    except ArtifactValidationError:
+        raise
+    except OSError as error:
+        raise ArtifactValidationError("model artifact path boundary cannot be inspected") from error
     if not artifact_path.exists():
         raise ArtifactNotFoundError("model artifact path does not exist")
     if not artifact_path.is_file():
@@ -126,6 +135,26 @@ def verify_model_artifact(spec: ModelArtifactSpec) -> VerifiedModelArtifact:
             "actual_sha256": actual_sha256,
         }
     )
+
+
+def _has_link_like_component(path: Path) -> bool:
+    current = Path(path.anchor)
+    for component in path.absolute().parts[1:]:
+        current /= component
+        try:
+            attributes = current.lstat().st_file_attributes
+        except AttributeError:
+            attributes = 0
+        except FileNotFoundError:
+            return False
+        is_junction = bool(getattr(os.path, "isjunction", lambda _value: False)(current))
+        if (
+            current.is_symlink()
+            or is_junction
+            or bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+        ):
+            return True
+    return False
 
 
 def _sha256_file(path: Path) -> str:

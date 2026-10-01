@@ -1,0 +1,12 @@
+# Copy to an ignored local dataset directory and replace the paths.
+path: C:/SmartSite/local-data/ppe
+train: images/train
+val: images/validation
+test: images/test
+nc: 5
+names:
+  0: Person
+  1: Hardhat
+  2: NO-Hardhat
+  3: Safety Vest
+  4: NO-Safety Vest

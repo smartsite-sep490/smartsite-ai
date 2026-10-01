@@ -206,6 +206,7 @@ def run_success(
     capture: FakeCapture | None = None,
     writer: FakeWriter | None = None,
     renderer: Callable[[object, DetectionBatch], object] | None = None,
+    batch_observer: Callable[[DetectionBatch, float], None] | None = None,
 ) -> tuple[
     dict[str, object], FakeCapture, FakeWriter, FakeDetector, list[tuple[object, DetectionBatch]]
 ]:
@@ -238,6 +239,7 @@ def run_success(
         renderer=renderer,
         monotonic_clock=iter((10.0, 12.5)).__next__,
         utc_now_factory=lambda: datetime(2026, 9, 21, 12, tzinfo=UTC),
+        batch_observer=batch_observer,
     )
     return result, capture, writer, detector, render_calls
 
@@ -278,6 +280,19 @@ def test_success_builds_sequential_envelopes_renders_and_replaces_metadata_atomi
     assert capture.release_count == 1
     assert writer.release_count == 1
     assert json.loads((tmp_path / "run.json").read_text(encoding="utf-8")) == result
+
+
+def test_success_passes_validated_batches_to_the_optional_pipeline_observer(tmp_path: Path) -> None:
+    observed: list[tuple[int, float]] = []
+
+    run_success(
+        tmp_path,
+        batch_observer=lambda batch, video_time: observed.append(
+            (batch.sequence_number, video_time)
+        ),
+    )
+
+    assert observed == [(0, 0.0), (1, 1.25)]
 
 
 @pytest.mark.parametrize(
@@ -832,3 +847,174 @@ def test_keyboard_interrupt_during_inference_joins_the_worker_before_returning(
     assert capture.release_count == 1
     assert writer.release_count == 1
     assert not output_path.exists()
+
+
+def test_ui_timeline_collector_gates_missing_ppe_candidates(tmp_path: Path) -> None:
+    from smartsite_ai.domain.regions import CameraRegionConfiguration
+    from smartsite_ai.tools.detect_video import _UiTimelineCollector
+
+    region_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    config = CameraRegionConfiguration.model_validate(
+        {
+            "schemaVersion": "1.0.0",
+            "configurationVersion": 1,
+            "cameraExternalId": "camera-01",
+            "regions": (
+                {
+                    "regionId": region_id,
+                    "geometryVersion": 1,
+                    "coordinateSpace": "NORMALIZED_0_1",
+                    "polygon": {"coordinates": ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))},
+                },
+            ),
+        }
+    )
+    collector = _UiTimelineCollector(configuration=config, ppe_region_id=region_id)
+
+    def make_detection_batch(seq: int, *detections: NormalizedDetection) -> DetectionBatch:
+        return DetectionBatch(
+            stream_id="stream-01",
+            session_id=UUID("00000000-0000-4000-8000-000000000001"),
+            camera_external_id="camera-01",
+            captured_at=datetime(2026, 9, 21, 12, 0, seq, tzinfo=UTC),
+            frame_width=640,
+            frame_height=480,
+            sequence_number=seq,
+            model_artifact_id="fake-detector",
+            model_version="test",
+            model_sha256="a" * 64,
+            detections=detections,
+        )
+
+    person_box = NormalizedBoundingBox(
+        x1=0.1, y1=0.1, x2=0.4, y2=0.9, coordinate_space="NORMALIZED_0_1"
+    )
+    no_hardhat_box = NormalizedBoundingBox(
+        x1=0.15, y1=0.12, x2=0.25, y2=0.25, coordinate_space="NORMALIZED_0_1"
+    )
+    person_det = NormalizedDetection(
+        class_id=0, class_name="person", confidence=0.9, bounding_box=person_box
+    )
+    no_hardhat_det = NormalizedDetection(
+        class_id=1, class_name="NO-Hardhat", confidence=0.9, bounding_box=no_hardhat_box
+    )
+
+    # Frame 1: missing -> not confirmed yet
+    collector.observe(make_detection_batch(1, person_det, no_hardhat_det), video_time_seconds=0.2)
+    assert len(collector.entries) == 0
+
+    # Frame 2: missing -> not confirmed yet
+    collector.observe(make_detection_batch(2, person_det, no_hardhat_det), video_time_seconds=0.4)
+    assert len(collector.entries) == 0
+
+    # Frame 3: missing -> 3rd consecutive missing -> confirmed!
+    collector.observe(make_detection_batch(3, person_det, no_hardhat_det), video_time_seconds=0.6)
+    assert len(collector.entries) == 1
+    assert collector.entries[0]["videoTimeSeconds"] == 0.6
+    entry_obs = collector.entries[0]["event"]["observations"]
+    assert any(o["type"] == "PPE" and o["status"] == "MISSING" for o in entry_obs)
+
+    # Frame 4: still missing, but within cooldown -> not added again
+    collector.observe(make_detection_batch(4, person_det, no_hardhat_det), video_time_seconds=0.8)
+    assert len(collector.entries) == 1
+
+    # Empty frame (event is None) updates gate and does not add entries
+    collector.observe(make_detection_batch(5), video_time_seconds=1.0)
+    assert len(collector.entries) == 1
+
+    # Output file test
+    timeline_file = tmp_path / "timeline.json"
+    collector.write(timeline_file)
+    assert timeline_file.exists()
+
+
+def test_ui_timeline_collector_zone_entry_without_leaking_unconfirmed_ppe() -> None:
+    from smartsite_ai.domain.regions import CameraRegionConfiguration
+    from smartsite_ai.tools.detect_video import _UiTimelineCollector
+
+    ppe_region_id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    zone_region_id = "00000000-0000-4000-8000-000000000099"
+    config = CameraRegionConfiguration.model_validate(
+        {
+            "schemaVersion": "1.0.0",
+            "configurationVersion": 1,
+            "cameraExternalId": "camera-01",
+            "regions": (
+                {
+                    "regionId": ppe_region_id,
+                    "geometryVersion": 1,
+                    "coordinateSpace": "NORMALIZED_0_1",
+                    "polygon": {"coordinates": ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))},
+                },
+                {
+                    "regionId": zone_region_id,
+                    "geometryVersion": 1,
+                    "coordinateSpace": "NORMALIZED_0_1",
+                    "polygon": {"coordinates": ((0.4, 0.0), (1.0, 0.0), (1.0, 1.0), (0.4, 1.0))},
+                },
+            ),
+        }
+    )
+    collector = _UiTimelineCollector(configuration=config, ppe_region_id=ppe_region_id)
+
+    def make_batch(seq: int, *detections: NormalizedDetection) -> DetectionBatch:
+        return DetectionBatch(
+            stream_id="stream-01",
+            session_id=UUID("00000000-0000-4000-8000-000000000001"),
+            camera_external_id="camera-01",
+            captured_at=datetime(2026, 9, 21, 12, 0, seq, tzinfo=UTC),
+            frame_width=640,
+            frame_height=480,
+            sequence_number=seq,
+            model_artifact_id="fake-detector",
+            model_version="test",
+            model_sha256="a" * 64,
+            detections=detections,
+        )
+
+    # Frame 1: Person outside restricted zone (x bottom-center = 0.35 < 0.4)
+    person_outside = NormalizedDetection(
+        class_id=0,
+        class_name="person",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.2, y1=0.1, x2=0.5, y2=0.9, coordinate_space="NORMALIZED_0_1"
+        ),
+    )
+    collector.observe(make_batch(1, person_outside), video_time_seconds=0.2)
+    assert len(collector.entries) == 0
+
+    # Frame 2: Person moves across boundary (x bottom-center = 0.45 >= 0.4)
+    # IoU between frame 1 and frame 2 is 0.5, so tracker preserves the same track_id.
+    # Plus unconfirmed NO-Hardhat detection
+    person_inside = NormalizedDetection(
+        class_id=0,
+        class_name="person",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.3, y1=0.1, x2=0.6, y2=0.9, coordinate_space="NORMALIZED_0_1"
+        ),
+    )
+    no_hardhat = NormalizedDetection(
+        class_id=1,
+        class_name="NO-Hardhat",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.4, y1=0.12, x2=0.5, y2=0.25, coordinate_space="NORMALIZED_0_1"
+        ),
+    )
+    collector.observe(make_batch(2, person_inside, no_hardhat), video_time_seconds=0.4)
+    collector.observe(make_batch(3, person_inside), video_time_seconds=0.6)
+    collector.observe(make_batch(4, person_inside), video_time_seconds=0.8)
+
+    # Timeline entry is recorded after three consecutive inside frames.
+    assert len(collector.entries) == 1
+    assert collector.entries[0]["videoTimeSeconds"] == 0.8
+
+    # The recorded event must contain ZONE_ENTRY and PERSON, but MUST NOT
+    # leak unconfirmed PPE/MISSING!
+    recorded_obs = collector.entries[0]["event"]["observations"]
+    types = [o["type"] for o in recorded_obs]
+    assert "ZONE_ENTRY" in types
+    assert "PERSON" in types
+    assert not any(o["type"] == "PPE" for o in recorded_obs)

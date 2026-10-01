@@ -112,6 +112,10 @@ class StreamConfig(BaseModel):
         default=True,
         description="Whether stream is ongoing live camera (True) or finite clip (False)",
     )
+    pace_replay: bool = Field(
+        default=False,
+        description="Pace a finite clip by its media timestamps to emulate a live camera",
+    )
     min_stable_frames: int = Field(
         default=5,
         ge=1,
@@ -153,6 +157,12 @@ class StreamConfig(BaseModel):
             if isinstance(val, str):
                 data["source_url"] = SecretStr(val)
         return data
+
+    @model_validator(mode="after")
+    def validate_replay_policy(self) -> "StreamConfig":
+        if self.is_live and self.pace_replay:
+            raise ValueError("pace_replay is permitted only for finite video sources")
+        return self
 
     @field_validator("source_url", mode="after")
     @classmethod

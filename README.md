@@ -535,6 +535,11 @@ Training also rejects identical image bytes across `train/images`, `val/images` 
 `test/images`, and Roboflow `.rf.` variants sharing an original-image filename across
 those splits. This check uses the byte-verified inventory before provider loading and
 again before/after training. Same-split duplicates do not trigger this cross-split gate.
+Frame names following `<source>_<mp4|mov|avi|mkv|webm>-<frame>_jpg` (optionally
+followed by `.rf.` variants) are also grouped by the case-insensitive video-source
+filename. Different frames from that source crossing splits are rejected. This is a
+conservative provenance signal; resolve filename collisions through reviewed source
+metadata and a new prepared export rather than bypassing the train gate.
 It does not detect all similar images or prove scene/video/site independence; annotation,
 source-group and held-out evaluation review remain required. Historical artifact/evaluation
 inspection keeps byte-integrity checks without retroactively rewriting old provenance.

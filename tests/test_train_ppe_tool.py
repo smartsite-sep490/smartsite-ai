@@ -21,6 +21,34 @@ from smartsite_ai.tools.train_ppe import (
 from smartsite_ai.training.dataset_integrity import aggregate_inventory, inventory_record
 
 
+@pytest.mark.parametrize(
+    "paths,blocked",
+    [
+        (("train/images/clip_MP4-10_jpg.jpg", "test/images/clip_mp4-11_jpg.jpg"), True),
+        (("train/images/clip_mov-10_jpg.jpg", "train/images/clip_mov-11_jpg.jpg"), False),
+        (("train/images/clipA_mp4-10_jpg.jpg", "test/images/clipB_mp4-10_jpg.jpg"), False),
+        (("train/images/clip-10.jpg", "test/images/clip-11.jpg"), False),
+    ],
+)
+def test_filename_video_grouping_is_conservative_and_split_specific(
+    paths: tuple[str, str], blocked: bool
+) -> None:
+    from smartsite_ai.training.dataset_integrity import (
+        DatasetIntegrityError,
+        _reject_cross_split_image_overlap,
+    )
+
+    entries = [
+        {"path": paths[0], "sha256": "a" * 64},
+        {"path": paths[1], "sha256": "b" * 64},
+    ]
+    if blocked:
+        with pytest.raises(DatasetIntegrityError, match="video-source filename"):
+            _reject_cross_split_image_overlap(entries)
+    else:
+        _reject_cross_split_image_overlap(entries)
+
+
 def test_same_split_variants_are_not_cross_split_leakage() -> None:
     from smartsite_ai.training.dataset_integrity import _reject_cross_split_image_overlap
 
@@ -303,7 +331,7 @@ def test_preflight_rejects_unmanifested_dataset_file(tmp_path: Path) -> None:
         preflight_arguments(build_parser().parse_args(arguments))
 
 
-@pytest.mark.parametrize("overlap", ["bytes", "original-image"])
+@pytest.mark.parametrize("overlap", ["bytes", "original-image", "video-source"])
 def test_training_rejects_cross_split_overlap_before_loading_provider(
     tmp_path: Path, overlap: str
 ) -> None:
@@ -313,9 +341,12 @@ def test_training_rejects_cross_split_overlap_before_loading_provider(
     test = root / "test" / "images" / "test.jpg"
     if overlap == "bytes":
         test.write_bytes(train.read_bytes())
-    else:
+    elif overlap == "original-image":
         train.rename(train.with_name("original_jpg.rf.train123.jpg"))
         test.rename(test.with_name("original_jpg.rf.test456.jpg"))
+    else:
+        train.rename(train.with_name("source_mp4-10_jpg.rf.train123.jpg"))
+        test.rename(test.with_name("source_mp4-99_jpg.rf.test456.jpg"))
     manifest_path = root / "preparation.manifest.json"
     manifest = json.loads(manifest_path.read_text())
     files = [

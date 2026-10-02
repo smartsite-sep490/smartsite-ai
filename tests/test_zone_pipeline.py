@@ -7,6 +7,7 @@ from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.tracking import IoUPersonTracker
+from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 REGION_ID = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
@@ -57,6 +58,29 @@ def configuration(geometry_version: int = 7) -> CameraRegionConfiguration:
             ),
         }
     )
+
+
+def test_zone_pipeline_rejects_camera_change_without_consuming_confirmation() -> None:
+    zones = RestrictedZonePipeline(entry_confirmation_frames=2)
+    observed_person = person((0.45, 0.20, 0.55, 0.60))
+
+    def frame(sequence: int, camera: str = "camera-01") -> TrackedFrame:
+        return TrackedFrame(
+            batch=batch(sequence, observed_person).model_copy(
+                update={"camera_external_id": camera}
+            ),
+            persons=(TrackedPerson(track_id=1, detection=observed_person),),
+        )
+
+    assert zones.process(frame(1), configuration()) == ()
+    other_configuration = configuration().model_copy(update={"camera_external_id": "camera-02"})
+    with pytest.raises(ValueError, match="camera.*session"):
+        zones.process(frame(2, "camera-02"), other_configuration)
+
+    # Invalid camera metadata cannot advance or clear the original confirmation.
+    entries = zones.process(frame(2), configuration())
+    assert len(entries) == 1
+    assert entries[0].track_id == 1
 
 
 def test_zone_pipeline_emits_after_confirmed_outside_to_inside_transition() -> None:

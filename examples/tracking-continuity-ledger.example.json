@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "1.0.0",
+  "purpose": "TRACKING_ASSOCIATION_DIAGNOSTICS",
+  "reviewedBy": "synthetic-fixture-author",
+  "reviewedAtUtc": "2026-09-30T00:00:00Z",
+  "sourceRights": "Entirely synthetic example; no camera media, Worker identity, or biometric data.",
+  "matches": [
+    {
+      "cameraId": "synthetic-camera",
+      "clipId": "synthetic-crossing",
+      "streamSessionId": "synthetic-session",
+      "frameIndex": 0,
+      "groundTruthPersonKey": "anonymous-a",
+      "predictedTrackId": "track-1"
+    },
+    {
+      "cameraId": "synthetic-camera",
+      "clipId": "synthetic-crossing",
+      "streamSessionId": "synthetic-session",
+      "frameIndex": 0,
+      "groundTruthPersonKey": "anonymous-b",
+      "predictedTrackId": "track-2"
+    },
+    {
+      "cameraId": "synthetic-camera",
+      "clipId": "synthetic-crossing",
+      "streamSessionId": "synthetic-session",
+      "frameIndex": 1,
+      "groundTruthPersonKey": "anonymous-a",
+      "predictedTrackId": "track-2"
+    },
+    {
+      "cameraId": "synthetic-camera",
+      "clipId": "synthetic-crossing",
+      "streamSessionId": "synthetic-session",
+      "frameIndex": 1,
+      "groundTruthPersonKey": "anonymous-b",
+      "predictedTrackId": "track-1"
+    }
+  ]
+}

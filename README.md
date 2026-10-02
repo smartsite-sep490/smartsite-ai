@@ -132,7 +132,12 @@ Implemented:
 - verified local model-artifact metadata, a lazy Ultralytics YOLO runner, and normalized `DetectionBatch` output;
 - local annotated-video validation with an optional MF05/MF06 UI timeline export;
 - deterministic IoU person tracking with stream/session-scoped track IDs;
-- PPE-to-person association with technical `PRESENT`/observable `MISSING` observations;
+- PPE-to-person association with explicit `PRESENT`/`MISSING` evidence; boxes fitting multiple
+  current person tracks remain unknown, including competitors outside the observation region.
+  Ambiguous items cannot use the legacy absence fallback; independent clear items still emit.
+  Unknown evidence, including a processed frame without the person, interrupts pending
+  confirmation and consecutive clearing evidence but does not clear an already
+  confirmed missing episode or establish Worker identity;
 - configured polygon restricted-zone transition detection with geometry-version handling;
 - MF05/MF06 orchestration into the locked technical observation event, with synthetic fixtures and behavior tests;
 - liveness endpoint;
@@ -164,6 +169,15 @@ artifact, active camera source, and tested runtime; the local video command does
 readiness.
 
 ## Requirements
+
+Face recognition dependencies use the optional `identity` profile:
+`uv sync --frozen --extra identity`. Core, `vision`, and `cuda126` installations do not
+require InsightFace/ONNX Runtime or a native InsightFace build. On Windows, building the
+pinned InsightFace source requires Microsoft C++ Build Tools; install the identity profile
+only on the face-service host with those prerequisites. The Docker builder explicitly
+installs this profile with its existing compiler toolchain. This changes installation scope,
+not face verification thresholds or model approval. Identity remains unavailable unless its
+existing opt-in model/key configuration is supplied; missing SDK/model failures stay closed.
 
 ### Guided enrollment quality (demo policy v1)
 
@@ -391,6 +405,53 @@ This YOLOv8 command is a **smoke reference only**. It proves that the local vide
 annotation path can run; it is not the selected production model and its output must not be reported
 as YOLO11s evaluation evidence.
 
+## Reviewed tracking-continuity diagnostics
+
+This local tool counts continuity failures in an **already matched, reviewed ledger**. It does
+not run a detector or tracker, perform bounding-box matching, resolve Workers, or calculate
+IDF1/HOTA. The output always identifies its scope as `MATCHED_LEDGER_DIAGNOSTICS`.
+
+```powershell
+uv run --frozen python -m smartsite_ai.tools.evaluate_tracking_continuity `
+  --input examples/tracking-continuity-ledger.example.json
+```
+
+The synthetic crossing example produces two `identitySwitches` and two `trackSubjectChanges`.
+These are fixture results, not evidence of model accuracy. For real inputs, record review metadata
+and source rights, then associate anonymized ground-truth people with predicted tracks per frame.
+Use a null predicted track for an explicitly unmatched person. Omitted frames are not inferred
+misses. Frame indices refer to the source clip across session restarts; each file describes one
+inference run per camera/clip. Overlapping sessions and conflicting frame associations are rejected.
+
+`identitySwitches` counts changes of matched track for a ground-truth person within a session.
+`trackSubjectChanges` counts one track changing ground-truth people. `fragmentsAfterMiss` requires
+matched/missed/matched observations; `sessionBoundaryContinuations` describes ground-truth matches
+across session boundaries, without proving online recovery. Counts use sampled ledger rows; no
+unseen frames, accuracy denominator, false-alert rate, or cross-camera identity is invented.
+
+The loader rejects unknown properties, duplicate JSON keys, invalid types, non-UTC review times,
+link/reparse paths, files over 4 MiB, and more than 20,000 rows. Review/source metadata are recorded
+attestations, not automated certification. Real recordings and review ledgers remain outside Git.
+Full tracker selection still requires independently annotated media, boxes/occlusion review,
+held-out splits, and integrated PPE/event measurements.
+
+## Reviewed frame-level Person count metrics
+
+`evaluation.person_count_metrics.compute_person_count_metrics` is a pure diagnostic for
+caller-supplied `PersonCountSample` rows (`frameId`, `predictedCount`, `groundTruthCount`,
+`reviewStatus`). Only `REVIEWED` rows with an explicit non-negative integer ground-truth count
+are scored. `UNREVIEWED` and `EXCLUDED` rows require null truth and appear in separate coverage
+lists. Missing annotations are never inferred to mean an empty frame. Duplicate frame IDs fail.
+
+The report records MAE, RMSE, signed error, exact-count fraction, over/under-count frame totals,
+and sums over reviewed frames only. No reviewed rows produce undefined metrics with a reason,
+not a perfect score. Frame totals are not unique Workers or whole-site headcounts. A correct count
+can still contain wrongly localized boxes; detection, association, tracking and event metrics
+must be assessed separately. `REVIEWED` is a caller assertion, not proof of human adjudication.
+The report always has `is_model_acceptance=false`; it does not change the existing accuracy gate,
+promote a checkpoint, or automatically mark vendor labels as reviewed. Real annotations and
+provenance stay outside Git. The existing evaluation CLI does not yet ingest these count rows.
+
 ## Official YOLO11s PPE evaluation gate
 
 The selected gate evaluates a locally fine-tuned **official Ultralytics YOLO11s detector** against
@@ -445,6 +506,56 @@ the same verified artifact and dataset split. Annotated media is optional eviden
 outside the timed evaluation path. Until a real fine-tuned artifact and the required local inputs
 have completed this gate, SmartSite must describe YOLO11s as the selected architecture and training
 target, not as a validated PPE checkpoint.
+
+### Frame-level Person count evaluation (FR-86)
+
+The same evaluation run also counts raw canonical `Person` detections in each frame. PPE
+boxes and tracker histories do not contribute to this count. This is visible-person frame
+counting, not unique Worker headcount or cross-camera identity.
+
+To measure count errors, add `--person-count-review-index <local-review.json>` to the command
+above. The optional local JSON file has this structure (all identifiers and hashes below are
+illustrative and must be replaced with the actual evaluated inputs):
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "datasetAggregateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "split": "test",
+  "frames": [
+    {
+      "frameId": "clip-1:120",
+      "mediaSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewScope": "FULL_FRAME_PERSON_COUNT",
+      "reviewStatus": "REVIEWED",
+      "groundTruthCount": 3,
+      "reviewedBy": "reviewer-reference",
+      "reviewedAtUtc": "2026-10-02T00:00:00Z"
+    }
+  ]
+}
+```
+
+Each review binds to the dataset aggregate hash, split, frame ID and original media hash.
+Duplicate/unknown frames, mismatched hashes, non-integer or negative counts, missing reviewer
+metadata and invalid UTC review times are rejected before provider validation or frame inference.
+The bounded index permits at most 100,000 records and 16 MiB of UTF-8 JSON; unknown properties
+and duplicate JSON keys are rejected. To explicitly exclude an ambiguous frame, use
+`reviewStatus: "EXCLUDED"`, omit `groundTruthCount` (or set it to null), and provide a non-blank
+`reason` together with the same review scope and reviewer metadata.
+
+`candidate.report.json` includes `personCountSamples`, `personCountMetrics` and the exact loaded
+index's `personCountReviewIndexSha256`. The summary reports MAE, RMSE, signed bias and review
+coverage. Frames omitted from the index, or all frames when no index is supplied, remain
+`UNREVIEWED`. They cannot supply ground truth from model predictions or existing annotations.
+Excluded and unreviewed frames do not contribute to the metric denominator. With no reviewed
+frames, errors and exact-match fraction are null, rather than a misleading zero-error result.
+
+Review metadata is a caller assertion, not proof of human review or dataset/model approval.
+Do not generate human-reviewed counts with AI or substitute a second model's predictions for
+ground truth. Count diagnostics do not alter the existing five-class detection gate; a completed
+run or a good count score cannot establish localization, PPE association, tracking, Worker
+identity or full model acceptance. Keep real review files and media outside Git.
 
 ### Local YOLO11s PPE fine-tuning
 
@@ -512,6 +623,19 @@ and resolved device, exact `data.yaml` and base-checkpoint SHA-256 values, runti
 SHA and dirty state, verified prepared-dataset aggregate, and fine-tuned checkpoint SHA-256. It
 recomputes every prepared file before and after provider execution; a changed, missing, extra,
 linked, or unmanifested file fails the run. A failed or interrupted run has no `COMPLETE` manifest.
+
+Training also rejects identical image bytes across `train/images`, `val/images` and
+`test/images`, and Roboflow `.rf.` variants sharing an original-image filename across
+those splits. This check uses the byte-verified inventory before provider loading and
+again before/after training. Same-split duplicates do not trigger this cross-split gate.
+Frame names following `<source>_<mp4|mov|avi|mkv|webm>-<frame>_jpg` (optionally
+followed by `.rf.` variants) are also grouped by the case-insensitive video-source
+filename. Different frames from that source crossing splits are rejected. This is a
+conservative provenance signal; resolve filename collisions through reviewed source
+metadata and a new prepared export rather than bypassing the train gate.
+It does not detect all similar images or prove scene/video/site independence; annotation,
+source-group and held-out evaluation review remain required. Historical artifact/evaluation
+inspection keeps byte-integrity checks without retroactively rewriting old provenance.
 
 The input `data.yaml` must reference existing local `train`, `val`, and `test` inputs and already
 use this exact class ID map:
@@ -588,6 +712,10 @@ ignored local directory, then replace every example value. Frame labels use stab
 `personInstanceId` values throughout a clip and connect every PPE object to that frame's Person
 annotation with `relatedPersonAnnotationId`. `observablePpeItems` records which body-area evidence
 was actually reviewable; absence of a PPE box is not a missing-PPE label.
+The official video dataset loader also rejects repeated Person identities within one frame,
+PPE labels outside their owner's `observablePpeItems`, and both positive and negative labels for
+the same person and PPE item in one frame. Integer and string identities remain distinct;
+identities may continue across frames. These checks do not change legacy image-only label rules.
 
 The builder runs no model inference and makes no network request. It verifies source hashes,
 probes actual video dimensions/frame count/duration, decodes each selected frame to verify its
@@ -611,6 +739,24 @@ reviewed camera-seconds. A smaller corpus remains useful for smoke evaluation bu
 marked ineligible. Tool validation proves structural consistency and traceability; it does not
 replace a second-person review of the visual labels. Pass the generated
 `evaluation.manifest.json` and `indexes/test-episodes.jsonl` to `smartsite-ai-evaluate`.
+
+Candidate scoring uses the offline attribution policy
+`gt-primary-duplicate-fallback-subject-segments-v2`. Person boxes first receive deterministic
+one-to-one GT matches using `matchIoU`; an extra track overlapping an already matched subject
+retains that subject for duplicate/fragmentation scoring. Unmatched tracks remain false candidates.
+Ties are scoring conventions, not evidence of physical identity. When a track's attributed subject
+changes, becomes unmatched, or disappears, its next contiguous visit gets a separate temporal-gate
+namespace. Pending evidence, confirmation, and cooldown cannot transfer between visits; each new
+visit must satisfy the unchanged confirmation settings. Omitted PPE for a still-visible, unchanged
+subject keeps the existing gate semantics: reset pending streaks without clearing confirmed state.
+
+The candidate JSON records `attributionPolicy` and the complete `predictedEpisodes` ledger,
+including original track/session IDs and segment start/confirmation/end times. The accuracy report
+records the policy in `metricDefinitions`. These GT-conditioned candidates are offline diagnostics;
+they are **not raw runtime alert counts**, Worker identification, cross-camera correlation, or
+proof that a matched GT episode's entire duration was covered. Keep the policy version with any
+comparison; older unversioned results use different attribution semantics. Runtime tracking,
+Backend grouping, and the technical-event contract are unchanged.
 
 ### DRAFT temporal PPE review package
 
@@ -724,7 +870,7 @@ docker build -t smartsite-ai:dev .
 docker run --rm --name smartsite-ai -p 127.0.0.1:8000:8000 smartsite-ai:dev
 ```
 
-The runtime image installs only core runtime dependencies, runs as a non-root user, excludes datasets/model artifacts/environment secrets, and exposes a health check.
+The runtime image installs core runtime dependencies plus the explicit identity profile, runs as a non-root user, excludes datasets/model artifacts/environment secrets, and exposes a health check. It does not include the YOLO vision/GPU profiles or download face models at application startup.
 
 ## MF05 — PPE Monitoring
 
@@ -769,6 +915,51 @@ Model artifacts and datasets should not be committed directly to Git. Traceable 
 See [models/README.md](models/README.md).
 
 ## Performance Validation
+
+### Read-only dataset split audit
+
+Before a training/evaluation run, prepare a local metadata manifest and audit declared
+source groups and candidate similarity links:
+
+```sh
+uv run --frozen python -m smartsite_ai.tools.audit_dataset_splits \
+  --manifest /absolute/path/split-input.json \
+  --output /absolute/path/new-split-report.json
+```
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "samples": [
+    {"sampleId": "train/a.jpg", "split": "train", "sha256": "<64 lowercase hex>", "sourceGroupId": "dataset-v1:scene-a"},
+    {"sampleId": "test/b.jpg", "split": "test", "sha256": "<64 lowercase hex>", "sourceGroupId": null}
+  ],
+  "links": [
+    {"leftSampleId": "train/a.jpg", "rightSampleId": "test/b.jpg", "reason": "visual-similarity-candidate"}
+  ]
+}
+```
+
+Use unique, unpadded sample IDs and globally namespaced source/video/scene groups.
+Replace the illustrative hash placeholders with hashes verified from the source files.
+The CLI reads metadata only: it does **not** verify image bytes, approve annotations,
+infer source groups, move samples, train a model, or integrate automatically with training.
+Filename-derived original-image groups may catch augmentation leakage but cannot prove
+independence between videos/sites. Unknown source groups remain `null`.
+
+Equal declared hashes or source groups crossing splits produce `BLOCKED_KNOWN_OVERLAP`.
+Similarity links, including transitive chains, stay candidates (`REVIEW_REQUIRED`),
+never confirmed duplicates. Otherwise missing groups produce `INCOMPLETE_SOURCE_GROUPS`.
+Exit codes are 2 for those findings, 1 for invalid input/I/O, and 0 for
+`NO_KNOWN_OVERLAP`. Status priority follows that order; inspect all report sections.
+Missing splits are reported separately. Even exit 0 always has `datasetAccepted: false`
+and `fileBytesVerified: false`; it is not an independent-holdout or model acceptance gate.
+
+Input is bounded to 32 MiB, 100,000 samples and 250,000 links. Duplicate JSON keys,
+unknown fields and invalid references are rejected. Paths must be absolute and contain
+no symlinks/junctions. The output parent must exist; a report is published only to a
+new path without replacing an existing or concurrent writer's file. Keep manifests,
+reports, image/label data and personal review decisions outside Git.
 
 The current prototype target is an NVIDIA RTX 4060 with approximately 1–3 camera streams.
 

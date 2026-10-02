@@ -17,6 +17,12 @@ MAX_MANIFEST_BYTES: int = 256 * 1024
 MAX_JSONL_LINE_BYTES: int = 512 * 1024
 MAX_FRAMES_PER_SPLIT: int = 100_000
 FILE_HASH_CHUNK_BYTES: int = 1024 * 1024
+_PPE_ITEM_BY_CLASS = {
+    "Hardhat": "HARD_HAT",
+    "NO-Hardhat": "HARD_HAT",
+    "Safety Vest": "SAFETY_VEST",
+    "NO-Safety Vest": "SAFETY_VEST",
+}
 
 
 class DatasetValidationError(Exception):
@@ -251,6 +257,7 @@ def load_evaluation_dataset(
 
                     # Validate annotations and index them for cross-referencing
                     frame_ann_by_id = {}
+                    frame_person_ids: set[int | str] = set()
                     for ann in frame.annotations:
                         if ann.class_name not in valid_classes:
                             raise DatasetValidationError(
@@ -271,6 +278,12 @@ def load_evaluation_dataset(
                                     f"'{ann.annotation_id}' must declare personInstanceId"
                                 )
                             if ann.class_name == "Person":
+                                if ann.person_instance_id in frame_person_ids:
+                                    raise DatasetValidationError(
+                                        f"Video frame '{frame.frame_id}' repeats a Person "
+                                        "personInstanceId"
+                                    )
+                                frame_person_ids.add(ann.person_instance_id)
                                 if ann.observable_ppe_items is None:
                                     raise DatasetValidationError(
                                         f"Video frame '{frame.frame_id}' Person annotation "
@@ -283,6 +296,7 @@ def load_evaluation_dataset(
                                 )
 
                     # Validate relatedPersonAnnotationId within this frame
+                    frame_ppe_states: dict[tuple[int | str, str], str] = {}
                     for ann in frame.annotations:
                         if ann.related_person_annotation_id is not None:
                             if ann.related_person_annotation_id == ann.annotation_id:
@@ -315,6 +329,32 @@ def load_evaluation_dataset(
                                     "related person's personInstanceId "
                                     f"({target.person_instance_id})"
                                 )
+                            ppe_item = _PPE_ITEM_BY_CLASS.get(ann.class_name)
+                            observable = target.observable_ppe_items
+                            if (
+                                frame.frame_index is not None
+                                and ppe_item is not None
+                                and (observable is None or ppe_item not in observable)
+                            ):
+                                raise DatasetValidationError(
+                                    f"Video frame '{frame.frame_id}' PPE annotation "
+                                    f"'{ann.annotation_id}' labels {ppe_item} for a person "
+                                    "whose observablePpeItems omits it"
+                                )
+                            if (
+                                frame.frame_index is not None
+                                and ppe_item is not None
+                                and target.person_instance_id is not None
+                            ):
+                                subject_item = (target.person_instance_id, ppe_item)
+                                state = "MISSING" if ann.class_name.startswith("NO-") else "PRESENT"
+                                previous_state = frame_ppe_states.get(subject_item)
+                                if previous_state is not None and previous_state != state:
+                                    raise DatasetValidationError(
+                                        f"Video frame '{frame.frame_id}' has conflicting "
+                                        f"{ppe_item} labels for one person"
+                                    )
+                                frame_ppe_states[subject_item] = state
 
                     # Sort annotations stably by annotation_id
                     sorted_frame_anns = tuple(

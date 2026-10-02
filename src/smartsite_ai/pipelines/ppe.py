@@ -33,8 +33,10 @@ class PpePipeline:
     The pipeline emits technical ``PRESENT``/``MISSING`` observations only when the
     detector explicitly identifies an affirmative or negative PPE class. It does not
     decide which PPE a site policy requires or whether a person violated it. An
-    undetected item remains unknown by default; callers can opt into legacy
-    absence-based observations for a controlled evaluation.
+    undetected item remains unknown by default. Evidence fitting multiple people
+    is also unknown, including competitors outside the configured region. Callers
+    can opt into legacy absence-based observations for a controlled evaluation,
+    but that fallback cannot override ambiguous or contradictory evidence.
     """
 
     def __init__(
@@ -133,25 +135,37 @@ class PpePipeline:
             tuple[int, PpeItem, Literal["PRESENT", "MISSING"]],
             tuple[float, float, int, NormalizedDetection],
         ] = {}
+        eligible_track_ids = {person.track_id for person in eligible_people}
+        conflicted: set[tuple[int, PpeItem]] = set()
         for detection_index, detection in enumerate(tracked_frame.batch.detections):
             observation = self._class_to_observation.get(detection.class_name.casefold())
             if observation is None:
                 continue
             item, status = observation
 
-            candidates: list[tuple[float, float, int, TrackedPerson]] = []
-            for person in eligible_people:
+            candidates: list[tuple[float, TrackedPerson]] = []
+            detection_center = box_center(detection.bounding_box)
+            # Region membership controls emission, not who could own this PPE.
+            for person in tracked_frame.persons:
                 coverage = intersection_over_second(person.bounding_box, detection.bounding_box)
-                detection_center = box_center(detection.bounding_box)
                 if coverage < self._minimum_association_coverage:
                     continue
                 if not _contains(person.bounding_box, detection_center):
                     continue
-                candidates.append((coverage, person.detection.confidence, -person.track_id, person))
+                candidates.append((coverage, person))
 
             if not candidates:
                 continue
-            coverage, _person_confidence, _negative_track_id, person = max(candidates)
+            if len(candidates) > 1:
+                conflicted.update(
+                    (person.track_id, item)
+                    for _coverage, person in candidates
+                    if person.track_id in eligible_track_ids
+                )
+                continue
+            ((coverage, person),) = candidates
+            if person.track_id not in eligible_track_ids:
+                continue
             status_key = (person.track_id, item, status)
             candidate = (coverage, detection.confidence, -detection_index, detection)
             current = best_by_status.get(status_key)
@@ -169,7 +183,6 @@ class PpePipeline:
             tuple[int, PpeItem],
             tuple[Literal["PRESENT", "MISSING"], NormalizedDetection],
         ] = {}
-        conflicted: set[tuple[int, PpeItem]] = set()
         for (track_id, item), statuses in grouped.items():
             if len(statuses) == 1:
                 ((status, candidate),) = statuses.items()

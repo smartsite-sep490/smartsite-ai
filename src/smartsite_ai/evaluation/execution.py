@@ -8,7 +8,7 @@ import math
 import os
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -35,6 +35,7 @@ from smartsite_ai.evaluation.detection_metrics import (
 from smartsite_ai.evaluation.matching import EvaluationPrediction, match_detections
 from smartsite_ai.evaluation.models import (
     CANONICAL_PPE_CLASSES,
+    MAX_SAFE_INTEGER,
     EvaluationBoundingBox,
     EvaluationFrame,
     GroundTruthObject,
@@ -45,6 +46,12 @@ from smartsite_ai.evaluation.overlay import (
     PredictionOverlayContext,
     build_overlay_plan,
 )
+from smartsite_ai.evaluation.person_count_metrics import (
+    PersonCountReport,
+    PersonCountSample,
+    compute_person_count_metrics,
+)
+from smartsite_ai.evaluation.person_count_review import load_person_count_review_index
 from smartsite_ai.evaluation.provider_validation import ProviderValidationReport
 from smartsite_ai.evaluation.report import (
     CommandArgument,
@@ -66,6 +73,7 @@ from smartsite_ai.pipelines.ppe_temporal import ConfirmedPpeCandidate
 MAX_EPISODES_FILE_BYTES = 16 * 1024 * 1024
 MAX_EPISODE_LINE_BYTES = 64 * 1024
 MAX_EPISODES = 100_000
+ATTRIBUTION_POLICY = "gt-primary-duplicate-fallback-subject-segments-v2"
 
 
 class EvaluationExecutionError(RuntimeError):
@@ -121,6 +129,7 @@ class EvaluationExecutionRequest:
     accuracy_report_path: Path
     candidate_report_path: Path
     summary_path: Path
+    person_count_review_index_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +157,7 @@ class EvaluationExecutionResult:
     provider_validation: ProviderValidationReport
     episode_metrics: EpisodeMetricsReport
     frame_count: int
+    person_count_metrics: PersonCountReport
 
 
 def _to_camel(name: str) -> str:
@@ -167,6 +177,11 @@ class _CandidateReport(BaseModel):
     status: Literal["COMPLETE"] = "COMPLETE"
     provider_validation: ProviderValidationReport
     episode_metrics: EpisodeMetricsReport
+    attribution_policy: Literal["gt-primary-duplicate-fallback-subject-segments-v2"]
+    predicted_episodes: tuple[PredictedPpeEpisode, ...]
+    person_count_metrics: PersonCountReport
+    person_count_samples: tuple[PersonCountSample, ...]
+    person_count_review_index_sha256: str | None
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -298,6 +313,94 @@ def _person_identity(
 def _synthetic_identity(clip_id: str, session_id: UUID, track_id: int) -> str:
     digest = hashlib.sha256(f"{clip_id}|{session_id}|{track_id}".encode()).hexdigest()[:24]
     return f"unmatched-{digest}"
+
+
+def _person_identities(
+    persons: Sequence[PersonObservation],
+    ground_truth: Sequence[GroundTruthObject],
+    *,
+    clip_id: str,
+    session_id: UUID,
+    threshold: float,
+) -> dict[int, int | str]:
+    """Offline GT attribution: primary one-to-one, then retain duplicate subjects."""
+    labelled = tuple(
+        item
+        for item in ground_truth
+        if item.class_name == "Person" and item.person_instance_id is not None
+    )
+    predictions = tuple(
+        EvaluationPrediction(
+            prediction_id=f"track-{person.track_id}",
+            class_name="Person",
+            confidence=person.confidence if person.confidence is not None else 0.0,
+            bounding_box=EvaluationBoundingBox(
+                x1=person.bounding_box.x1,
+                y1=person.bounding_box.y1,
+                x2=person.bounding_box.x2,
+                y2=person.bounding_box.y2,
+            ),
+        )
+        for person in persons
+        if person.bounding_box is not None
+    )
+    matches = match_detections(labelled, predictions, iou_threshold=threshold)
+    by_annotation = {item.annotation_id: item.person_instance_id for item in labelled}
+    primary = {
+        int(match.prediction_id.removeprefix("track-")): by_annotation[match.annotation_id]
+        for match in matches.matches
+    }
+    return {
+        person.track_id: primary[person.track_id]
+        if person.track_id in primary
+        else _person_identity(
+            person,
+            labelled,
+            clip_id=clip_id,
+            session_id=session_id,
+            threshold=threshold,
+        )
+        for person in persons
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class _SubjectSegment:
+    gate_track_id: int
+    original_track_id: int
+    person_identity: int | str
+    start_time_seconds: float
+
+
+class _OfflineSubjectSegments:
+    """Evaluation-only gate namespaces; never change the event or runtime tracker."""
+
+    def __init__(self) -> None:
+        self._next_id = 0
+        self._active: dict[tuple[str, str, UUID], dict[int, _SubjectSegment]] = {}
+
+    def update(
+        self,
+        *,
+        clip_id: str,
+        stream_id: str,
+        session_id: UUID,
+        identities: dict[int, int | str],
+        video_time: float,
+    ) -> dict[int, _SubjectSegment]:
+        key = (clip_id, stream_id, session_id)
+        previous = self._active.get(key, {})
+        current = {}
+        for track_id, identity in sorted(identities.items()):
+            segment = previous.get(track_id)
+            if segment is None or segment.person_identity != identity:
+                self._next_id += 1
+                if self._next_id > MAX_SAFE_INTEGER:
+                    raise EvaluationExecutionError("offline subject segment limit exceeded")
+                segment = _SubjectSegment(self._next_id, track_id, identity, video_time)
+            current[track_id] = segment
+        self._active[key] = current
+        return current
 
 
 def _prediction_overlay_context(
@@ -439,13 +542,25 @@ async def execute_evaluation(
     started_at = datetime.now(UTC)
     dataset = services.dataset_loader(request.dataset_manifest_path)
     frames = _stable_frames(dataset.get_split(request.split))
+    count_review = (
+        load_person_count_review_index(
+            request.person_count_review_index_path,
+            frames=frames,
+            dataset_aggregate_sha256=dataset.manifest.aggregate_sha256,
+            split=request.split,
+        )
+        if request.person_count_review_index_path is not None
+        else None
+    )
     ground_truth_episodes = load_ground_truth_episodes(request.episodes_index_path)
     region_configuration = services.region_loader(request.region_configuration_path)
     provider_report = services.provider_validation()
 
     metric_frames: list[DetectionEvaluationFrame] = []
     prediction_rows: list[dict[str, Any]] = []
+    count_samples: list[PersonCountSample] = []
     candidate_state: dict[tuple[str, UUID, int, str], dict[str, Any]] = {}
+    subject_segments = _OfflineSubjectSegments()
 
     for frame in frames:
         source = services.frame_reader.read(dataset.dataset_root, frame)
@@ -468,6 +583,15 @@ async def execute_evaluation(
             raise EvaluationExecutionError("detector batch does not match its source frame")
         predictions = tuple(
             _prediction(frame.frame_id, index, batch) for index in range(len(batch.detections))
+        )
+        frame_review = count_review.frames.get(frame.frame_id) if count_review else None
+        count_samples.append(
+            PersonCountSample(
+                frameId=frame.frame_id,
+                predictedCount=sum(item.class_name == "Person" for item in predictions),
+                groundTruthCount=frame_review.ground_truth_count if frame_review else None,
+                reviewStatus=frame_review.review_status if frame_review else "UNREVIEWED",
+            )
         )
         metric_frame = DetectionEvaluationFrame(
             frame_id=frame.frame_id,
@@ -506,47 +630,58 @@ async def execute_evaluation(
             if event is None
             else tuple(item for item in event.observations if isinstance(item, PpeObservation))
         )
-        identities = {
-            person.track_id: _person_identity(
-                person,
-                frame.annotations,
-                clip_id=frame.media_path,
-                session_id=batch.session_id,
-                threshold=request.match_iou,
-            )
-            for person in persons
-        }
-        confirmed = services.temporal_gate.update(
+        identities = _person_identities(
+            persons,
+            frame.annotations,
+            clip_id=frame.media_path,
+            session_id=batch.session_id,
+            threshold=request.match_iou,
+        )
+        segments = subject_segments.update(
+            clip_id=frame.media_path,
+            stream_id=batch.stream_id,
+            session_id=batch.session_id,
+            identities=identities,
+            video_time=frame.video_time_seconds,
+        )
+        by_gate_id = {segment.gate_track_id: segment for segment in segments.values()}
+        gate_observations = tuple(
+            item.model_copy(update={"track_id": segments[item.track_id].gate_track_id})
+            for item in ppe_observations
+            if item.track_id in segments
+        )
+        gate_confirmed = services.temporal_gate.update(
             stream_id=batch.stream_id,
             session_id=batch.session_id,
             observed_at=batch.captured_at,
-            active_track_ids=tuple(sorted(identities)),
-            observations=ppe_observations,
+            active_track_ids=tuple(sorted(by_gate_id)),
+            observations=gate_observations,
         )
-        for candidate in confirmed:
+        for candidate in gate_confirmed:
+            segment = by_gate_id[candidate.track_id]
             key = (frame.media_path, candidate.session_id, candidate.track_id, candidate.ppe_item)
             offset = (candidate.confirmed_at - candidate.first_seen_at).total_seconds()
-            person_identity = identities.get(candidate.track_id)
-            if person_identity is None:
-                person_identity = _synthetic_identity(
-                    frame.media_path, batch.session_id, candidate.track_id
-                )
             candidate_state.setdefault(
                 key,
                 {
-                    "person": person_identity,
-                    "start": max(0.0, frame.video_time_seconds - offset),
+                    "person": segment.person_identity,
+                    "track": segment.original_track_id,
+                    "start": max(segment.start_time_seconds, frame.video_time_seconds - offset),
                     "confirmed": frame.video_time_seconds,
                     "end": frame.video_time_seconds,
                 },
             )
-        for observation in ppe_observations:
+        for observation in gate_observations:
             if observation.status != "MISSING":
                 continue
             key = (frame.media_path, batch.session_id, observation.track_id, observation.ppe_item)
             if key in candidate_state:
                 candidate_state[key]["end"] = frame.video_time_seconds
 
+        confirmed = tuple(
+            replace(candidate, track_id=by_gate_id[candidate.track_id].original_track_id)
+            for candidate in gate_confirmed
+        )
         plan = build_overlay_plan(
             frame.annotations,
             predictions,
@@ -560,11 +695,26 @@ async def execute_evaluation(
     for key in sorted(
         candidate_state, key=lambda value: (value[0], str(value[1]), value[2], value[3])
     ):
-        clip_id, session_id, track_id, ppe_item = key
+        clip_id, session_id, _gate_track_id, ppe_item = key
         state = candidate_state[key]
         candidate_id = str(
             uuid5(
-                NAMESPACE_URL, f"{clip_id}|{session_id}|{track_id}|{ppe_item}|{state['confirmed']}"
+                NAMESPACE_URL,
+                json.dumps(
+                    [
+                        ATTRIBUTION_POLICY,
+                        clip_id,
+                        str(session_id),
+                        state["track"],
+                        ppe_item,
+                        state["person"],
+                        state["start"],
+                        state["confirmed"],
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
             )
         )
         predicted_episodes.append(
@@ -577,7 +727,7 @@ async def execute_evaluation(
                 start_time_seconds=state["start"],
                 end_time_seconds=state["end"],
                 confirmed_time_seconds=state["confirmed"],
-                track_id=track_id,
+                track_id=state["track"],
             )
         )
 
@@ -628,6 +778,10 @@ async def execute_evaluation(
         metric_definitions=(
             "Detection TP uses deterministic same-class IoU matching at matchIoU.",
             "Candidate TP uses person, PPE item, clip, and temporal overlap or onset tolerance.",
+            f"Offline candidate attribution: {ATTRIBUTION_POLICY}; "
+            "GT scoring only, not Worker identity or raw runtime alert counts.",
+            "Temporal histories reset per contiguous GT subject segment, including unmatched gaps; "
+            "confirmation thresholds stay fixed, but cooldown does not transfer between segments.",
         ),
         command_arguments=metadata.command_arguments,
         detection_metrics=detection_metrics,
@@ -635,9 +789,15 @@ async def execute_evaluation(
         accuracy_gate=evaluate_accuracy_gate(detection_metrics),
         failure=None,
     )
+    count_metrics = compute_person_count_metrics(count_samples)
     candidate_report = _CandidateReport(
         provider_validation=provider_report,
         episode_metrics=episode_metrics,
+        attribution_policy=ATTRIBUTION_POLICY,
+        predicted_episodes=tuple(predicted_episodes),
+        person_count_metrics=count_metrics,
+        person_count_samples=tuple(count_samples),
+        person_count_review_index_sha256=count_review.sha256 if count_review else None,
     )
     predictions_text = "".join(
         json.dumps(row, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
@@ -659,6 +819,13 @@ async def execute_evaluation(
         f"{detection_metrics.micro.false_positives}/{detection_metrics.micro.false_negatives}; "
         f"candidate TP/FP/FN={episode_metrics.true_positives}/"
         f"{episode_metrics.false_positives}/{episode_metrics.false_negatives}.\n"
+        f"Person count: {count_metrics.evaluated_frames} reviewed frames; "
+        f"MAE={count_metrics.mean_absolute_error}; "
+        f"RMSE={count_metrics.root_mean_squared_error}; "
+        f"bias={count_metrics.mean_signed_error}; "
+        f"UNREVIEWED={len(count_metrics.unreviewed_frame_ids)}; "
+        f"EXCLUDED={len(count_metrics.excluded_frame_ids)}.\n"
+        f"{count_metrics.warning}\n"
     )
 
     published: list[Path] = []
@@ -680,6 +847,7 @@ async def execute_evaluation(
         provider_validation=provider_report,
         episode_metrics=episode_metrics,
         frame_count=len(frames),
+        person_count_metrics=count_metrics,
     )
 
 

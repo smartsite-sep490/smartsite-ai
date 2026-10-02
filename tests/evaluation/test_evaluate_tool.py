@@ -17,6 +17,65 @@ from smartsite_ai.tools.evaluate import (
 PPE_REGION_ID = "10000000-0000-0000-0000-000000000001"
 
 
+def test_count_review_index_is_optional_and_routed_through_cli(tmp_path: Path):
+    path = tmp_path / "review.json"
+    path.write_text("{}", encoding="utf-8")
+    default = preflight_arguments(build_parser().parse_args(_argv(tmp_path)))
+    assert default.person_count_review_index is None
+    received = []
+
+    def execute(configuration):
+        received.append(configuration.person_count_review_index)
+        configuration.predictions_path.write_text(
+            '{"frameId":"f-1","detections":[]}\n', encoding="utf-8"
+        )
+        configuration.accuracy_report_path.write_text('{"status":"COMPLETE"}', encoding="utf-8")
+        configuration.candidate_report_path.write_text('{"status":"COMPLETE"}', encoding="utf-8")
+        configuration.summary_path.write_text("test", encoding="utf-8")
+
+    assert (
+        run(
+            _argv(tmp_path) + ["--person-count-review-index", str(path)],
+            services=EvaluationServices(execute=execute),
+        )
+        == 0
+    )
+    assert received == [path.resolve()]
+
+
+def test_count_review_index_missing_file_rejected_before_executor(tmp_path: Path):
+    result = run(
+        _argv(tmp_path) + ["--person-count-review-index", str(tmp_path / "missing.json")],
+        services=EvaluationServices(execute=lambda _: pytest.fail("must not execute")),
+    )
+    assert result == 2
+
+
+def test_count_review_index_cannot_be_used_as_a_hard_link_output(tmp_path: Path):
+    path = tmp_path / "review.json"
+    path.write_text('{"status":"COMPLETE"}', encoding="utf-8")
+    original = path.read_bytes()
+
+    def execute(configuration):
+        os.link(path, configuration.candidate_report_path)
+        configuration.predictions_path.write_text(
+            '{"frameId":"f-1","detections":[]}\n', encoding="utf-8"
+        )
+        configuration.accuracy_report_path.write_text('{"status":"COMPLETE"}', encoding="utf-8")
+        configuration.summary_path.write_text("test", encoding="utf-8")
+
+    assert (
+        run(
+            _argv(tmp_path) + ["--person-count-review-index", str(path)],
+            services=EvaluationServices(execute=execute),
+        )
+        == 1
+    )
+    assert path.read_bytes() == original
+    assert not (tmp_path / "run-001" / "candidate.report.json").exists()
+    assert (tmp_path / "run-001" / "evaluation.incomplete.json").is_file()
+
+
 def _input_files(tmp_path: Path) -> dict[str, Path]:
     paths = {
         "dataset_manifest": tmp_path / "dataset.manifest.json",

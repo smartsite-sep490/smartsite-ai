@@ -1,6 +1,7 @@
 import json
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -190,6 +191,7 @@ def test_loader_rejects_symlink_before_reading_target(tmp_path: Path) -> None:
     assert SECRET_PERSON not in str(caught.value)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="directory junctions are Windows-specific")
 def test_loader_rejects_reparse_parent(tmp_path: Path) -> None:
     real_dir = tmp_path / "real"
     real_dir.mkdir()

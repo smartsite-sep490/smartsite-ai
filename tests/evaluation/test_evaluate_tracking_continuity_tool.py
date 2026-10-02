@@ -1,10 +1,12 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
-PYTHON = Path(r"D:\Ky9-FPT\SmartSite\repos\smartsite-ai\.venv\Scripts\python.exe")
-SRC = Path(r"D:\Ky9-FPT\SmartSite\worktrees\evaluation-input-tooling\src")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SRC = REPO_ROOT / "src"
+PYTHON = Path(sys.executable)
 SECRET_PERSON = "synthetic-person-secret-key"
 
 

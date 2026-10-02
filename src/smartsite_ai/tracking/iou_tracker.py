@@ -61,6 +61,7 @@ class IoUPersonTracker:
         self._max_missed_frames = max_missed_frames
         self._person_class_names = normalized_names
         self._source_key: tuple[str, UUID] | None = None
+        self._camera_external_id: str | None = None
         self._last_sequence: int | None = None
         self._next_track_id = 1
         self._tracks: dict[int, _MutableTrack] = {}
@@ -71,6 +72,9 @@ class IoUPersonTracker:
         source_key = (batch.stream_id, batch.session_id)
         if self._source_key != source_key:
             self._reset_for_source(source_key)
+            self._camera_external_id = batch.camera_external_id
+        elif batch.camera_external_id != self._camera_external_id:
+            raise ValueError("camera cannot change within a stream session")
         elif self._last_sequence is not None and batch.sequence_number <= self._last_sequence:
             raise ValueError(
                 "Detection batches must be supplied in strictly increasing sequence order"

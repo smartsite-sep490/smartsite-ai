@@ -46,6 +46,12 @@ from smartsite_ai.evaluation.overlay import (
     PredictionOverlayContext,
     build_overlay_plan,
 )
+from smartsite_ai.evaluation.person_count_metrics import (
+    PersonCountReport,
+    PersonCountSample,
+    compute_person_count_metrics,
+)
+from smartsite_ai.evaluation.person_count_review import load_person_count_review_index
 from smartsite_ai.evaluation.provider_validation import ProviderValidationReport
 from smartsite_ai.evaluation.report import (
     CommandArgument,
@@ -123,6 +129,7 @@ class EvaluationExecutionRequest:
     accuracy_report_path: Path
     candidate_report_path: Path
     summary_path: Path
+    person_count_review_index_path: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +157,7 @@ class EvaluationExecutionResult:
     provider_validation: ProviderValidationReport
     episode_metrics: EpisodeMetricsReport
     frame_count: int
+    person_count_metrics: PersonCountReport
 
 
 def _to_camel(name: str) -> str:
@@ -171,6 +179,9 @@ class _CandidateReport(BaseModel):
     episode_metrics: EpisodeMetricsReport
     attribution_policy: Literal["gt-primary-duplicate-fallback-subject-segments-v2"]
     predicted_episodes: tuple[PredictedPpeEpisode, ...]
+    person_count_metrics: PersonCountReport
+    person_count_samples: tuple[PersonCountSample, ...]
+    person_count_review_index_sha256: str | None
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -531,12 +542,23 @@ async def execute_evaluation(
     started_at = datetime.now(UTC)
     dataset = services.dataset_loader(request.dataset_manifest_path)
     frames = _stable_frames(dataset.get_split(request.split))
+    count_review = (
+        load_person_count_review_index(
+            request.person_count_review_index_path,
+            frames=frames,
+            dataset_aggregate_sha256=dataset.manifest.aggregate_sha256,
+            split=request.split,
+        )
+        if request.person_count_review_index_path is not None
+        else None
+    )
     ground_truth_episodes = load_ground_truth_episodes(request.episodes_index_path)
     region_configuration = services.region_loader(request.region_configuration_path)
     provider_report = services.provider_validation()
 
     metric_frames: list[DetectionEvaluationFrame] = []
     prediction_rows: list[dict[str, Any]] = []
+    count_samples: list[PersonCountSample] = []
     candidate_state: dict[tuple[str, UUID, int, str], dict[str, Any]] = {}
     subject_segments = _OfflineSubjectSegments()
 
@@ -561,6 +583,15 @@ async def execute_evaluation(
             raise EvaluationExecutionError("detector batch does not match its source frame")
         predictions = tuple(
             _prediction(frame.frame_id, index, batch) for index in range(len(batch.detections))
+        )
+        frame_review = count_review.frames.get(frame.frame_id) if count_review else None
+        count_samples.append(
+            PersonCountSample(
+                frameId=frame.frame_id,
+                predictedCount=sum(item.class_name == "Person" for item in predictions),
+                groundTruthCount=frame_review.ground_truth_count if frame_review else None,
+                reviewStatus=frame_review.review_status if frame_review else "UNREVIEWED",
+            )
         )
         metric_frame = DetectionEvaluationFrame(
             frame_id=frame.frame_id,
@@ -758,11 +789,15 @@ async def execute_evaluation(
         accuracy_gate=evaluate_accuracy_gate(detection_metrics),
         failure=None,
     )
+    count_metrics = compute_person_count_metrics(count_samples)
     candidate_report = _CandidateReport(
         provider_validation=provider_report,
         episode_metrics=episode_metrics,
         attribution_policy=ATTRIBUTION_POLICY,
         predicted_episodes=tuple(predicted_episodes),
+        person_count_metrics=count_metrics,
+        person_count_samples=tuple(count_samples),
+        person_count_review_index_sha256=count_review.sha256 if count_review else None,
     )
     predictions_text = "".join(
         json.dumps(row, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n"
@@ -784,6 +819,13 @@ async def execute_evaluation(
         f"{detection_metrics.micro.false_positives}/{detection_metrics.micro.false_negatives}; "
         f"candidate TP/FP/FN={episode_metrics.true_positives}/"
         f"{episode_metrics.false_positives}/{episode_metrics.false_negatives}.\n"
+        f"Person count: {count_metrics.evaluated_frames} reviewed frames; "
+        f"MAE={count_metrics.mean_absolute_error}; "
+        f"RMSE={count_metrics.root_mean_squared_error}; "
+        f"bias={count_metrics.mean_signed_error}; "
+        f"UNREVIEWED={len(count_metrics.unreviewed_frame_ids)}; "
+        f"EXCLUDED={len(count_metrics.excluded_frame_ids)}.\n"
+        f"{count_metrics.warning}\n"
     )
 
     published: list[Path] = []
@@ -805,6 +847,7 @@ async def execute_evaluation(
         provider_validation=provider_report,
         episode_metrics=episode_metrics,
         frame_count=len(frames),
+        person_count_metrics=count_metrics,
     )
 
 

@@ -507,6 +507,56 @@ outside the timed evaluation path. Until a real fine-tuned artifact and the requ
 have completed this gate, SmartSite must describe YOLO11s as the selected architecture and training
 target, not as a validated PPE checkpoint.
 
+### Frame-level Person count evaluation (FR-86)
+
+The same evaluation run also counts raw canonical `Person` detections in each frame. PPE
+boxes and tracker histories do not contribute to this count. This is visible-person frame
+counting, not unique Worker headcount or cross-camera identity.
+
+To measure count errors, add `--person-count-review-index <local-review.json>` to the command
+above. The optional local JSON file has this structure (all identifiers and hashes below are
+illustrative and must be replaced with the actual evaluated inputs):
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "datasetAggregateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "split": "test",
+  "frames": [
+    {
+      "frameId": "clip-1:120",
+      "mediaSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewScope": "FULL_FRAME_PERSON_COUNT",
+      "reviewStatus": "REVIEWED",
+      "groundTruthCount": 3,
+      "reviewedBy": "reviewer-reference",
+      "reviewedAtUtc": "2026-10-02T00:00:00Z"
+    }
+  ]
+}
+```
+
+Each review binds to the dataset aggregate hash, split, frame ID and original media hash.
+Duplicate/unknown frames, mismatched hashes, non-integer or negative counts, missing reviewer
+metadata and invalid UTC review times are rejected before provider validation or frame inference.
+The bounded index permits at most 100,000 records and 16 MiB of UTF-8 JSON; unknown properties
+and duplicate JSON keys are rejected. To explicitly exclude an ambiguous frame, use
+`reviewStatus: "EXCLUDED"`, omit `groundTruthCount` (or set it to null), and provide a non-blank
+`reason` together with the same review scope and reviewer metadata.
+
+`candidate.report.json` includes `personCountSamples`, `personCountMetrics` and the exact loaded
+index's `personCountReviewIndexSha256`. The summary reports MAE, RMSE, signed bias and review
+coverage. Frames omitted from the index, or all frames when no index is supplied, remain
+`UNREVIEWED`. They cannot supply ground truth from model predictions or existing annotations.
+Excluded and unreviewed frames do not contribute to the metric denominator. With no reviewed
+frames, errors and exact-match fraction are null, rather than a misleading zero-error result.
+
+Review metadata is a caller assertion, not proof of human review or dataset/model approval.
+Do not generate human-reviewed counts with AI or substitute a second model's predictions for
+ground truth. Count diagnostics do not alter the existing five-class detection gate; a completed
+run or a good count score cannot establish localization, PPE association, tracking, Worker
+identity or full model acceptance. Keep real review files and media outside Git.
+
 ### Local YOLO11s PPE fine-tuning
 
 Before fine-tuning, prepare the pinned local Roboflow **Construction Site Safety v27** YOLO export

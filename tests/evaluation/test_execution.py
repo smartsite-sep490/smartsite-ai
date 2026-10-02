@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -290,6 +292,211 @@ def _request(tmp_path: Path, artifact: ModelArtifactSpec) -> EvaluationExecution
         candidate_report_path=(tmp_path / "candidates.json").resolve(),
         summary_path=(tmp_path / "summary.txt").resolve(),
     )
+
+
+def _count_review(frame_id: str, count: int | None, *, excluded: bool = False) -> dict:
+    return {
+        "frameId": frame_id,
+        "mediaSha256": "b" * 64,
+        "reviewScope": "FULL_FRAME_PERSON_COUNT",
+        "reviewStatus": "EXCLUDED" if excluded else "REVIEWED",
+        "groundTruthCount": count,
+        "reviewedBy": "synthetic-test-reviewer",
+        "reviewedAtUtc": "2026-10-02T00:00:00Z",
+        **({"reason": "subject visibility is ambiguous"} if excluded else {}),
+    }
+
+
+def _count_index(records: list[dict]) -> dict:
+    return {
+        "schemaVersion": "1.0.0",
+        "datasetAggregateSha256": "a" * 64,
+        "split": "test",
+        "frames": records,
+    }
+
+
+def _execute_count_case(tmp_path: Path, *, index: Path | None = None, detector=None):
+    frames = tuple(_frame(f"f-{i}", i, float(i)) for i in range(1, 5))
+    dataset = LoadedEvaluationDataset(_manifest(), {"test": frames}, tmp_path)
+    request = _request(tmp_path, _artifact(tmp_path))
+    if index is not None:
+        request = replace(request, person_count_review_index_path=index)
+    request.episodes_index_path.write_text("", encoding="utf-8")
+    metadata = EvaluationExecutionMetadata(
+        git=GitReportMetadata(commit_sha="d" * 40, dirty_worktree=False),
+        runtime=RuntimeReportMetadata(
+            python_version="3.12", platform="test", device="cpu", package_versions={}, hardware={}
+        ),
+        command_arguments=(),
+    )
+    services = EvaluationExecutionServices(
+        dataset_loader=lambda _: dataset,
+        region_loader=lambda _: _region_configuration(),
+        frame_reader=_Reader(),
+        detector=detector or _Detector(),
+        pipeline=_Pipeline(),
+        temporal_gate=_Gate(),
+        provider_validation=lambda: _provider_report(tmp_path),
+    )
+    result = asyncio.run(execute_evaluation(request, metadata=metadata, services=services))
+    return result, json.loads(request.candidate_report_path.read_text(encoding="utf-8"))
+
+
+def test_count_report_does_not_turn_existing_annotations_into_reviewed_truth(tmp_path: Path):
+    result, payload = _execute_count_case(tmp_path)
+    metrics = payload["personCountMetrics"]
+    assert metrics["evaluated_frames"] == 0
+    assert metrics["mean_absolute_error"] is None
+    assert metrics["unreviewed_frame_ids"] == ["f-1", "f-2", "f-3", "f-4"]
+    assert metrics["is_model_acceptance"] is False
+    assert payload["personCountReviewIndexSha256"] is None
+    assert all(sample["groundTruthCount"] is None for sample in payload["personCountSamples"])
+    assert all(sample["predictedCount"] == 1 for sample in payload["personCountSamples"])
+    assert result.person_count_metrics.model_dump(mode="json") == metrics
+    assert "UNREVIEWED" in (tmp_path / "summary.txt").read_text(encoding="utf-8")
+
+
+def test_count_report_uses_bound_explicit_truth_and_omits_excluded_unreviewed_frames(
+    tmp_path: Path,
+):
+    path = tmp_path / "review.json"
+    path.write_text(
+        json.dumps(
+            _count_index(
+                [
+                    _count_review("f-2", 3),
+                    _count_review("f-1", 0),
+                    _count_review("f-3", None, excluded=True),
+                ]
+            )
+        ),
+        encoding="utf-8",
+    )
+    _, payload = _execute_count_case(tmp_path, index=path)
+    metrics = payload["personCountMetrics"]
+    assert metrics["evaluated_frames"] == 2
+    assert metrics["mean_absolute_error"] == 1.5
+    assert metrics["root_mean_squared_error"] == pytest.approx(2.5**0.5)
+    assert metrics["mean_signed_error"] == -0.5
+    assert metrics["overcount_frames"] == 1
+    assert metrics["undercount_frames"] == 1
+    assert metrics["ground_truth_people_total"] == 3
+    assert metrics["predicted_people_total"] == 2
+    assert metrics["excluded_frame_ids"] == ["f-3"]
+    assert metrics["unreviewed_frame_ids"] == ["f-4"]
+    assert payload["personCountReviewIndexSha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert [sample["frameId"] for sample in payload["personCountSamples"]] == [
+        "f-1",
+        "f-2",
+        "f-3",
+        "f-4",
+    ]
+    assert "not unique Workers" in (tmp_path / "summary.txt").read_text(encoding="utf-8")
+
+
+def test_count_uses_current_raw_person_detections_including_zero_not_pipeline_tracks(
+    tmp_path: Path,
+):
+    class EmptyDetector(_Detector):
+        async def detect(self, frame):
+            batch = await super().detect(frame)
+            return batch.model_copy(update={"detections": ()})
+
+    path = tmp_path / "review.json"
+    path.write_text(json.dumps(_count_index([_count_review("f-1", 2)])), encoding="utf-8")
+    _, payload = _execute_count_case(tmp_path, index=path, detector=EmptyDetector())
+    assert payload["personCountSamples"][0]["predictedCount"] == 0
+    assert payload["personCountMetrics"]["mean_absolute_error"] == 2.0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "dataset",
+        "split",
+        "media",
+        "unknown",
+        "duplicate",
+        "blank_reviewer",
+        "naive_time",
+        "non_utc_time",
+        "bool_count",
+        "negative_count",
+        "missing_truth",
+        "excluded_truth",
+        "excluded_no_reason",
+        "wrong_scope",
+        "extra_field",
+        "duplicate_json_key",
+        "oversized",
+    ],
+)
+def test_count_review_rejects_invalid_or_stale_inputs_before_provider(tmp_path: Path, change: str):
+    review = _count_review("f-1", 1)
+    raw = _count_index([review])
+    if change == "dataset":
+        raw["datasetAggregateSha256"] = "e" * 64
+    elif change == "split":
+        raw["split"] = "train"
+    elif change == "media":
+        review["mediaSha256"] = "e" * 64
+    elif change == "unknown":
+        review["frameId"] = "unknown"
+    elif change == "duplicate":
+        raw["frames"].append(review.copy())
+    elif change == "blank_reviewer":
+        review["reviewedBy"] = " "
+    elif change == "naive_time":
+        review["reviewedAtUtc"] = "2026-10-02T00:00:00"
+    elif change == "non_utc_time":
+        review["reviewedAtUtc"] = "2026-10-02T07:00:00+07:00"
+    elif change == "bool_count":
+        review["groundTruthCount"] = True
+    elif change == "negative_count":
+        review["groundTruthCount"] = -1
+    elif change == "missing_truth":
+        review["groundTruthCount"] = None
+    elif change == "excluded_truth":
+        review["reviewStatus"] = "EXCLUDED"
+        review["reason"] = "test"
+    elif change == "excluded_no_reason":
+        review["reviewStatus"] = "EXCLUDED"
+        review["groundTruthCount"] = None
+    elif change == "wrong_scope":
+        review["reviewScope"] = "ONLY_VISIBLE_HELMETS"
+    elif change == "extra_field":
+        review["workerId"] = "not-an-identity"
+    path = tmp_path / "review.json"
+    serialized = json.dumps(raw)
+    if change == "duplicate_json_key":
+        serialized = serialized.replace('"split": "test"', '"split": "train", "split": "test"')
+    if change == "oversized":
+        serialized = " " * (16 * 1024 * 1024 + 1)
+    path.write_text(serialized, encoding="utf-8")
+    frames = (_frame("f-1", 1, 1.0),)
+    request = replace(_request(tmp_path, _artifact(tmp_path)), person_count_review_index_path=path)
+    request.episodes_index_path.write_text("", encoding="utf-8")
+    services = EvaluationExecutionServices(
+        dataset_loader=lambda _: LoadedEvaluationDataset(_manifest(), {"test": frames}, tmp_path),
+        region_loader=lambda _: _region_configuration(),
+        frame_reader=_Reader(),
+        detector=_Detector(),
+        pipeline=_Pipeline(),
+        temporal_gate=_Gate(),
+        provider_validation=lambda: pytest.fail("invalid review must fail before provider"),
+    )
+    metadata = EvaluationExecutionMetadata(
+        git=GitReportMetadata(commit_sha="d" * 40, dirty_worktree=False),
+        runtime=RuntimeReportMetadata(
+            python_version="3.12", platform="test", device="cpu", package_versions={}, hardware={}
+        ),
+        command_arguments=(),
+    )
+    with pytest.raises(ValueError, match="count review"):
+        asyncio.run(execute_evaluation(request, metadata=metadata, services=services))
+    assert not request.predictions_path.exists()
+    assert not request.candidate_report_path.exists()
 
 
 def test_load_ground_truth_episodes_is_strict_bounded_and_stable(tmp_path: Path) -> None:

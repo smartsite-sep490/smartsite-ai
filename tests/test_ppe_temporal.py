@@ -40,6 +40,107 @@ def ppe_obs(
     )
 
 
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize(
+    "statuses",
+    [("PRESENT", "MISSING"), ("MISSING", "PRESENT"), ("MISSING", "PRESENT", "MISSING")],
+)
+def test_conflicting_frame_breaks_confirmation_regardless_of_observation_order(
+    item: str, statuses: tuple[str, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+
+    def update(frame: int, observations: tuple[PpeObservation, ...]):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1,),
+            observations=observations,
+        )
+
+    assert update(0, (ppe_obs(1, item),)) == ()
+    assert update(1, tuple(ppe_obs(1, item, status) for status in statuses)) == ()
+    assert (
+        gate.confirmed_track_items(
+            stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+        )
+        == frozenset()
+    )
+    # Contradictory evidence is UNKNOWN, so two fresh missing frames are required.
+    assert update(2, (ppe_obs(1, item),)) == ()
+    candidates = update(3, (ppe_obs(1, item),))
+    assert len(candidates) == 1
+    assert candidates[0].first_seen_at == t0 + timedelta(milliseconds=200)
+
+
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize("statuses", [("PRESENT", "MISSING"), ("MISSING", "PRESENT")])
+def test_conflicting_frame_cannot_clear_history_or_poison_other_subjects(
+    item: str, statuses: tuple[str, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=1, clear_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+    other_item = "SAFETY_VEST" if item == "HARD_HAT" else "HARD_HAT"
+
+    def update(frame: int, observations: tuple[PpeObservation, ...]):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1, 2),
+            observations=observations,
+        )
+
+    assert len(update(0, (ppe_obs(1, item),))) == 1
+    update(1, (ppe_obs(1, item, "PRESENT"),))
+    candidates = update(
+        2,
+        (*tuple(ppe_obs(1, item, status) for status in statuses), ppe_obs(2, other_item)),
+    )
+    assert [(candidate.track_id, candidate.ppe_item) for candidate in candidates] == [
+        (2, other_item)
+    ]
+    update(3, (ppe_obs(1, item, "PRESENT"),))
+    assert (1, item) in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+    update(4, (ppe_obs(1, item, "PRESENT"),))
+    assert (1, item) not in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+
+
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+def test_consistent_duplicate_observations_count_as_one_frame(item: str) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=2, clear_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+
+    def update(frame: int, status: str):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, item, status),) * 3,
+        )
+
+    assert update(0, "MISSING") == ()
+    assert len(update(1, "MISSING")) == 1
+    update(2, "PRESENT")
+    assert (1, item) in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+    update(3, "PRESENT")
+    assert (
+        gate.confirmed_track_items(
+            stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+        )
+        == frozenset()
+    )
+
+
 def test_confirmation_at_third_consecutive_missing_observation() -> None:
     gate = TemporalPpeCandidateGate()
     t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)

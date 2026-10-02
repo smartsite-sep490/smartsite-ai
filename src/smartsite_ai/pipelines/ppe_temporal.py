@@ -97,9 +97,23 @@ class TemporalPpeCandidateGate:
                             state.consecutive_missing = 0
                             state.first_seen_at = None
 
-        obs_by_track_item: dict[tuple[int, PpeItem], PpeObservation] = {
-            (obs.track_id, obs.ppe_item): obs for obs in observations if obs.type == "PPE"
-        }
+        obs_by_track_item: dict[tuple[int, PpeItem], PpeObservation] = {}
+        conflicting_items: set[tuple[int, PpeItem]] = set()
+        for obs in observations:
+            if obs.type != "PPE":
+                continue
+            key = (obs.track_id, obs.ppe_item)
+            if key in conflicting_items:
+                continue
+            previous = obs_by_track_item.get(key)
+            if previous is not None and previous.status != obs.status:
+                # Ambiguous same-frame evidence is UNKNOWN regardless of ordering.
+                # A later duplicate cannot restore a contradicted item. Consistent
+                # duplicates count once because temporal evidence is per frame.
+                conflicting_items.add(key)
+                obs_by_track_item.pop(key)
+            else:
+                obs_by_track_item[key] = obs
 
         confirmed_candidates: list[ConfirmedPpeCandidate] = []
         for track_id in unique_active_track_ids:

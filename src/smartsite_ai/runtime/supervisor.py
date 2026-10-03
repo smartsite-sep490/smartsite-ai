@@ -10,8 +10,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from smartsite_ai.inference.protocol import DetectorProtocol
+from smartsite_ai.ingestion.status import StreamMetrics
 from smartsite_ai.integrations.outbox import OutboxCounts
-from smartsite_ai.processing_worker import ProcessingWorkerResult
+from smartsite_ai.processing_worker import ProcessingWorkerResult, frame_flow_payload
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class CameraOutcome:
     events_enqueued: int = 0
     outbox: OutboxCounts | None = None
     error_class: str | None = None
+    stream_metrics: StreamMetrics | None = None
 
 
 @dataclass(slots=True)
@@ -204,6 +206,9 @@ def report_payload(report: RuntimeReport) -> dict[str, object]:
             }
         if camera.error_class is not None:
             payload["errorClass"] = camera.error_class
+        frame_flow = frame_flow_payload(camera.stream_metrics)
+        if frame_flow is not None:
+            payload["frameFlow"] = frame_flow
         cameras.append(payload)
     return {
         "modelLoaded": report.model_loaded,
@@ -243,6 +248,7 @@ def _outcome_from_result(session: CameraSession, result: object) -> CameraOutcom
             frames_processed=result.frames_processed,
             events_enqueued=result.events_enqueued,
             outbox=result.outbox,
+            stream_metrics=result.stream_metrics,
         )
     if isinstance(result, Exception):
         _LOGGER.warning(

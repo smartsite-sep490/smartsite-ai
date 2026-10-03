@@ -126,6 +126,13 @@ Implemented:
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - authenticated, bounded camera-configuration polling with strong ETag/304 support and stale-snapshot fail-closed behavior;
 - an explicit one-camera headless worker that connects ingestion, verified YOLO11 inference, tracking, MF05/MF06 pipelines, and Backend delivery without a browser session;
+- terminal worker reports include measured `frameFlow` counts: `sampledOutFrames` are
+  deliberately excluded by the configured sampling cadence; `framesDropped` are evicted
+  from the bounded queue under backpressure. `framesEnqueued` and `framesDequeued` describe
+  that queue, while `framesProcessed` counts completed processing calls, including frames
+  that produce no event. These are per-run frame counts, not unique people, accuracy, or
+  throughput measurements. Unmeasured counts are omitted; `outbox.delivered` remains a
+  cumulative count for the retained outbox database, not new events in the current run;
 - a crash-tolerant SQLite observation outbox with canonical payload conflict detection, retry scheduling, terminal 4xx classification, and Backend idempotency compatibility;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
 - optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;

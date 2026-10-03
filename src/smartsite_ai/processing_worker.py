@@ -18,7 +18,7 @@ from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.status import StreamState
+from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.pipelines.ppe_temporal import (
@@ -66,6 +66,23 @@ class ProcessingWorkerResult:
     frames_processed: int
     events_enqueued: int
     outbox: OutboxCounts
+    stream_metrics: StreamMetrics | None = None
+
+    @property
+    def frame_flow(self) -> dict[str, int] | None:
+        return frame_flow_payload(self.stream_metrics)
+
+
+def frame_flow_payload(metrics: StreamMetrics | None) -> dict[str, int] | None:
+    """Expose measured frame counts only; never serialize source/error details."""
+    if metrics is None:
+        return None
+    return {
+        "framesEnqueued": metrics.frames_enqueued,
+        "framesDequeued": metrics.frames_dequeued,
+        "framesDropped": metrics.frames_dropped,
+        "sampledOutFrames": metrics.sampled_out_frames,
+    }
 
 
 class ProcessingWorkerSourceError(RuntimeError):
@@ -184,6 +201,7 @@ class HeadlessCameraProcessingWorker:
             frames_processed=frames_processed,
             events_enqueued=events_enqueued,
             outbox=await self._outbox.counts(),
+            stream_metrics=source_status.metrics,
         )
 
     async def _delivery_loop(self) -> None:

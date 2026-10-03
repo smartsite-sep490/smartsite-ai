@@ -18,7 +18,7 @@ from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.status import StreamState
+from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, ProcessingWorkerResult
@@ -33,6 +33,7 @@ from smartsite_ai.runtime.manifest import (
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
+    RuntimeReport,
     execute_runtime,
     exit_code,
     report_payload,
@@ -117,6 +118,43 @@ def _clean_result() -> ProcessingWorkerResult:
         frames_processed=2,
         events_enqueued=1,
         outbox=OutboxCounts(pending=0, delivered=1, terminal=0),
+    )
+
+
+@pytest.mark.anyio
+async def test_report_preserves_frame_flow_without_inventing_unmeasured_counts() -> None:
+    result = _clean_result()
+    result = ProcessingWorkerResult(
+        frames_processed=result.frames_processed,
+        events_enqueued=result.events_enqueued,
+        outbox=result.outbox,
+        stream_metrics=StreamMetrics(
+            frames_enqueued=5,
+            frames_dequeued=2,
+            frames_dropped=3,
+            sampled_out_frames=4,
+            last_error="rtsp://operator:secret@camera",
+        ),
+    )
+    outcomes = await supervise_sessions(
+        (CameraSession("gate", "CAM-A", _ResultWorker(result), _StopPoller()),)
+    )
+    payload = report_payload(RuntimeReport(cameras=outcomes, model_loaded=True, model_closed=True))
+    assert payload["cameras"][0]["frameFlow"] == {
+        "framesEnqueued": 5,
+        "framesDequeued": 2,
+        "framesDropped": 3,
+        "sampledOutFrames": 4,
+    }
+    assert "secret" not in json.dumps(payload)
+    legacy = await supervise_sessions(
+        (CameraSession("yard", "CAM-B", _ResultWorker(_clean_result()), _StopPoller()),)
+    )
+    assert (
+        "frameFlow"
+        not in report_payload(RuntimeReport(cameras=legacy, model_loaded=True, model_closed=True))[
+            "cameras"
+        ][0]
     )
 
 
@@ -636,7 +674,10 @@ class _Stream:
         self.stopped = True
 
     def snapshot(self) -> SimpleNamespace:
-        return SimpleNamespace(state=StreamState.STOPPED)
+        return SimpleNamespace(
+            state=StreamState.STOPPED,
+            metrics=StreamMetrics(frames_enqueued=1, frames_dequeued=int(self.frame is None)),
+        )
 
 
 class _RecordingPipeline:

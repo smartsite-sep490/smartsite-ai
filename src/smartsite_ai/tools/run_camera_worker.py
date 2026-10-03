@@ -223,6 +223,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             {
                 "framesProcessed": result.frames_processed,
                 "eventsEnqueued": result.events_enqueued,
+                **({"frameFlow": result.frame_flow} if result.frame_flow is not None else {}),
                 "outbox": {
                     "pending": result.outbox.pending,
                     "delivered": result.outbox.delivered,

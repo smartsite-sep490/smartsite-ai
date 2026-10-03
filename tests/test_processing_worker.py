@@ -16,8 +16,8 @@ from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.status import StreamState
+from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
+from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.processing_worker import (
@@ -77,6 +77,7 @@ class FakeStream:
         self.started = False
         self.stopped = False
         self.terminal_state = terminal_state
+        self.frame_count = len(frames)
 
     async def start(self) -> None:
         self.started = True
@@ -91,7 +92,13 @@ class FakeStream:
         self.stopped = True
 
     def snapshot(self) -> SimpleNamespace:
-        return SimpleNamespace(state=self.terminal_state)
+        return SimpleNamespace(
+            state=self.terminal_state,
+            metrics=StreamMetrics(
+                frames_enqueued=self.frame_count,
+                frames_dequeued=self.frame_count - len(self.frames),
+            ),
+        )
 
 
 class FakeDetector:
@@ -181,6 +188,70 @@ async def test_worker_runs_without_browser_and_delivers_deterministic_events(
     assert result.outbox.pending == 0
     assert len(requests) == 2
     assert len(set(pipeline.event_ids)) == 2
+
+
+@pytest.mark.anyio
+async def test_worker_reports_sampling_separately_from_actual_queue_drops(tmp_path: Path) -> None:
+    class OverloadedStream(FakeStream):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.queue = BoundedFrameQueue(maxsize=2)
+
+        async def start(self) -> None:
+            self.started = True
+            for sequence in range(5):
+                self.queue.put(_frame(sequence))
+            self.queue.close()
+
+        async def get_frame(self) -> FrameEnvelope:
+            return await self.queue.get()
+
+        def snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                state=StreamState.STOPPED,
+                metrics=StreamMetrics(
+                    frames_enqueued=self.queue.enqueued_count,
+                    frames_dequeued=self.queue.dequeued_count,
+                    frames_dropped=self.queue.dropped_count,
+                    sampled_out_frames=4,
+                    last_error="rtsp://operator:secret@camera",
+                ),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            202,
+            json={
+                "eventId": json.loads(request.content)["eventId"],
+                "status": "PROCESSED",
+                "alertIds": [],
+            },
+        )
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    stream = OverloadedStream()
+    outbox = SqliteEventOutbox((tmp_path / "overload.sqlite3").resolve())
+    async with BackendClient(
+        "http://backend:3000", "token", transport=httpx.MockTransport(handler)
+    ) as backend:
+        result = await HeadlessCameraProcessingWorker(
+            stream=stream,  # type: ignore[arg-type]
+            detector=FakeDetector(),
+            pipeline=RecordingPipeline(),
+            ppe_region_id=REGION_ID,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=OutboxDispatcher(outbox, backend),
+        ).run()
+    assert result.frames_processed == 2
+    assert result.frame_flow == {
+        "framesEnqueued": 5,
+        "framesDequeued": 2,
+        "framesDropped": 3,
+        "sampledOutFrames": 4,
+    }
+    assert "secret" not in json.dumps(result.frame_flow)
 
 
 @pytest.mark.anyio

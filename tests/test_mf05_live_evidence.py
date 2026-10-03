@@ -28,7 +28,7 @@ from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.status import StreamState
+from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.processing_worker import (
@@ -115,6 +115,7 @@ class FakeStream:
             is_live=False,
         )
         self.frames = list(frames)
+        self.frame_count = len(frames)
 
     async def start(self) -> None:
         pass
@@ -129,7 +130,13 @@ class FakeStream:
         pass
 
     def snapshot(self) -> SimpleNamespace:
-        return SimpleNamespace(state=StreamState.STOPPED)
+        return SimpleNamespace(
+            state=StreamState.STOPPED,
+            metrics=StreamMetrics(
+                frames_enqueued=self.frame_count,
+                frames_dequeued=self.frame_count - len(self.frames),
+            ),
+        )
 
 
 class FakeDetector:

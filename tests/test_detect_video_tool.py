@@ -1018,3 +1018,61 @@ def test_ui_timeline_collector_zone_entry_without_leaking_unconfirmed_ppe() -> N
     assert "ZONE_ENTRY" in types
     assert "PERSON" in types
     assert not any(o["type"] == "PPE" for o in recorded_obs)
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_documented_zone_video_example_preserves_restricted_region(inside: bool) -> None:
+    from smartsite_ai.domain.regions import CameraRegionConfiguration
+
+    root = Path(__file__).resolve().parents[1]
+    documented_command = next(
+        line
+        for line in (root / "README.md").read_text(encoding="utf-8").splitlines()
+        if "--region-configuration examples\\zone-ui-region-configuration.example.json" in line
+    )
+    ppe_region_id = documented_command.split("--ppe-region-id ", 1)[1].split()[0]
+    config = CameraRegionConfiguration.from_wire_bytes(
+        (root / "examples" / "zone-ui-region-configuration.example.json").read_bytes()
+    )
+    collector = detect_video._UiTimelineCollector(configuration=config, ppe_region_id=ppe_region_id)
+    person = NormalizedDetection(
+        class_id=0,
+        class_name="Person",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.72 if inside else 0.1,
+            y1=0.3,
+            x2=0.85 if inside else 0.2,
+            y2=0.7,
+            coordinate_space="NORMALIZED_0_1",
+        ),
+    )
+    for sequence in range(1, 5):
+        collector.observe(
+            DetectionBatch(
+                stream_id="zone-example",
+                session_id=UUID("00000000-0000-4000-8000-000000000001"),
+                camera_external_id=config.camera_external_id,
+                captured_at=datetime(2026, 10, 3, 12, 0, sequence, tzinfo=UTC),
+                frame_width=640,
+                frame_height=352,
+                sequence_number=sequence,
+                model_artifact_id="fake-detector",
+                model_version="test",
+                model_sha256="a" * 64,
+                detections=(person,),
+            ),
+            video_time_seconds=sequence / 25,
+        )
+        if sequence < 3:
+            assert not collector.entries
+    entries = [
+        observation
+        for entry in collector.entries
+        for observation in entry["event"]["observations"]
+        if observation["type"] == "ZONE_ENTRY"
+    ]
+    assert len(entries) == (1 if inside else 0)
+    if inside:
+        assert entries[0]["regionId"] == "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+        assert entries[0]["regionId"] != ppe_region_id

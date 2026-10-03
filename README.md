@@ -126,6 +126,11 @@ Implemented:
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - authenticated, bounded camera-configuration polling with strong ETag/304 support and stale-snapshot fail-closed behavior;
 - an explicit one-camera headless worker that connects ingestion, verified YOLO11 inference, tracking, MF05/MF06 pipelines, and Backend delivery without a browser session;
+- both explicit camera worker commands prepare the verified detector with one bounded
+  synthetic frame before opening camera ingestion. The warm-up result is discarded,
+  never emitted as an observation or evidence. Failure stops startup and releases the
+  runner; cancellation waits for native inference before releasing it. This does not
+  initialize a model at API boot or guarantee zero drops under runtime overload;
 - terminal worker reports include measured `frameFlow` counts: `sampledOutFrames` are
   deliberately excluded by the configured sampling cadence; `framesDropped` are evicted
   from the bounded queue under backpressure. `framesEnqueued` and `framesDequeued` describe

@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 from smartsite_ai.config import Settings
-from smartsite_ai.inference.loading import load_yolo11_detector
+from smartsite_ai.inference.loading import load_warmed_yolo11_detector
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
@@ -71,7 +71,7 @@ async def run_manifest(manifest_path: Path, *, settings: Settings | None = None)
 
     async def open_model() -> DetectorProtocol:
         nonlocal runner
-        detector, loaded_runner, _artifact, _class_map = load_yolo11_detector(
+        detector, loaded_runner, _artifact, _class_map = await load_warmed_yolo11_detector(
             bound.model_spec,
             runner_factory=UltralyticsYoloRunner,
         )

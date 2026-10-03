@@ -1,8 +1,10 @@
+import asyncio
 import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -15,7 +17,7 @@ from smartsite_ai.inference.loading import (
     load_detector_artifact,
     load_yolo11_detector,
 )
-from smartsite_ai.inference.yolo import RawYoloDetection
+from smartsite_ai.inference.yolo import DetectorUnavailableError, RawYoloDetection
 
 
 def artifact_document(artifact_path: Path, **overrides: object) -> dict[str, object]:
@@ -77,6 +79,79 @@ def valid_metadata(**overrides: object) -> dict[str, object]:
         "classMap": {str(key): value for key, value in CANONICAL_PPE_CLASS_MAP},
         **overrides,
     }
+
+
+@pytest.mark.anyio
+async def test_worker_loader_warms_once_without_using_a_camera_frame(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    frames = []
+
+    class RecordingRunner(FakeRunner):
+        def predict(self, frame):
+            frames.append(frame)
+            return ()
+
+    runner = RecordingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    _, returned, _, _ = await load_warmed_yolo11_detector(spec, runner_factory=lambda: runner)
+    assert returned is runner
+    assert not runner.closed
+    assert len(frames) == 1
+    assert frames[0].stream_id == "model-warmup"
+    assert frames[0].camera_external_id == "MODEL-WARMUP"
+    assert frames[0].payload == bytes(64 * 64 * 3)
+    assert frames[0].sequence_number == 0
+
+
+@pytest.mark.anyio
+async def test_worker_warmup_failure_closes_runner_before_returning(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    class FailingRunner(FakeRunner):
+        def predict(self, _frame):
+            raise RuntimeError("prediction unavailable")
+
+    runner = FailingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    with pytest.raises(DetectorUnavailableError, match="prediction failed"):
+        await load_warmed_yolo11_detector(spec, runner_factory=lambda: runner)
+    assert runner.closed
+
+
+@pytest.mark.anyio
+async def test_cancelled_warmup_waits_for_native_inference_before_close(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    started, release, finished = Event(), Event(), Event()
+
+    class BlockingRunner(FakeRunner):
+        def predict(self, _frame):
+            started.set()
+            assert release.wait(3)
+            finished.set()
+            return ()
+
+        def close(self):
+            assert finished.is_set(), "Must not dispose an in-flight native prediction"
+            super().close()
+
+    runner = BlockingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    task = asyncio.create_task(load_warmed_yolo11_detector(spec, runner_factory=lambda: runner))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not runner.closed
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert runner.closed
 
 
 def test_import_has_no_provider_or_hardware_side_effects() -> None:

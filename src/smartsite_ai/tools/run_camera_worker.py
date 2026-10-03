@@ -11,7 +11,7 @@ from uuid import UUID
 from smartsite_ai.config import Settings
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
-from smartsite_ai.inference.loading import load_yolo11_detector
+from smartsite_ai.inference.loading import load_warmed_yolo11_detector
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
@@ -179,7 +179,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
         poller.ensure_fresh()
         await _require_ppe_region(store, args.camera_external_id, args.ppe_region_id)
 
-        detector, loaded_runner, _artifact, _class_map = load_yolo11_detector(
+        detector, loaded_runner, _artifact, _class_map = await load_warmed_yolo11_detector(
             model_spec_path,
             runner_factory=UltralyticsYoloRunner,
         )

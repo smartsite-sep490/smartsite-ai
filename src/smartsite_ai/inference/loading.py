@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -229,6 +231,37 @@ def load_yolo11_detector(path: Path, *, runner_factory: RunnerFactory) -> Loaded
         runner_factory=runner_factory,
         require_yolo11_metadata=True,
     )
+
+
+async def load_warmed_yolo11_detector(
+    path: Path, *, runner_factory: RunnerFactory
+) -> LoadedDetectorStack:
+    """Prepare an explicit worker before camera ingestion starts.
+
+    A bounded synthetic BGR frame initializes the provider's first-prediction
+    state using the verified artifact settings. Its result is discarded here;
+    it never reaches tracking, evidence, an outbox, or a business observation.
+    The detector owns native inference through cancellation before cleanup.
+    """
+    stack = load_yolo11_detector(path, runner_factory=runner_factory)
+    detector, runner, _artifact, _class_map = stack
+    try:
+        await detector.detect(
+            FrameEnvelope(
+                stream_id="model-warmup",
+                session_id=uuid4(),
+                camera_external_id="MODEL-WARMUP",
+                captured_at=datetime.now(UTC),
+                width=64,
+                height=64,
+                sequence_number=0,
+                payload=bytes(64 * 64 * 3),
+            )
+        )
+    except BaseException:
+        _close_safely(runner)
+        raise
+    return stack
 
 
 def load_detector_artifact(

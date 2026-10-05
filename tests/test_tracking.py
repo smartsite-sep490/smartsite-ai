@@ -88,3 +88,35 @@ def test_iou_tracker_resets_ids_for_new_session_and_rejects_out_of_order_frames(
         update={"session_id": UUID("00000000-0000-4000-8000-000000000002")}
     )
     assert [person.track_id for person in tracker.update(next_session).persons] == [1]
+
+
+def test_tracker_rejects_camera_change_within_session_without_mutating_tracks() -> None:
+    tracker = IoUPersonTracker()
+    person = detection("person", (0.10, 0.10, 0.40, 0.80))
+    tracker.update(batch(1, person))
+    other_camera = batch(2, person).model_copy(update={"camera_external_id": "camera-02"})
+
+    with pytest.raises(ValueError, match="camera.*session"):
+        tracker.update(other_camera)
+
+    # A rejected batch must not consume sequence 2 or change the original source.
+    assert [item.track_id for item in tracker.update(batch(2, person)).persons] == [1]
+
+
+def test_tracker_accepts_new_camera_only_with_new_session_and_clears_old_tracks() -> None:
+    tracker = IoUPersonTracker()
+    tracker.update(
+        batch(
+            1,
+            detection("person", (0.10, 0.10, 0.40, 0.80)),
+            detection("person", (0.60, 0.10, 0.90, 0.80)),
+        )
+    )
+    other_source = batch(1, detection("person", (0.60, 0.10, 0.90, 0.80))).model_copy(
+        update={
+            "camera_external_id": "camera-02",
+            "session_id": UUID("00000000-0000-4000-8000-000000000002"),
+        }
+    )
+
+    assert [person.track_id for person in tracker.update(other_source).persons] == [1]

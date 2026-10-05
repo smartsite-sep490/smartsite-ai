@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY contracts ./contracts
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --extra identity --no-dev --no-editable
 
 FROM python:3.12.13-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \

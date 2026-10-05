@@ -61,6 +61,7 @@ class EvaluationRunConfiguration:
     summary_path: Path
     incomplete_report_path: Path
     annotated_dir: Path | None
+    person_count_review_index: Path | None = None
 
 
 EvaluationExecutor = Callable[[EvaluationRunConfiguration], None]
@@ -109,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", choices=_SPLITS, required=True)
     parser.add_argument("--match-iou", type=_match_iou, required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
+    parser.add_argument(
+        "--person-count-review-index",
+        type=Path,
+        help="optional full-frame reviewed counts bound to this dataset and split",
+    )
     parser.add_argument(
         "--annotated",
         action="store_true",
@@ -181,6 +187,10 @@ def preflight_arguments(args: argparse.Namespace) -> EvaluationRunConfiguration:
             args.provider_data_config, argument="provider data config"
         ),
     }
+    if args.person_count_review_index is not None:
+        inputs["person count review index"] = _required_regular_file(
+            args.person_count_review_index, argument="person count review index"
+        )
     report_dir = _normalized_new_report_dir(args.report_dir)
     output_paths = tuple(report_dir / filename for filename in _OUTPUT_FILENAMES) + (
         report_dir / _INCOMPLETE_REPORT_FILENAME,
@@ -211,6 +221,7 @@ def preflight_arguments(args: argparse.Namespace) -> EvaluationRunConfiguration:
         summary_path=output_paths[3],
         incomplete_report_path=output_paths[4],
         annotated_dir=report_dir / "annotated" if args.annotated else None,
+        person_count_review_index=inputs.get("person count review index"),
     )
 
 
@@ -331,6 +342,10 @@ def _default_execute(configuration: EvaluationRunConfiguration) -> None:
                 CommandArgument(
                     name="annotated", value=str(configuration.annotated_dir is not None)
                 ),
+                CommandArgument(
+                    name="personCountReviewIndex",
+                    value=str(configuration.person_count_review_index is not None),
+                ),
             ),
         )
         request = EvaluationExecutionRequest(
@@ -345,6 +360,7 @@ def _default_execute(configuration: EvaluationRunConfiguration) -> None:
             accuracy_report_path=configuration.accuracy_report_path,
             candidate_report_path=configuration.candidate_report_path,
             summary_path=configuration.summary_path,
+            person_count_review_index_path=configuration.person_count_review_index,
         )
         services = EvaluationExecutionServices(
             dataset_loader=load_evaluation_dataset,
@@ -436,6 +452,8 @@ def _validate_completed_outputs(configuration: EvaluationRunConfiguration) -> No
         configuration.region_configuration,
         configuration.provider_data_config,
     )
+    if configuration.person_count_review_index is not None:
+        input_paths += (configuration.person_count_review_index,)
     output_paths = (
         configuration.predictions_path,
         configuration.accuracy_report_path,

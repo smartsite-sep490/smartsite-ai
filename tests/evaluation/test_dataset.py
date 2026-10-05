@@ -1273,6 +1273,283 @@ def test_video_annotations_require_identity_and_person_relationship(tmp_path: Pa
         load_evaluation_dataset(missing_relationship_manifest)
 
 
+def _video_owned_ppe_row(
+    *,
+    frame_id: str,
+    class_name: str,
+    observable: list[str] | None,
+    frame_index: int = 0,
+    video_time_seconds: float = 0.0,
+    image: bool = False,
+) -> dict[str, object]:
+    person: dict[str, object] = {
+        "annotationId": "person-1",
+        "className": "Person",
+        "boundingBox": {"x1": 0.1, "y1": 0.1, "x2": 0.4, "y2": 0.9},
+        "personInstanceId": "person-a",
+    }
+    if observable is not None:
+        person["observablePpeItems"] = observable
+    row: dict[str, object] = {
+        "frameId": frame_id,
+        "mediaPath": "images/still.jpg" if image else "videos/camera.mp4",
+        "sha256": "0" * 64,
+        "width": 640,
+        "height": 480,
+        "annotations": [
+            person,
+            {
+                "annotationId": "ppe-1",
+                "className": class_name,
+                "boundingBox": {"x1": 0.12, "y1": 0.12, "x2": 0.3, "y2": 0.3},
+                "personInstanceId": "person-a",
+                "relatedPersonAnnotationId": "person-1",
+            },
+        ],
+    }
+    if not image:
+        row["frameIndex"] = frame_index
+        row["videoTimeSeconds"] = video_time_seconds
+    return row
+
+
+def test_video_ppe_requires_declared_observability_before_a_label(tmp_path: Path) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "absent-observability",
+        train_rows=[
+            _video_owned_ppe_row(frame_id="video-frame", class_name="Hardhat", observable=None)
+        ],
+    )
+    with pytest.raises(DatasetValidationError, match="must declare observablePpeItems") as raised:
+        load_evaluation_dataset(manifest)
+    assert "videos/" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "item", "observable"),
+    [
+        ("Hardhat", "HARD_HAT", []),
+        ("NO-Hardhat", "HARD_HAT", []),
+        ("Safety Vest", "SAFETY_VEST", []),
+        ("NO-Safety Vest", "SAFETY_VEST", []),
+        ("Hardhat", "HARD_HAT", ["SAFETY_VEST"]),
+        ("NO-Hardhat", "HARD_HAT", ["SAFETY_VEST"]),
+        ("Safety Vest", "SAFETY_VEST", ["HARD_HAT"]),
+        ("NO-Safety Vest", "SAFETY_VEST", ["HARD_HAT"]),
+    ],
+)
+def test_video_ppe_label_outside_observable_items_is_rejected(
+    tmp_path: Path,
+    class_name: str,
+    item: str,
+    observable: list[str],
+) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "omitted-item",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="video-frame",
+                class_name=class_name,
+                observable=observable,
+            )
+        ],
+    )
+    with pytest.raises(DatasetValidationError, match="observablePpeItems omits it") as raised:
+        load_evaluation_dataset(manifest)
+    message = str(raised.value)
+    assert "video-frame" in message
+    assert "ppe-1" in message
+    assert item in message
+    assert "videos/" not in message
+
+
+@pytest.mark.parametrize(
+    ("class_name", "observable"),
+    [
+        ("Hardhat", ["HARD_HAT"]),
+        ("NO-Hardhat", ["HARD_HAT"]),
+        ("Safety Vest", ["SAFETY_VEST"]),
+        ("NO-Safety Vest", ["SAFETY_VEST"]),
+    ],
+)
+def test_video_ppe_label_is_allowed_when_the_item_is_observable(
+    tmp_path: Path,
+    class_name: str,
+    observable: list[str],
+) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "allowed-item",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="video-frame",
+                class_name=class_name,
+                observable=observable,
+            )
+        ],
+    )
+    loaded = load_evaluation_dataset(manifest)
+    assert loaded.get_split("train")[0].annotations[1].class_name == class_name
+
+
+def test_image_ppe_label_keeps_current_rules_without_observable_items(tmp_path: Path) -> None:
+    manifest = _create_minimal_dataset(
+        tmp_path / "image-rules",
+        train_rows=[
+            _video_owned_ppe_row(
+                frame_id="still-frame", class_name="Hardhat", observable=None, image=True
+            )
+        ],
+    )
+    loaded = load_evaluation_dataset(manifest)
+    annotation = loaded.get_split("train")[0].annotations[1]
+    assert annotation.class_name == "Hardhat"
+    assert annotation.related_person_annotation_id == "person-1"
+
+
+@pytest.mark.parametrize("person_id", [7, "person-a"])
+def test_video_frame_rejects_duplicate_person_instance_id(
+    tmp_path: Path, person_id: int | str
+) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="duplicate-person", class_name="Hardhat", observable=["HARD_HAT"]
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    for annotation in annotations:
+        annotation["personInstanceId"] = person_id
+    annotations.append(
+        dict(
+            annotations[0],
+            annotationId="person-2",
+            boundingBox={"x1": 0.5, "y1": 0.1, "x2": 0.9, "y2": 0.9},
+        )
+    )
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    with pytest.raises(DatasetValidationError, match="repeats a Person personInstanceId") as raised:
+        load_evaluation_dataset(manifest)
+    assert "duplicate-person" in str(raised.value)
+    assert "videos/" not in str(raised.value)
+
+
+def test_video_frame_keeps_integer_and_string_person_ids_distinct(tmp_path: Path) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="distinct-persons", class_name="Hardhat", observable=["HARD_HAT"]
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations[0]["personInstanceId"] = 7
+    annotations[1]["personInstanceId"] = 7
+    annotations.append(dict(annotations[0], annotationId="person-2", personInstanceId="7"))
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    frame = load_evaluation_dataset(manifest).get_split("train")[0]
+    assert [ann.person_instance_id for ann in frame.annotations if ann.class_name == "Person"] == [
+        7,
+        "7",
+    ]
+
+
+def test_video_person_identity_can_continue_in_later_frames(tmp_path: Path) -> None:
+    rows = []
+    for frame_index in range(2):
+        row = _video_owned_ppe_row(
+            frame_id=f"continued-{frame_index}",
+            class_name="Hardhat",
+            observable=["HARD_HAT"],
+            frame_index=frame_index,
+            video_time_seconds=float(frame_index),
+        )
+        annotations = row["annotations"]
+        assert isinstance(annotations, list)
+        annotations[0]["annotationId"] = f"person-{frame_index}"
+        annotations[1]["annotationId"] = f"ppe-{frame_index}"
+        annotations[1]["relatedPersonAnnotationId"] = f"person-{frame_index}"
+        rows.append(row)
+    manifest = _create_minimal_dataset(tmp_path, train_rows=rows)
+    assert len(load_evaluation_dataset(manifest).get_split("train")) == 2
+
+
+def test_image_duplicate_person_identity_keeps_existing_rules(tmp_path: Path) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="still-person", class_name="Hardhat", observable=None, image=True
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations.append(dict(annotations[0], annotationId="person-2"))
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    assert len(load_evaluation_dataset(manifest).get_split("train")[0].annotations) == 3
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative", "item"),
+    [("Hardhat", "NO-Hardhat", "HARD_HAT"), ("Safety Vest", "NO-Safety Vest", "SAFETY_VEST")],
+)
+@pytest.mark.parametrize("reverse_annotations", [False, True])
+def test_video_person_rejects_conflicting_ppe_ground_truth(
+    tmp_path: Path, positive: str, negative: str, item: str, reverse_annotations: bool
+) -> None:
+    row = _video_owned_ppe_row(frame_id="conflicting-ppe", class_name=positive, observable=[item])
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations.append(dict(annotations[1], annotationId="ppe-conflict", className=negative))
+    if reverse_annotations:
+        annotations.reverse()
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    with pytest.raises(DatasetValidationError, match=f"conflicting {item} labels") as raised:
+        load_evaluation_dataset(manifest)
+    assert "conflicting-ppe" in str(raised.value)
+    assert "videos/" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative", "item"),
+    [("Hardhat", "NO-Hardhat", "HARD_HAT"), ("Safety Vest", "NO-Safety Vest", "SAFETY_VEST")],
+)
+def test_video_different_people_can_have_opposite_ppe_states(
+    tmp_path: Path, positive: str, negative: str, item: str
+) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="different-person-states", class_name=positive, observable=[item]
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations.extend(
+        [
+            dict(annotations[0], annotationId="person-2", personInstanceId="person-b"),
+            dict(
+                annotations[1],
+                annotationId="ppe-2",
+                className=negative,
+                personInstanceId="person-b",
+                relatedPersonAnnotationId="person-2",
+            ),
+        ]
+    )
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    assert len(load_evaluation_dataset(manifest).get_split("train")[0].annotations) == 4
+
+
+def test_video_ppe_states_are_independent_by_item(tmp_path: Path) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="independent-item", class_name="Hardhat", observable=["HARD_HAT", "SAFETY_VEST"]
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations.append(dict(annotations[1], annotationId="ppe-vest", className="NO-Safety Vest"))
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    assert len(load_evaluation_dataset(manifest).get_split("train")[0].annotations) == 3
+
+
+def test_image_conflicting_ppe_labels_keep_existing_rules(tmp_path: Path) -> None:
+    row = _video_owned_ppe_row(
+        frame_id="still-ppe", class_name="Hardhat", observable=None, image=True
+    )
+    annotations = row["annotations"]
+    assert isinstance(annotations, list)
+    annotations.append(dict(annotations[1], annotationId="ppe-conflict", className="NO-Hardhat"))
+    manifest = _create_minimal_dataset(tmp_path, train_rows=[row])
+    assert len(load_evaluation_dataset(manifest).get_split("train")[0].annotations) == 3
+
+
 def test_loader_bounds_frames_per_split(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("smartsite_ai.evaluation.dataset.MAX_FRAMES_PER_SPLIT", 1)
     rows = [

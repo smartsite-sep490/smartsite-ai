@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 PREPARATION_MANIFEST = "preparation.manifest.json"
 _SHA256_LENGTH = 64
+_VIDEO_FRAME_NAME = re.compile(r"^(.+_(?:mp4|mov|avi|mkv|webm))-\d+_jpg$", re.IGNORECASE)
 _CANONICAL_CLASS_MAP = {
     "0": "Person",
     "1": "Hardhat",
@@ -142,7 +144,29 @@ def _manifest_entries(payload: Mapping[str, object]) -> tuple[dict[str, object],
     return tuple(sorted(entries, key=lambda entry: str(entry["path"])))
 
 
-def verify_prepared_dataset(data_config: Path) -> str:
+def _reject_cross_split_image_overlap(entries: Sequence[Mapping[str, object]]) -> None:
+    hashes: dict[str, str] = {}
+    originals: dict[str, str] = {}
+    videos: dict[str, str] = {}
+    for entry in entries:
+        path = PurePosixPath(str(entry["path"]))
+        if len(path.parts) != 3 or path.parts[1] != "images":
+            continue
+        split = path.parts[0]
+        if split not in {"train", "val", "test"}:
+            continue
+        digest = str(entry["sha256"])
+        if hashes.setdefault(digest, split) != split:
+            raise DatasetIntegrityError("cross-split image overlap: identical bytes")
+        original = path.stem.split(".rf.", 1)[0]
+        if ".rf." in path.stem and originals.setdefault(original, split) != split:
+            raise DatasetIntegrityError("cross-split image overlap: original-image filename")
+        video = _VIDEO_FRAME_NAME.fullmatch(original)
+        if video and videos.setdefault(video[1].casefold(), split) != split:
+            raise DatasetIntegrityError("cross-split image overlap: video-source filename")
+
+
+def verify_prepared_dataset(data_config: Path, *, reject_split_overlap: bool = False) -> str:
     """Verify every prepared byte and return the pinned aggregate SHA-256."""
 
     root = data_config.parent.resolve(strict=True)
@@ -188,4 +212,6 @@ def verify_prepared_dataset(data_config: Path) -> str:
         or output_aggregate.get("sha256") != aggregate
     ):
         raise DatasetIntegrityError("preparation manifest aggregate does not match dataset")
+    if reject_split_overlap:
+        _reject_cross_split_image_overlap(verified)
     return aggregate

@@ -29,6 +29,7 @@ class RestrictedZonePipeline:
         self._entry_confirmation_frames = entry_confirmation_frames
         self._exit_confirmation_frames = exit_confirmation_frames
         self._source_key: tuple[str, UUID] | None = None
+        self._camera_external_id: str | None = None
         self._last_sequence: int | None = None
         self._inside: dict[tuple[int, str], bool] = {}
         self._inside_streaks: dict[tuple[int, str], int] = {}
@@ -58,6 +59,7 @@ class RestrictedZonePipeline:
         source_key = (batch.stream_id, batch.session_id)
         if self._source_key != source_key:
             self._source_key = source_key
+            self._camera_external_id = batch.camera_external_id
             self._last_sequence = None
             self._inside.clear()
             self._inside_streaks.clear()
@@ -65,6 +67,8 @@ class RestrictedZonePipeline:
             self._absent_frames.clear()
             self._region_versions.clear()
             self._region_ids.clear()
+        elif batch.camera_external_id != self._camera_external_id:
+            raise ValueError("camera cannot change within a stream session")
         elif self._last_sequence is not None and batch.sequence_number <= self._last_sequence:
             raise ValueError(
                 "Tracked frames must be supplied in strictly increasing sequence order"

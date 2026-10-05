@@ -1,5 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
+
+import pytest
 
 from smartsite_ai.domain.regions import (
     CameraObservationRegionConfiguration,
@@ -11,7 +13,9 @@ from smartsite_ai.inference.models import (
     NormalizedDetection,
 )
 from smartsite_ai.pipelines.ppe import PpePipeline
+from smartsite_ai.pipelines.ppe_temporal import TemporalPpeCandidateGate
 from smartsite_ai.tracking import IoUPersonTracker
+from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 REGION_ID = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
@@ -186,3 +190,102 @@ def test_ppe_pipeline_suppresses_missing_fallback_for_conflicted_evidence() -> N
     pipeline = PpePipeline(emit_missing=True)
     observations = pipeline.process(tracked, region())
     assert [(item.ppe_item, item.status) for item in observations] == [("SAFETY_VEST", "PRESENT")]
+
+
+def overlapping_frame(
+    *ppe: NormalizedDetection,
+    reverse_people: bool = False,
+    swap_track_ids: bool = False,
+) -> TrackedFrame:
+    left = detection("Person", (0.10, 0.10, 0.60, 0.90), 0.99)
+    right = detection("Person", (0.40, 0.10, 0.90, 0.90), 0.70)
+    people = (
+        TrackedPerson(2 if swap_track_ids else 1, left),
+        TrackedPerson(1 if swap_track_ids else 2, right),
+    )
+    return TrackedFrame(
+        batch=batch(left, right, *ppe),
+        persons=tuple(reversed(people)) if reverse_people else people,
+    )
+
+
+@pytest.mark.parametrize(
+    ("class_name", "ppe_item"),
+    [
+        ("Hardhat", "HARD_HAT"),
+        ("NO-Hardhat", "HARD_HAT"),
+        ("Safety Vest", "SAFETY_VEST"),
+        ("NO-Safety Vest", "SAFETY_VEST"),
+    ],
+)
+@pytest.mark.parametrize("outside_competitor", [False, True])
+@pytest.mark.parametrize("emit_missing", [False, True])
+def test_ppe_pipeline_abstains_when_multiple_people_fit_the_same_item(
+    class_name: str, ppe_item: str, outside_competitor: bool, emit_missing: bool
+) -> None:
+    bounds = (0.45, 0.12, 0.55, 0.25) if ppe_item == "HARD_HAT" else (0.45, 0.35, 0.55, 0.65)
+    frame = overlapping_frame(detection(class_name, bounds))
+    context = left_half_region() if outside_competitor else region()
+    observations = PpePipeline(emit_missing=emit_missing).process(frame, context)
+
+    assert all(item.ppe_item != ppe_item for item in observations)
+    if outside_competitor:
+        assert all(item.track_id == 1 for item in observations)
+
+
+@pytest.mark.parametrize("reverse_people", [False, True])
+@pytest.mark.parametrize("swap_track_ids", [False, True])
+def test_ppe_pipeline_does_not_resolve_ambiguity_with_track_id_or_person_order(
+    reverse_people: bool, swap_track_ids: bool
+) -> None:
+    frame = overlapping_frame(
+        detection("NO-Hardhat", (0.45, 0.12, 0.55, 0.25)),
+        reverse_people=reverse_people,
+        swap_track_ids=swap_track_ids,
+    )
+    assert PpePipeline().process(frame, region()) == ()
+
+
+def test_ppe_pipeline_preserves_independent_item_when_helmet_is_ambiguous() -> None:
+    frame = overlapping_frame(
+        detection("NO-Hardhat", (0.45, 0.12, 0.55, 0.25)),
+        detection("Safety Vest", (0.15, 0.35, 0.30, 0.65)),
+    )
+    observations = PpePipeline().process(frame, region())
+    assert [(item.track_id, item.ppe_item, item.status) for item in observations] == [
+        (1, "SAFETY_VEST", "PRESENT")
+    ]
+
+
+def test_ppe_pipeline_ambiguous_evidence_cannot_be_overridden_by_unique_item_box() -> None:
+    frame = overlapping_frame(
+        detection("Hardhat", (0.15, 0.12, 0.25, 0.25)),
+        detection("NO-Hardhat", (0.45, 0.12, 0.55, 0.25)),
+    )
+    assert PpePipeline().process(frame, region()) == ()
+
+
+def test_ppe_pipeline_unique_item_keeps_its_owner_despite_overlap_elsewhere() -> None:
+    frame = overlapping_frame(detection("NO-Hardhat", (0.15, 0.12, 0.25, 0.25)))
+    observations = PpePipeline().process(frame, region())
+    assert [(item.track_id, item.ppe_item, item.status) for item in observations] == [
+        (1, "HARD_HAT", "MISSING")
+    ]
+
+
+def test_ambiguous_association_breaks_pending_temporal_confirmation() -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=3)
+    pipeline = PpePipeline()
+    clear_owner = overlapping_frame(detection("NO-Hardhat", (0.15, 0.12, 0.25, 0.25)))
+    ambiguous_owner = overlapping_frame(detection("NO-Hardhat", (0.45, 0.12, 0.55, 0.25)))
+    t0 = datetime(2026, 9, 30, 12, tzinfo=UTC)
+
+    for index, frame in enumerate((clear_owner, clear_owner, ambiguous_owner, clear_owner)):
+        candidates = gate.update(
+            stream_id=frame.batch.stream_id,
+            session_id=frame.batch.session_id,
+            observed_at=t0 + timedelta(milliseconds=index * 100),
+            active_track_ids=tuple(person.track_id for person in frame.persons),
+            observations=pipeline.process(frame, region()),
+        )
+        assert candidates == ()

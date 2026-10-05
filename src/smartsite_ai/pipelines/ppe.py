@@ -6,6 +6,11 @@ from typing import Final, Literal
 from smartsite_ai.domain.observations import PpeObservation
 from smartsite_ai.domain.regions import CameraObservationRegionConfiguration
 from smartsite_ai.inference.models import NormalizedBoundingBox, NormalizedDetection
+from smartsite_ai.inference.ppe_profiles import (
+    LEGACY_PPE_5_PROFILE,
+    NATIVE_PPE_10_PROFILE,
+    PpeModelProfile,
+)
 from smartsite_ai.pipelines._geometry import (
     bottom_center,
     box_center,
@@ -15,8 +20,8 @@ from smartsite_ai.pipelines._geometry import (
 )
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
-PpeItem = Literal["HARD_HAT", "SAFETY_VEST"]
-PPE_ITEMS: Final[tuple[PpeItem, ...]] = ("HARD_HAT", "SAFETY_VEST")
+PpeItem = Literal["HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES"]
+PPE_ITEMS: Final[tuple[PpeItem, ...]] = ("HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES")
 DEFAULT_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
     "HARD_HAT": frozenset({"hard_hat", "hard hat", "hardhat", "helmet", "safety helmet"}),
     "SAFETY_VEST": frozenset({"safety_vest", "safety vest", "high visibility vest", "vest"}),
@@ -86,6 +91,40 @@ class PpePipeline:
         self._minimum_association_coverage = minimum_association_coverage
         self._minimum_observable_person_height = minimum_observable_person_height
         self._emit_missing = emit_missing
+
+    @property
+    def minimum_schema_version(self) -> Literal["1.0.0", "1.1.0"]:
+        """Minimum consumer version for the configured observation families."""
+        return (
+            "1.1.0"
+            if any(item not in ("HARD_HAT", "SAFETY_VEST") for item in self._items)
+            else "1.0.0"
+        )
+
+    @classmethod
+    def for_model_profile(cls, profile: PpeModelProfile) -> "PpePipeline":
+        """Opt into exact native evidence; never derive negatives from absence.
+
+        Association still requires one observable person owner. A profile is
+        a taxonomy declaration, not model accuracy or wire-version acceptance.
+        """
+        if profile == LEGACY_PPE_5_PROFILE:
+            return cls()
+        if profile != NATIVE_PPE_10_PROFILE:
+            raise ValueError("unsupported PPE model profile")
+        present = {
+            **DEFAULT_PPE_CLASS_NAMES,
+            "GLOVES": frozenset({"gloves"}),
+            "BOOTS": frozenset({"boots"}),
+            "GOGGLES": frozenset({"goggles"}),
+        }
+        missing = {
+            "HARD_HAT": DEFAULT_MISSING_PPE_CLASS_NAMES["HARD_HAT"],
+            "GLOVES": frozenset({"no-gloves"}),
+            "BOOTS": frozenset({"no-boots"}),
+            "GOGGLES": frozenset({"no-goggles"}),
+        }
+        return cls(class_names_by_item=present, missing_class_names_by_item=missing)
 
     def process(
         self,

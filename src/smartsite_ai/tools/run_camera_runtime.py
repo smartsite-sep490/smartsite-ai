@@ -74,6 +74,7 @@ async def run_manifest(manifest_path: Path, *, settings: Settings | None = None)
         detector, loaded_runner, _artifact, _class_map = await load_warmed_yolo11_detector(
             bound.model_spec,
             runner_factory=UltralyticsYoloRunner,
+            experimental_profile=bound.manifest.experimental_model_profile,
         )
         try:
             if not isinstance(loaded_runner, UltralyticsYoloRunner):
@@ -105,6 +106,8 @@ async def run_manifest(manifest_path: Path, *, settings: Settings | None = None)
             source_factory=source_factory,
             evidence_max_bytes=bound.manifest.evidence_max_bytes,
             delivery_interval_seconds=bound.manifest.delivery_interval_seconds,
+            experimental_model_profile=bound.manifest.experimental_model_profile,
+            observation_schema_version=bound.manifest.observation_schema_version,
         )
 
     try:

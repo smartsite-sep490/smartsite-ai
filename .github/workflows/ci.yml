@@ -46,6 +46,10 @@ jobs:
           cmp contracts/golden-vectors.json "$RUNNER_TEMP/source-golden-vectors.json"
           cmp contracts/schemas/v1/camera-region-configuration.json "$RUNNER_TEMP/source-camera-region-schema.json"
           cmp contracts/camera-region-configuration-vectors.json "$RUNNER_TEMP/source-camera-region-vectors.json"
+          expanded_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["expandedObservationEvent"]["sourceCommitSha"])')
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$expanded_commit"
+          git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1.1/technical-observation-event.json > "$RUNNER_TEMP/source-expanded-schema.json"
+          cmp contracts/schemas/v1.1/technical-observation-event.json "$RUNNER_TEMP/source-expanded-schema.json"
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .

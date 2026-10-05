@@ -18,7 +18,8 @@ from PIL import Image
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.artifacts import ModelArtifactSpec
-from smartsite_ai.inference.loading import load_detector_artifact
+from smartsite_ai.inference.loading import load_artifact_spec, load_detector_artifact
+from smartsite_ai.inference.ppe_profiles import LEGACY_PPE_5_PROFILE, NATIVE_PPE_10_PROFILE
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
@@ -48,6 +49,7 @@ def _ui_frame(
     *,
     confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
     occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+    ppe_items: tuple[str, ...] = LEGACY_PPE_5_PROFILE.present_items,
 ) -> dict[str, Any]:
     """Map one technical event to the JSON shape the web realtime screen already reads."""
 
@@ -85,7 +87,7 @@ def _ui_frame(
     detections = []
     zone_detections = []
     for track_id, person in people.items():
-        status = {"HARD_HAT": "UNKNOWN", "SAFETY_VEST": "UNKNOWN"}
+        status = dict.fromkeys(ppe_items, "UNKNOWN")
         status.update(ppe_status.get(track_id, {}))
         missing = [item for item, value in status.items() if value == "MISSING"]
         confirmed_missing = sorted(
@@ -99,7 +101,11 @@ def _ui_frame(
             label = "PPE CHECK PENDING"
         elif all(value == "PRESENT" for value in status.values()):
             alert_state = "COMPLIANT"
-            label = "HELMET AND VEST DETECTED"
+            label = (
+                "HELMET AND VEST DETECTED"
+                if ppe_items == LEGACY_PPE_5_PROFILE.present_items
+                else "OBSERVED PPE DETECTED"
+            )
         else:
             alert_state = "UNKNOWN"
             label = "PPE UNKNOWN"
@@ -164,6 +170,7 @@ def build_realtime_preview(
     ppe_region_id: str = "",
     confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
     occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+    ppe_items: tuple[str, ...] = LEGACY_PPE_5_PROFILE.present_items,
 ) -> dict[str, Any]:
     """Bind diagnostic detections and bounded JPEG pixels in one socket message.
 
@@ -183,6 +190,7 @@ def build_realtime_preview(
         image.height,
         confirmed_ppe_items=confirmed_ppe_items,
         occupied_zone_regions=occupied_zone_regions,
+        ppe_items=ppe_items,
     )
     payload.update(
         previewVersion=1,
@@ -284,12 +292,46 @@ def _load_class_map(path: Path) -> dict[int, str]:
 def _load_realtime_stack(
     settings: Settings,
 ) -> _RealtimeStack:
-    if not settings.realtime_model_path or not settings.realtime_class_map_path:
+    if settings.realtime_artifact_spec_path is None and (
+        not settings.realtime_model_path or not settings.realtime_class_map_path
+    ):
         raise ValueError("Realtime model and class map are not configured")
     if not settings.realtime_region_configuration_path:
         raise ValueError("Realtime region configuration is not configured")
-    class_map = _load_class_map(Path(settings.realtime_class_map_path))
-    spec = ModelArtifactSpec(
+    artifact_spec = (
+        load_artifact_spec(
+            settings.realtime_artifact_spec_path,
+            experimental_profile=settings.realtime_experimental_model_profile,
+        )
+        if settings.realtime_artifact_spec_path is not None
+        else None
+    )
+    class_map = (
+        dict(artifact_spec.class_map)
+        if artifact_spec is not None
+        else _load_class_map(Path(settings.realtime_class_map_path))
+    )
+    profile = (
+        NATIVE_PPE_10_PROFILE
+        if settings.realtime_experimental_model_profile is not None
+        else LEGACY_PPE_5_PROFILE
+    )
+    if profile.experimental and tuple(sorted(class_map.items())) != profile.class_map:
+        raise ValueError("realtime taxonomy contradicts native-ppe-10 profile")
+    # Validate configuration before allocating a provider/GPU resource.
+    configuration = CameraRegionConfiguration.from_wire_bytes(
+        Path(settings.realtime_region_configuration_path).read_bytes()
+    )
+    if configuration.camera_external_id != settings.realtime_camera_external_id:
+        raise ValueError("realtime camera id does not match the region configuration")
+    pipeline = Mf05Mf06Pipeline(
+        tracker=IoUPersonTracker(),
+        ppe=PpePipeline.for_model_profile(profile),
+        zones=RestrictedZonePipeline(),
+        ppe_region_id=settings.realtime_ppe_region_id,
+        schema_version=settings.realtime_observation_schema_version,
+    )
+    spec = artifact_spec or ModelArtifactSpec(
         artifact_id=settings.realtime_model_artifact_id,
         version=settings.realtime_model_version,
         model_family=settings.realtime_model_family,
@@ -301,26 +343,22 @@ def _load_realtime_stack(
         confidence_threshold=settings.realtime_confidence,
         iou_threshold=0.45,
         image_size=(640, 640),
-        device=_configured_realtime_device(settings.realtime_device),
+        device=settings.realtime_device,
     )
+    # Artifact preprocessing is the frozen evaluation recipe. Legacy defaults
+    # must not silently replace its image size, NMS or confidence threshold.
+    target_device = (
+        settings.realtime_device if "realtime_device" in settings.model_fields_set else spec.device
+    )
+    spec = spec.model_copy(update={"device": _configured_realtime_device(target_device)})
     detector, loaded_runner, _artifact, _class_map = load_detector_artifact(
         spec,
         runner_factory=UltralyticsYoloRunner,
+        require_yolo11_metadata=profile.experimental or artifact_spec is not None,
     )
     if not isinstance(loaded_runner, UltralyticsYoloRunner):
         raise TypeError("realtime detector loader returned an unexpected runner")
     runner = loaded_runner
-    configuration = CameraRegionConfiguration.from_wire_bytes(
-        Path(settings.realtime_region_configuration_path).read_bytes()
-    )
-    if configuration.camera_external_id != settings.realtime_camera_external_id:
-        raise ValueError("realtime camera id does not match the region configuration")
-    pipeline = Mf05Mf06Pipeline(
-        tracker=IoUPersonTracker(),
-        ppe=PpePipeline(),
-        zones=RestrictedZonePipeline(),
-        ppe_region_id=settings.realtime_ppe_region_id,
-    )
     return detector, runner, pipeline, configuration
 
 
@@ -485,6 +523,11 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                     ppe_region_id=settings.realtime_ppe_region_id,
                     confirmed_ppe_items=confirmed_ppe_items,
                     occupied_zone_regions=occupied_zone_regions,
+                    ppe_items=(
+                        NATIVE_PPE_10_PROFILE.present_items
+                        if settings.realtime_experimental_model_profile is not None
+                        else LEGACY_PPE_5_PROFILE.present_items
+                    ),
                 )
             )
             if backend is not None and event is not None:

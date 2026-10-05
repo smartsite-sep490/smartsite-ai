@@ -151,7 +151,9 @@ class PersonObservation(StrictWireModel):
 class PpeObservation(StrictWireModel):
     type: Literal["PPE"] = Field(..., alias="type")
     track_id: JsonInteger = Field(..., ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
-    ppe_item: Literal["HARD_HAT", "SAFETY_VEST"] = Field(..., alias="ppeItem")
+    ppe_item: Literal["HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES"] = Field(
+        ..., alias="ppeItem"
+    )
     status: Literal["PRESENT", "MISSING"]
     region_id: str = Field(..., alias="regionId")
     geometry_version: JsonInteger = Field(..., ge=1, le=MAX_SAFE_INTEGER, alias="geometryVersion")
@@ -221,7 +223,7 @@ class EvidenceItem(StrictWireModel):
 
 class TechnicalObservationEvent(StrictWireModel):
     event_id: str = Field(..., alias="eventId")
-    schema_version: Literal["1.0.0"] = Field(..., alias="schemaVersion")
+    schema_version: Literal["1.0.0", "1.1.0"] = Field(..., alias="schemaVersion")
     camera_external_id: str = Field(
         ...,
         min_length=1,
@@ -234,6 +236,16 @@ class TechnicalObservationEvent(StrictWireModel):
     frame_dimensions: FrameDimensions = Field(..., alias="frameDimensions")
     observations: list[Observation] = Field(..., min_length=1, max_length=256)
     evidence: list[EvidenceItem] = Field(..., max_length=256, alias="evidence")
+
+    @model_validator(mode="after")
+    def enforce_ppe_version_boundary(self) -> "TechnicalObservationEvent":
+        if self.schema_version == "1.0.0" and any(
+            isinstance(observation, PpeObservation)
+            and observation.ppe_item not in ("HARD_HAT", "SAFETY_VEST")
+            for observation in self.observations
+        ):
+            raise ValueError("expanded PPE observations require schemaVersion 1.1.0")
+        return self
 
     @field_validator("event_id")
     @classmethod
@@ -271,7 +283,7 @@ class TechnicalObservationEvent(StrictWireModel):
         frame_dimensions: FrameDimensions | dict[str, Any],
         observations: list[Any],
         evidence: list[Any] | None = None,
-        schema_version: Literal["1.0.0"] = "1.0.0",
+        schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
     ) -> "TechnicalObservationEvent":
         """Convenience constructor for internal Python usage, keeping wire validation strict."""
         fd = (

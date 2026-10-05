@@ -763,7 +763,10 @@ async def test_supervised_cameras_do_not_share_pipeline_or_outbox_state(tmp_path
     assert isinstance(detector, SerializingDetector)
 
 
-def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("expanded", [False, True])
+def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
+    tmp_path: Path, expanded: bool
+) -> None:
     from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
     from smartsite_ai.runtime.assembly import CameraPlan
 
@@ -832,6 +835,8 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path
         source_factory=source_factory,
         evidence_max_bytes=1024,
         delivery_interval_seconds=0.25,
+        experimental_model_profile="native-ppe-10" if expanded else None,
+        observation_schema_version="1.1.0" if expanded else "1.0.0",
     )
     workers = [session.worker for session in sessions]
     assert workers[0]._detector is detector  # type: ignore[attr-defined]
@@ -842,6 +847,27 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path
     assert workers[0]._evidence_publisher is not workers[1]._evidence_publisher  # type: ignore[attr-defined]
     assert workers[0]._ppe_region_id != workers[1]._ppe_region_id  # type: ignore[attr-defined]
     assert workers[0]._temporal_gate is not workers[1]._temporal_gate  # type: ignore[attr-defined]
+    # Exercise the assembled producer, not just the individual pipeline factory.
+    from test_mf05_mf06_pipeline import detection
+
+    batch = DetectionBatch.from_frame(
+        _frame("CAM-A", 1),
+        model_artifact_id="assembled-test",
+        model_version="test",
+        model_sha256="a" * 64,
+        detections=(
+            detection("Person", (0.2, 0.1, 0.8, 0.8)),
+            detection("NO-Gloves", (0.3, 0.4, 0.4, 0.5)),
+        ),
+    )
+    event = workers[0]._pipeline.process(  # type: ignore[attr-defined]
+        batch,
+        region_configuration=_configuration("CAM-A", REGION_A),
+        event_id="00000000-0000-4000-8000-000000000001",
+    )
+    assert event is not None
+    assert event.schema_version == ("1.1.0" if expanded else "1.0.0")
+    assert any(getattr(obs, "ppe_item", None) == "GLOVES" for obs in event.observations) is expanded
 
 
 def test_third_camera_id_constant_is_distinct() -> None:

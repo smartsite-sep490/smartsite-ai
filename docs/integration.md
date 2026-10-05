@@ -4,6 +4,22 @@ Nguồn chuẩn: `contracts/schemas/v1/technical-observation-event.json` tại c
 
 Phiên bản event contract đang dùng: **1.0.0**. Schema và golden vectors được vendor nguyên bytes; CI tải đúng source commit và fail nếu có drift.
 
+Schema PPE mở rộng `1.1.0` được vendor riêng từ Platform commit bất biến trong
+`metadata.expandedObservationEvent`; provenance v1 không đổi. Python event
+reject GLOVES/BOOTS/GOGGLES khi version là 1.0.0. Orchestrator phải chọn rõ
+consumer version 1.1.0 cho `PpePipeline.for_model_profile(native10)`; không chọn
+version thì khởi tạo fail-closed. Runtime assembly mặc định vẫn dùng legacy.
+Association và temporal confirmation mở rộng vẫn bỏ evidence mâu thuẫn hoặc
+không có chủ thể duy nhất; không tạo PPE missing từ nhãn model không hỗ trợ.
+
+`load_artifact_spec(..., experimental_profile="native-ppe-10")` là opt-in đọc
+taxonomy thử nghiệm 10 lớp. Mặc định loader và worker vẫn dùng đúng 5 lớp cũ;
+opt-in không bật serving, không đổi wire contract hoặc cấp model acceptance.
+Profile có Gloves/Boots/Goggles nhưng không có NO-Vest/Harness/Hook. ID lớp 4
+là Gloves trong native10, NO-Vest trong baseline; không dùng integer ID để suy
+PPE item khi thiếu profile. `inference/ppe_profiles.py` ghi evidence families
+được khai báo, không chứng minh độ chính xác, đủ quan sát hay deployment readiness.
+
 ## Contract foundation đang chạy
 
 Service mặc định ở `127.0.0.1:8000`; trong Compose, các container cùng mạng dùng `http://ai:8000`. Backend consumer hiện là `POST http://backend:3000/api/v1/integrations/ai/events`, xác thực bằng Bearer service token.
@@ -71,6 +87,29 @@ explicit negative aliases `no-helmet` and `no-vest` as `HARD_HAT:MISSING` and
 `SAFETY_VEST:MISSING`. This permits correctly bound diagnostic batches; it does
 not relax artifact loading or approve candidate deployment. Positive and
 negative evidence for the same item, or PPE fitting multiple people, remains
-unknown. Unsupported items such as gloves, boots and harness are ignored rather
-than mapped to a vest. Expanding the emitted PPE scope requires the canonical
+unknown. The default legacy profile ignores gloves, boots and harness rather
+than mapping them to a vest. Expanding the emitted PPE scope requires the canonical
 Backend contract update and paired compatibility checks described above.
+
+The experimental `native-ppe-10` profile preserves actual checkpoint IDs and
+adds Gloves/Boots/Goggles association. Camera runtime manifests must opt in with
+`experimentalModelProfile: "native-ppe-10"` and
+`observationSchemaVersion: "1.1.0"`; omitted fields retain the legacy behavior.
+Realtime uses the corresponding explicit settings in `.env.example`. Selection
+can use `realtime_artifact_spec_path` to retain the artifact's image size,
+confidence and NMS settings instead of the legacy raw-path defaults. A spec
+cannot be combined with raw model/class-map paths. An explicitly configured
+`realtime_device` overrides only the artifact device, allowing CPU deployment;
+the evaluated preprocessing remains unchanged. Spec loading checks YOLO11
+checkpoint metadata for both the legacy five-class and native10 profiles.
+Selection
+does not prove that a deployed Backend accepts v1.1: operators must verify the
+consumer deployment before starting delivery. Configuration fails before opening
+resources if the expanded profile is paired with v1.0.
+
+Native10 has no NO-Safety Vest, Harness, hook or protective-clothing classes.
+Missing evidence remains UNKNOWN; it cannot supply missing-vest coverage from
+the legacy model. The v1.1 schema is currently pinned to the published Platform
+feature checkpoint for paired development. Finalize provenance to its immutable
+main merge SHA before either repository's main/release integration. Do not treat
+the feature pin, passing compatibility tests or artifact selection as acceptance.

@@ -98,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     provider="ultralytics-yolo11s + supervision",
                     reason=(
                         "Local realtime demo is opt-in. Production worker is not configured."
-                        if settings.realtime_model_path
+                        if settings.realtime_model_path or settings.realtime_artifact_spec_path
                         else "No model weights, PPE model or worker loaded."
                     ),
                 ),
@@ -142,10 +142,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if app.state.realtime_lock.locked():
             await _reject_realtime(websocket, "Realtime source is already in use")
             return
-        if not settings.realtime_model_path or not settings.realtime_source:
+        if (
+            not (settings.realtime_model_path or settings.realtime_artifact_spec_path)
+            or not settings.realtime_source
+        ):
             await _reject_realtime(
                 websocket,
-                "Set SMARTSITE_AI_REALTIME_MODEL_PATH and SMARTSITE_AI_REALTIME_SOURCE",
+                "Configure a realtime model or artifact spec and SMARTSITE_AI_REALTIME_SOURCE",
             )
             return
         try:

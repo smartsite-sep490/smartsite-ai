@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, IPvAnyAddress, SecretStr
+from pydantic import Field, IPvAnyAddress, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Local realtime demo settings. Keep these opt-in so the API foundation
     # remains safe when no model/runtime is installed.
     realtime_model_path: str | None = None
+    realtime_artifact_spec_path: Path | None = None
     realtime_source: str | None = None
     realtime_device: str = Field(
         default="auto",
@@ -54,3 +55,20 @@ class Settings(BaseSettings):
         "8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt"
     )
     realtime_model_license: str = "MIT (repository declaration; checkpoint terms unverified)"
+    realtime_experimental_model_profile: Literal["native-ppe-10"] | None = None
+    realtime_observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0"
+
+    @model_validator(mode="after")
+    def validate_expanded_consumer(self) -> "Settings":
+        if self.realtime_artifact_spec_path is not None and (
+            self.realtime_model_path is not None or self.realtime_class_map_path is not None
+        ):
+            raise ValueError(
+                "realtime artifact spec cannot be combined with raw model/class map paths"
+            )
+        if (
+            self.realtime_experimental_model_profile is not None
+            and self.realtime_observation_schema_version != "1.1.0"
+        ):
+            raise ValueError("expanded PPE requires a configured v1.1.0 consumer")
+        return self

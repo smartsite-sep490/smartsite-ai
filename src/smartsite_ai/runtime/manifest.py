@@ -12,6 +12,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile
 from smartsite_ai.ingestion.config import (
     _DEVICE_INDEX_RE,
     StreamConfig,
@@ -90,6 +91,12 @@ class CameraManifestEntry(_StrictModel):
 class CameraRuntimeManifest(_StrictModel):
     schema_version: Literal["1"] = Field(alias="schemaVersion")
     model_spec: str = Field(alias="modelSpec", min_length=1, max_length=1024)
+    experimental_model_profile: ExperimentalPpeProfile | None = Field(
+        default=None, alias="experimentalModelProfile"
+    )
+    observation_schema_version: Literal["1.0.0", "1.1.0"] = Field(
+        default="1.0.0", alias="observationSchemaVersion"
+    )
     poll_interval_seconds: float = Field(default=5.0, alias="pollIntervalSeconds", gt=0, le=3600)
     stale_after_seconds: float = Field(default=60.0, alias="staleAfterSeconds", gt=0, le=86_400)
     delivery_interval_seconds: float = Field(
@@ -102,6 +109,11 @@ class CameraRuntimeManifest(_StrictModel):
 
     @model_validator(mode="after")
     def validate_bounds(self) -> CameraRuntimeManifest:
+        if (
+            self.experimental_model_profile is not None
+            and self.observation_schema_version != "1.1.0"
+        ):
+            raise ValueError("camera runtime manifest is invalid")
         if not 1 <= len(self.cameras) <= 3:
             raise ValueError("manifest must contain 1 to 3 cameras")
         if self.stale_after_seconds < self.poll_interval_seconds:

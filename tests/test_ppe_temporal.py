@@ -978,8 +978,8 @@ def test_filter_event_for_delivery_mixed_event_without_leaking_raw_missing() -> 
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
-        first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
-        confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+        first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC) - timedelta(milliseconds=400),
+        confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
     delivered_confirmed = filter_event_for_delivery(mixed_event, (candidate,))
     assert delivered_confirmed is not None
@@ -1215,12 +1215,142 @@ def test_delivery_filtering_rejects_candidate_from_different_session() -> None:
         track_id=1,
         ppe_item="HARD_HAT",
         first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
-        confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+        confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
 
     # Must NOT deliver missing PPE authorized by foreign session
     assert filter_event_for_delivery(event_session_a, (candidate_session_b,)) is None
     assert not should_post_event(event_session_a, (candidate_session_b,))
+
+
+@pytest.mark.parametrize("delta", [timedelta(microseconds=-1), timedelta(microseconds=1)])
+def test_delivery_filter_rejects_ppe_confirmation_from_a_different_frame(delta: timedelta) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    event = _make_event(ppe_obs(1))
+    original = event.to_wire_dict()
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        first_seen_at=t0 - timedelta(seconds=1),
+        confirmed_at=t0 + delta,
+    )
+
+    assert filter_event_for_delivery(event, (candidate,)) is None
+    assert not should_post_event(event, (candidate,))
+    assert event.to_wire_dict() == original
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    [
+        "2026-09-21T12:00:00Z",
+        "2026-09-21t12:00:00z",
+        "2026-09-21T19:00:00+07:00",
+        "2026-09-21T12:00:00.000000000+00:00",
+    ],
+)
+def test_delivery_filter_matches_the_exact_instant_not_timestamp_spelling(captured_at: str) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    event = TechnicalObservationEvent.model_validate(
+        {**_make_event(ppe_obs(1)).to_wire_dict(), "capturedAt": captured_at}
+    )
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        first_seen_at=t0 - timedelta(milliseconds=400),
+        confirmed_at=t0,
+    )
+
+    delivered = filter_event_for_delivery(event, (candidate,))
+    assert delivered is not None
+    assert delivered.to_wire_dict() == event.to_wire_dict()
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    ["2026-09-21T12:00:00.000000001Z", "2016-12-31T23:59:60Z"],
+)
+def test_unrepresentable_event_time_cannot_reuse_confirmation_but_keeps_zone(
+    captured_at: str,
+) -> None:
+    zone = ZoneEntryObservation.model_validate(
+        {"type": "ZONE_ENTRY", "trackId": 1, "regionId": REGION_ID, "geometryVersion": 1}
+    )
+    event = TechnicalObservationEvent.model_validate(
+        {**_make_event(zone, ppe_obs(1)).to_wire_dict(), "capturedAt": captured_at}
+    )
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        first_seen_at=t0,
+        confirmed_at=t0,
+    )
+
+    delivered = filter_event_for_delivery(event, (candidate,))
+    assert delivered is not None
+    assert delivered.observations == [zone]
+    assert delivered.captured_at == captured_at
+    assert event.observations == [zone, ppe_obs(1)]
+
+
+def test_stale_ppe_confirmation_does_not_poison_current_item_or_zone_evidence() -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    zone = ZoneEntryObservation.model_validate(
+        {"type": "ZONE_ENTRY", "trackId": 1, "regionId": REGION_ID, "geometryVersion": 1}
+    )
+    vest = ppe_obs(1, "SAFETY_VEST")
+    event = _make_event(zone, ppe_obs(1), vest)
+    candidates = (
+        ConfirmedPpeCandidate(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            track_id=1,
+            ppe_item="HARD_HAT",
+            first_seen_at=t0 - timedelta(seconds=1),
+            confirmed_at=t0 - timedelta(microseconds=1),
+        ),
+        ConfirmedPpeCandidate(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            track_id=1,
+            ppe_item="SAFETY_VEST",
+            first_seen_at=t0 - timedelta(milliseconds=400),
+            confirmed_at=t0,
+        ),
+    )
+
+    for ordered in [candidates, tuple(reversed(candidates))]:
+        delivered = filter_event_for_delivery(event, iter(ordered))
+        assert delivered is not None
+        assert delivered.observations == [zone, vest]
+        assert should_post_event(event, ordered)
+
+
+@pytest.mark.parametrize("invalid_time", ["naive_confirmed", "naive_first_seen", "reversed"])
+def test_invalid_candidate_time_cannot_confirm_ppe(invalid_time: str) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    first_seen_at = t0
+    if invalid_time == "naive_first_seen":
+        first_seen_at = t0.replace(tzinfo=None)
+    elif invalid_time == "reversed":
+        first_seen_at = t0 + timedelta(microseconds=1)
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        first_seen_at=first_seen_at,
+        confirmed_at=t0.replace(tzinfo=None) if invalid_time == "naive_confirmed" else t0,
+    )
+
+    assert filter_event_for_delivery(_make_event(ppe_obs(1)), (candidate,)) is None
 
 
 def test_cooldown_blocked_new_episode_emits_at_cooldown_expiry_if_missing_persists() -> None:

@@ -57,3 +57,20 @@ hung native provider still requires process-level recovery.
 ## Release
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.
+
+### PPE class binding before a model change
+
+The official worker artifact loader currently requires the exact five-class
+baseline map (`Person`, `Hardhat`, `NO-Hardhat`, `Safety Vest`, `NO-Safety Vest`)
+and checks it against checkpoint metadata. A candidate with different native
+class names or IDs cannot be installed by changing its spec labels to the
+baseline: the spec must describe the actual checkpoint.
+
+At the provider-neutral pipeline boundary, `PpePipeline` also recognizes the
+explicit negative aliases `no-helmet` and `no-vest` as `HARD_HAT:MISSING` and
+`SAFETY_VEST:MISSING`. This permits correctly bound diagnostic batches; it does
+not relax artifact loading or approve candidate deployment. Positive and
+negative evidence for the same item, or PPE fitting multiple people, remains
+unknown. Unsupported items such as gloves, boots and harness are ignored rather
+than mapped to a vest. Expanding the emitted PPE scope requires the canonical
+Backend contract update and paired compatibility checks described above.

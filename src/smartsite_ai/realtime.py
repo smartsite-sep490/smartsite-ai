@@ -69,7 +69,17 @@ def _ui_frame(
         if kind == "PERSON":
             people[track_id] = observation
         elif kind == "PPE":
-            ppe_status.setdefault(track_id, {})[observation["ppeItem"]] = observation["status"]
+            item_status = ppe_status.setdefault(track_id, {})
+            item = observation["ppeItem"]
+            previous = item_status.get(item)
+            # One frame can contain overlapping-region observations for a track.
+            # Contradictory evidence stays UNKNOWN even if later duplicates agree;
+            # this display projection never rewrites the original observations.
+            item_status[item] = (
+                observation["status"]
+                if previous is None or previous == observation["status"]
+                else "UNKNOWN"
+            )
         elif kind == "ZONE_ENTRY":
             entered_zone_regions.add((track_id, observation["regionId"]))
     detections = []
@@ -89,7 +99,7 @@ def _ui_frame(
             label = "PPE CHECK PENDING"
         elif all(value == "PRESENT" for value in status.values()):
             alert_state = "COMPLIANT"
-            label = "PPE COMPLIANT"
+            label = "HELMET AND VEST DETECTED"
         else:
             alert_state = "UNKNOWN"
             label = "PPE UNKNOWN"

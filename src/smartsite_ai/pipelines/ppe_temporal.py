@@ -1,8 +1,9 @@
 """Deterministic temporal confirmation, clearing, and cooldown for PPE candidates."""
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from smartsite_ai.domain.observations import PpeObservation, TechnicalObservationEvent
@@ -204,6 +205,23 @@ class TemporalPpeCandidateGate:
         )
 
 
+def _event_capture_time(value: str) -> datetime | None:
+    """Parse an event instant without rounding sub-microsecond evidence into a match."""
+
+    fraction = re.search(r"\.([0-9]+)", value)
+    if fraction is not None and any(digit != "0" for digit in fraction.group(1)[6:]):
+        return None
+    try:
+        captured_at = datetime.fromisoformat(value.replace("t", "T").replace("z", "Z"))
+        if captured_at.utcoffset() is None:
+            return None
+        return captured_at.astimezone(UTC)
+    except (ValueError, OverflowError):
+        # Canonical RFC3339 can represent leap seconds; datetime cannot. Abstain
+        # from PPE confirmation without discarding unrelated Zone observations.
+        return None
+
+
 def filter_event_for_delivery(
     event: TechnicalObservationEvent,
     confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
@@ -215,16 +233,28 @@ def filter_event_for_delivery(
     - PERSON, ZONE_ENTRY, and other non-PPE observations unchanged.
     - PPE observations with status PRESENT unchanged.
     - PPE observations with status MISSING only when (track_id, ppe_item) matches
-      a confirmed candidate belonging to this event's stream session.
+      a confirmed candidate belonging to this event's stream session and capture instant.
     - Returns None if no deliverable trigger (ZONE_ENTRY or confirmed PPE/MISSING) remains.
     """
 
-    event_session_str = event.stream_session_id
-    confirmed_keys = {
-        (candidate.track_id, candidate.ppe_item)
-        for candidate in confirmed_ppe_candidates
-        if str(candidate.session_id) == event_session_str
-    }
+    event_session_id = UUID(event.stream_session_id)
+    captured_at = _event_capture_time(event.captured_at)
+    confirmed_keys: set[tuple[int, PpeItem]] = set()
+    if captured_at is not None:
+        for candidate in confirmed_ppe_candidates:
+            if (
+                candidate.session_id != event_session_id
+                or candidate.confirmed_at.utcoffset() is None
+                or candidate.first_seen_at.utcoffset() is None
+            ):
+                continue
+            try:
+                confirmed_at = candidate.confirmed_at.astimezone(UTC)
+                first_seen_at = candidate.first_seen_at.astimezone(UTC)
+            except (ValueError, OverflowError):
+                continue
+            if confirmed_at == captured_at and first_seen_at <= confirmed_at:
+                confirmed_keys.add((candidate.track_id, candidate.ppe_item))
 
     filtered_observations = []
     has_deliverable_trigger = False

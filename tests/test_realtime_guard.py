@@ -136,8 +136,51 @@ def test_ui_frame_distinguishes_unknown_pending_confirmed_and_compliant_ppe() ->
     assert (compliant["alertState"], compliant["active"], compliant["label"]) == (
         "COMPLIANT",
         False,
-        "PPE COMPLIANT",
+        "HELMET AND VEST DETECTED",
     )
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        ("MISSING", "PRESENT"),
+        ("PRESENT", "MISSING"),
+        ("PRESENT", "MISSING", "PRESENT"),
+        ("MISSING", "PRESENT", "MISSING"),
+    ],
+)
+def test_ui_frame_conflicting_ppe_stays_unknown_independent_of_order(
+    statuses: tuple[str, ...],
+) -> None:
+    event = _ui_event(
+        _ui_person(),
+        *(_ui_ppe("HARD_HAT", status) for status in statuses),
+        _ui_ppe("SAFETY_VEST", "PRESENT"),
+    )
+    raw_before = event.to_wire_dict()
+    detection = _ui_frame(event, 640, 480)["detections"][0]
+
+    assert detection["ppeStatus"] == {"HARD_HAT": "UNKNOWN", "SAFETY_VEST": "PRESENT"}
+    assert detection["alertState"] == "UNKNOWN"
+    assert detection["active"] is False
+    assert event.to_wire_dict() == raw_before
+
+
+def test_ui_frame_current_conflict_keeps_a_prior_confirmed_episode_separate() -> None:
+    detection = _ui_frame(
+        _ui_event(
+            _ui_person(),
+            _ui_ppe("HARD_HAT", "MISSING"),
+            _ui_ppe("HARD_HAT", "PRESENT"),
+        ),
+        640,
+        480,
+        confirmed_ppe_items=frozenset({(1, "HARD_HAT")}),
+    )["detections"][0]
+
+    assert detection["ppeStatus"]["HARD_HAT"] == "UNKNOWN"
+    assert detection["confirmedMissingItems"] == ["HARD_HAT"]
+    assert detection["alertState"] == "CONFIRMED"
 
 
 def test_ui_frame_keeps_confirmed_zone_occupancy_active_after_entry_frame() -> None:
@@ -257,12 +300,15 @@ def test_realtime_device_rejects_unavailable_cuda(
 
 
 def test_should_post_event_gating_behavior() -> None:
-    def make_ev(*obs: object) -> TechnicalObservationEvent:
+    def make_ev(
+        *obs: object,
+        captured_at: datetime = datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+    ) -> TechnicalObservationEvent:
         return TechnicalObservationEvent.create(
             event_id="00000000-0000-4000-8000-000000000010",
             camera_external_id="camera-01",
             stream_session_id=str(UUID("00000000-0000-4000-8000-000000000001")),
-            captured_at=datetime(2026, 9, 21, 12, tzinfo=UTC).isoformat(),
+            captured_at=captured_at.isoformat(),
             frame_dimensions={"width": 640, "height": 480},
             observations=obs,
         )
@@ -312,6 +358,11 @@ def test_should_post_event_gating_behavior() -> None:
 
     # Confirming frame posts once
     assert should_post_event(make_ev(person, missing_ppe), (candidate,))
+
+    # A future confirmation cannot authorize missing evidence from an earlier frame.
+    assert not should_post_event(
+        make_ev(person, missing_ppe, captured_at=candidate.first_seen_at), (candidate,)
+    )
 
     # Cooldown frames (no new candidate returned) do not post
     assert not should_post_event(make_ev(person, missing_ppe), ())

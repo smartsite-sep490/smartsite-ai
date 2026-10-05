@@ -5,6 +5,7 @@ import pytest
 
 from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.tracking import IoUPersonTracker
+from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 SESSION = UUID("00000000-0000-4000-8000-000000000001")
 
@@ -38,6 +39,51 @@ def batch(sequence_number: int, *detections: NormalizedDetection) -> DetectionBa
         model_sha256="a" * 64,
         detections=detections,
     )
+
+
+@pytest.mark.parametrize("different_boxes", [False, True])
+def test_tracked_frame_rejects_duplicate_track_id_regardless_of_person_box(
+    different_boxes: bool,
+) -> None:
+    first = detection("person", (0.10, 0.10, 0.40, 0.80))
+    second = detection("person", (0.60, 0.10, 0.90, 0.80)) if different_boxes else first
+    detector_batch = batch(1, first, second)
+
+    with pytest.raises(ValueError, match="track IDs must be unique within a frame"):
+        TrackedFrame(
+            batch=detector_batch,
+            persons=(
+                TrackedPerson(track_id=7, detection=first),
+                TrackedPerson(track_id=7, detection=second),
+            ),
+        )
+
+    # Rejection neither rewrites detector evidence nor selects a winning person.
+    assert detector_batch.detections == (first, second)
+
+
+def test_tracked_frame_accepts_unique_tracks_even_when_person_boxes_are_identical() -> None:
+    observed = detection("person", (0.10, 0.10, 0.40, 0.80))
+    persons = (
+        TrackedPerson(track_id=0, detection=observed),
+        TrackedPerson(track_id=1, detection=observed),
+    )
+    detector_batch = batch(1, observed, observed)
+
+    frame = TrackedFrame(batch=detector_batch, persons=persons)
+
+    assert frame.batch is detector_batch
+    assert frame.persons == persons
+    # Unique track IDs do not prove these are different physical Workers.
+
+
+def test_tracked_frame_accepts_no_current_person_tracks() -> None:
+    detector_batch = batch(1)
+
+    frame = TrackedFrame(batch=detector_batch, persons=())
+
+    assert frame.batch is detector_batch
+    assert frame.persons == ()
 
 
 def test_iou_tracker_keeps_person_id_and_ignores_ppe_detections() -> None:

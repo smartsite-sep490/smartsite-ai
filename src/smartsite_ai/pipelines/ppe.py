@@ -22,8 +22,10 @@ DEFAULT_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
     "SAFETY_VEST": frozenset({"safety_vest", "safety vest", "high visibility vest", "vest"}),
 }
 DEFAULT_MISSING_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
-    "HARD_HAT": frozenset({"no-hardhat", "no hardhat", "no_hardhat", "no helmet"}),
-    "SAFETY_VEST": frozenset({"no-safety vest", "no safety vest", "no_safety_vest", "no vest"}),
+    "HARD_HAT": frozenset({"no-hardhat", "no hardhat", "no_hardhat", "no helmet", "no-helmet"}),
+    "SAFETY_VEST": frozenset(
+        {"no-safety vest", "no safety vest", "no_safety_vest", "no vest", "no-vest"}
+    ),
 }
 
 
@@ -37,6 +39,8 @@ class PpePipeline:
     is also unknown, including competitors outside the configured region. Callers
     can opt into legacy absence-based observations for a controlled evaluation,
     but that fallback cannot override ambiguous or contradictory evidence.
+    A ``None`` class map selects defaults; an explicit empty map disables that
+    evidence family. Empty positive and negative maps disable all PPE emission.
     """
 
     def __init__(
@@ -53,8 +57,14 @@ class PpePipeline:
         if not 0.0 < minimum_observable_person_height <= 1.0:
             raise ValueError("minimum_observable_person_height must be greater than 0")
 
-        present_mapping = class_names_by_item or DEFAULT_PPE_CLASS_NAMES
-        missing_mapping = missing_class_names_by_item or DEFAULT_MISSING_PPE_CLASS_NAMES
+        present_mapping = (
+            DEFAULT_PPE_CLASS_NAMES if class_names_by_item is None else class_names_by_item
+        )
+        missing_mapping = (
+            DEFAULT_MISSING_PPE_CLASS_NAMES
+            if missing_class_names_by_item is None
+            else missing_class_names_by_item
+        )
         class_to_observation: dict[str, tuple[PpeItem, Literal["PRESENT", "MISSING"]]] = {}
         for status, source_mapping in (("PRESENT", present_mapping), ("MISSING", missing_mapping)):
             for item, names in source_mapping.items():

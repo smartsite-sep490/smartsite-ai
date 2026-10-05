@@ -13,17 +13,19 @@ import pytest
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
-from smartsite_ai.inference.models import DetectionBatch
+from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
 from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.pipelines import Mf05Mf06Pipeline, PpePipeline, RestrictedZonePipeline
 from smartsite_ai.processing_worker import (
     HeadlessCameraProcessingWorker,
     ProcessingWorkerSourceError,
 )
+from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 REGION_ID = "22222222-2222-4222-8222-222222222222"
@@ -398,6 +400,68 @@ async def test_worker_stops_source_when_processing_fails(tmp_path: Path) -> None
             await worker.run()
 
     assert stream.stopped is True
+
+
+@pytest.mark.anyio
+async def test_worker_rejects_duplicate_track_output_without_delivering_a_false_event(
+    tmp_path: Path,
+) -> None:
+    observed = NormalizedDetection(
+        class_id=0,
+        class_name="Person",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.1, y1=0.1, x2=0.4, y2=0.8, coordinate_space="NORMALIZED_0_1"
+        ),
+    )
+
+    class PersonDetector(FakeDetector):
+        async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+            return (await super().detect(frame)).model_copy(update={"detections": (observed,)})
+
+    class MalformedTracker:
+        def update(self, detector_batch: DetectionBatch) -> TrackedFrame:
+            tracked = TrackedPerson(track_id=7, detection=detector_batch.detections[0])
+            return TrackedFrame(batch=detector_batch, persons=(tracked, tracked))
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    stream = FakeStream([_frame(0)])
+    outbox = SqliteEventOutbox((tmp_path / "outbox.sqlite3").resolve())
+    pipeline = Mf05Mf06Pipeline(
+        tracker=MalformedTracker(),
+        ppe=PpePipeline(),
+        zones=RestrictedZonePipeline(),
+        ppe_region_id=REGION_ID,
+    )
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    ) as backend:
+        worker = HeadlessCameraProcessingWorker(
+            stream=stream,  # type: ignore[arg-type]
+            detector=PersonDetector(),
+            pipeline=pipeline,
+            ppe_region_id=REGION_ID,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=OutboxDispatcher(outbox, backend),
+        )
+        with pytest.raises(ValueError, match="track IDs must be unique within a frame"):
+            await worker.run()
+
+    assert stream.stopped is True
+    assert requests == []
+    counts = await outbox.counts()
+    assert (counts.pending, counts.delivered, counts.terminal) == (0, 0, 0)
 
 
 @pytest.mark.anyio

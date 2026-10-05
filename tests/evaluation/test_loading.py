@@ -241,6 +241,32 @@ def test_load_artifact_spec_rejects_invalid_or_secret_bearing_json(
         load_artifact_spec(spec_path)
 
 
+def test_worker_loader_rejects_native_candidate_map_before_constructing_runner(
+    tmp_path: Path,
+) -> None:
+    native_map = {"0": "helmet", "1": "no-helmet", "2": "no-vest", "3": "person", "4": "vest"}
+    spec_path, _ = write_spec(tmp_path, classMap=native_map)
+    runner_constructed = False
+
+    def make_runner() -> FakeRunner:
+        nonlocal runner_constructed
+        runner_constructed = True
+        return FakeRunner(valid_metadata(classMap=native_map))
+
+    with pytest.raises(ArtifactValidationError, match="exactly the five canonical PPE classes"):
+        load_yolo11_detector(spec_path, runner_factory=make_runner)
+    assert runner_constructed is False
+
+
+def test_worker_loader_cannot_disguise_native_candidate_with_canonical_spec(tmp_path: Path) -> None:
+    spec_path, _ = write_spec(tmp_path)
+    native_map = {"0": "helmet", "1": "no-helmet", "2": "no-vest", "3": "person", "4": "vest"}
+    runner = FakeRunner(valid_metadata(classMap=native_map))
+    with pytest.raises(ArtifactValidationError, match="class map contradicts artifact spec"):
+        load_yolo11_detector(spec_path, runner_factory=lambda: runner)
+    assert runner.closed is True
+
+
 @pytest.mark.parametrize("content", ["[]", "null", "{", "\ufeff{}"])
 def test_load_artifact_spec_rejects_non_object_or_malformed_json(
     tmp_path: Path, content: str

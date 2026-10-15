@@ -198,6 +198,8 @@ class ConfigurationCapture:
         encoder_task: asyncio.Task[None] | None = None
         source_cancelled = False
         try:
+            if self._stop.is_set():
+                return
             await self._lease.source.connect()
             if self._stop.is_set():
                 return

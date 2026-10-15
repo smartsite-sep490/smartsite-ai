@@ -63,9 +63,40 @@ with the existing Python 3.12 test environment. They use fake sources and synthe
 pixels only; API checks use in-memory ASGI transport. No camera, native decoder,
 model, GPU, network server or application startup is exercised.
 
-The standalone modules are not activated or mounted in the current website or
-inference app. Physical ownership/alias exclusion, an explicitly approved runtime
-entrypoint, native driver deadlines, real camera/browser/operator verification and
+`ConfigurationCaptureRuntime` now assembles a standalone observer-only FastAPI
+application with a deferred source factory. Construction, ASGI lifespan and GET
+requests do not construct/connect sources. Explicit `start()` first acquires a
+nonblocking local OS lock, then starts one capture worker. A stop requested before
+the worker's first step avoids the source factory entirely. The factory must
+return a new disconnected source with the exact expected stream identity; the
+runtime refuses to adopt or close another owner's connected/mismatched source.
+
+`ConfigurationProcessLease` requires an existing private absolute local directory
+and an operator-assigned physical-resource UUID. All aliases of that physical
+source must share this UUID and directory across cooperating processes. On Windows
+it uses `msvcrt.LK_NBLCK` for one byte beyond EOF; on POSIX it uses nonblocking
+`flock`. The dedicated empty file is not truncated/deleted. Lock failure, a changed
+inode, symlink leaf, nonempty file or resolved UNC directory refuses startup before
+the source factory. Configure only a local trusted directory; network filesystems,
+hostile directory modification and cross-host distributed locking are unsupported.
+
+The process lock remains held until explicit `await runtime.stop()` confirms
+capture drain/release, including after natural EOF or source failure. A cancelled
+stop waiter does not release it. Failed native release keeps it held for explicit
+process recovery. Do not externally release this private guard to bypass a hung
+source. OS process exit releases its file descriptors; that is not graceful native
+camera cleanup proof. Older/noncooperating inference/capture workers must be
+excluded independently before activation. Locks do not discover physical aliases.
+
+Runtime assembly and same-host lock contention are qualified using fake sources,
+in-memory ASGI and local test files only. Actual second-Python-process contention
+was tested on Windows; POSIX lock execution is not certified by that test. Source
+kind must match the stream and REPLAY must opt into pacing. The replay source must
+still supply timestamps within the issue-time freshness budget.
+
+These modules are not activated or mounted in the current website or inference
+app; no new CLI/production rollout is claimed. Physical resource mapping/exclusive
+ownership, native driver deadlines, real camera/browser/operator verification and
 production acceptance remain open. AI/capture execution stays paused until the
 human directly authorizes it.
 

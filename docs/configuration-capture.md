@@ -40,6 +40,14 @@ STOP_UNRESOLVED/exit1; it is never graceful/native-release proof. A stuck native
 driver can outlive the requested duration and require explicit verified-process
 recovery. Do not automatically relaunch while that process/its native work lives.
 
+For hidden Windows processes, optionally pass `--stop-file /private/STOP` with
+an absolute path in the manifest's directory. It must be named `STOP`, absent
+and not a symlink at startup; an existing file refuses activation. Creating it
+requests the same graceful drain as a signal, with polling bounded at four checks
+per second. A filesystem read failure requests drain and returns a safe failure.
+The watcher never cancels native capture, resets ownership or deletes the file.
+This operator-local control is not a viewer endpoint and does not extend the 1h cap.
+
 Startup reports BOUND_NOT_READY with its local port, not pixel availability.
 Poll the existing authenticated endpoint for current pixels; requests cannot
 start/recover capture. Binding/protocol failures use fixed safe codes. Default

@@ -148,9 +148,39 @@ class _Parser(argparse.ArgumentParser):
         raise ConfigurationHostError("CONFIGURATION_HOST_INVALID_CONFIG")
 
 
-async def _command(config: HostConfiguration) -> None:
+def _validated_stop_file(path: Path | None, manifest: Path) -> Path | None:
+    if path is None:
+        return None
+    try:
+        if (
+            not path.is_absolute()
+            or path.name != "STOP"
+            or path.parent.resolve(strict=True) != manifest.parent.resolve(strict=True)
+            or path.is_symlink()
+            or path.exists()
+        ):
+            raise ValueError("Fresh operator-local STOP path required")
+        return path.parent.resolve(strict=True) / "STOP"
+    except (OSError, ValueError):
+        raise ConfigurationHostError("CONFIGURATION_HOST_INVALID_CONFIG") from None
+
+
+async def _watch_stop_file(path: Path, requested: asyncio.Event) -> None:
+    try:
+        while not requested.is_set():
+            if path.exists():
+                requested.set()
+                return
+            await asyncio.sleep(0.25)
+    except OSError:
+        requested.set()
+        raise ConfigurationHostError("CONFIGURATION_HOST_INVALID_CONFIG") from None
+
+
+async def _command(config: HostConfiguration, *, stop_file: Path | None = None) -> None:
     loop, requested = asyncio.get_running_loop(), asyncio.Event()
     previous = {}
+    watcher = None
     try:
         for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             number = getattr(signal, name, None)
@@ -158,19 +188,29 @@ async def _command(config: HostConfiguration) -> None:
                 previous[number] = signal.signal(
                     number, lambda _number, _frame: loop.call_soon_threadsafe(requested.set)
                 )
+        if stop_file is not None:
+            watcher = asyncio.create_task(_watch_stop_file(stop_file, requested))
         await serve_host(config, stop_requested=requested)
     finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
+        try:
+            if watcher is not None:
+                watcher.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watcher
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
         parser = _Parser(description=__doc__)
         parser.add_argument("--manifest", type=Path, required=True)
+        parser.add_argument("--stop-file", type=Path)
         args = parser.parse_args(argv)
+        stop_file = _validated_stop_file(args.stop_file, args.manifest)
         config = load_host_configuration(args.manifest, os.environ)
-        asyncio.run(_command(config))
+        asyncio.run(_command(config, stop_file=stop_file) if stop_file else _command(config))
     except ConfigurationHostError as error:
         _emit({"state": "CONFIGURATION_HOST_FAILED", "code": error.code})
         return 1

@@ -47,7 +47,7 @@ class _Manifest(BaseModel):
     resource_id: UUID = Field(alias="resourceId")
     lock_directory: Path = Field(alias="lockDirectory")
     port: int = Field(default=0, ge=0, le=65535)
-    duration_seconds: float = Field(alias="durationSeconds", gt=0, le=3600)
+    duration_seconds: float = Field(alias="durationSeconds", gt=0, le=86400)
 
     @field_validator("stream_id", "camera_external_id")
     @classmethod
@@ -77,7 +77,9 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def load_host_configuration(path: Path, environ: Mapping[str, str]) -> HostConfiguration:
+def load_host_configuration(
+    path: Path, environ: Mapping[str, str], *, controlled_stop: bool = False
+) -> HostConfiguration:
     """Validate before any socket, capture/source factory or server is constructed."""
     try:
         if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):
@@ -88,6 +90,8 @@ def load_host_configuration(path: Path, environ: Mapping[str, str]) -> HostConfi
             raise ValueError("Configuration exceeds byte budget")
         json.loads(data, object_pairs_hook=_unique_object)
         manifest = _Manifest.model_validate_json(data)
+        if manifest.duration_seconds > 3600 and controlled_stop is not True:
+            raise ValueError("Long sessions require an explicit stop control")
         raw, token = environ[manifest.source_env], environ[manifest.token_env]
         if (
             manifest.source_env == manifest.token_env

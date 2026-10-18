@@ -31,7 +31,7 @@ still require operator commissioning. Source/token arguments, raw config/error
 values and viewer-controlled source URLs are not supported. JSON is <=16KiB,
 regular/non-symlink, strict fields and unique keys; token is bounded ASCII.
 
-SIGINT/SIGTERM/SIGBREAK requests server exit, as does the finite duration (<=1h)
+SIGINT/SIGTERM/SIGBREAK requests server exit, as does the finite duration (normally <=1h)
 or terminal capture state. Uvicorn signal re-raising is disabled so the original
 capture can drain first. Bounded stop returningFalse emits DRAIN_PENDING, then
 the host waits for the same native task without cancelling it or repeating close.
@@ -46,7 +46,10 @@ and not a symlink at startup; an existing file refuses activation. Creating it
 requests the same graceful drain as a signal, with polling bounded at four checks
 per second. A filesystem read failure requests drain and returns a safe failure.
 The watcher never cancels native capture, resets ownership or deletes the file.
-This operator-local control is not a viewer endpoint and does not extend the 1h cap.
+This operator-local control is not a viewer endpoint. A validated stop-file permits
+a finite session up to24h for an owned website session; without it the1h limit
+remains. Direct host callers also require an explicit stop event above1h. This
+is a lifecycle ceiling, not proof of24h camera availability or production capacity.
 
 Startup reports BOUND_NOT_READY with its local port, not pixel availability.
 Poll the existing authenticated endpoint for current pixels; requests cannot

@@ -24,7 +24,12 @@ def isolate_signals(monkeypatch, calls):
 def test_cli_accepts_absent_same_directory_stop_file(tmp_path, monkeypatch):
     manifest, stop = tmp_path / "host.json", tmp_path / "STOP"
     config, calls = object(), []
-    monkeypatch.setattr(cli, "load_host_configuration", lambda *_: config)
+
+    def load(*args, **kwargs):
+        assert kwargs == {"controlled_stop": True}
+        return config
+
+    monkeypatch.setattr(cli, "load_host_configuration", load)
 
     async def command(value, *, stop_file=None):
         calls.append((value, stop_file))
@@ -133,3 +138,18 @@ def test_command_cancellation_cleans_watch_and_restores_signals(tmp_path, monkey
     asyncio.run(scenario())
     assert "host-finally" in calls
     assert calls.count("signal") % 2 == 0
+
+
+def test_long_host_without_stop_event_refuses_before_runtime():
+    calls = []
+
+    def runtime(config):
+        calls.append("runtime")
+        raise RuntimeError("Should not construct runtime")
+
+    with pytest.raises(ConfigurationHostError) as error:
+        asyncio.run(
+            cli.serve_host(SimpleNamespace(duration_seconds=64800, port=0), runtime_factory=runtime)
+        )
+    assert error.value.code == "CONFIGURATION_HOST_INVALID_CONFIG"
+    assert calls == []

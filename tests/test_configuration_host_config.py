@@ -55,6 +55,49 @@ def test_named_environment_values_stay_secret_and_kind_is_explicit(tmp_path):
     assert SOURCE not in repr(cfg) and TOKEN not in repr(cfg)
 
 
+@pytest.mark.parametrize("seconds", [3601.0, 64800.0, 86400.0])
+def test_long_session_requires_explicit_controlled_stop(tmp_path, seconds):
+    module = api()
+    path = manifest(tmp_path, durationSeconds=seconds)
+    with pytest.raises(module.ConfigurationHostError):
+        load(path)
+    cfg = module.load_host_configuration(
+        path,
+        {"SMARTSITE_AI_CAPTURE_SOURCE": SOURCE, "SMARTSITE_AI_CAPTURE_TOKEN": TOKEN},
+        controlled_stop=True,
+    )
+    assert cfg.duration_seconds == seconds
+
+
+def test_controlled_session_still_refuses_above_one_day(tmp_path):
+    module = api()
+    with pytest.raises(module.ConfigurationHostError):
+        module.load_host_configuration(
+            manifest(tmp_path, durationSeconds=86400.1),
+            {"SMARTSITE_AI_CAPTURE_SOURCE": SOURCE, "SMARTSITE_AI_CAPTURE_TOKEN": TOKEN},
+            controlled_stop=True,
+        )
+
+
+def test_cli_long_session_requires_validated_stop_file(tmp_path, monkeypatch):
+    from smartsite_ai.tools import run_configuration_capture as cli
+
+    path = manifest(tmp_path, durationSeconds=64800.0)
+    monkeypatch.setenv("SMARTSITE_AI_CAPTURE_SOURCE", SOURCE)
+    monkeypatch.setenv("SMARTSITE_AI_CAPTURE_TOKEN", TOKEN)
+    calls = []
+
+    async def command(config, *, stop_file=None):
+        calls.append((config.duration_seconds, stop_file))
+
+    monkeypatch.setattr(cli, "_command", command)
+    assert cli.main(["--manifest", str(path)]) == 1
+    assert not calls
+    stop = tmp_path / "STOP"
+    assert cli.main(["--manifest", str(path), "--stop-file", str(stop)]) == 0
+    assert calls == [(64800.0, stop)]
+
+
 @pytest.mark.parametrize(
     "changes",
     [

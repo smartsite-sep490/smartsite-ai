@@ -70,6 +70,8 @@ async def serve_host(
     stop_requested: asyncio.Event | None = None,
 ) -> dict[str, object]:
     """Bind first, explicitly start once and prove native release before returning."""
+    if config.duration_seconds > 3600 and stop_requested is None:
+        raise ConfigurationHostError("CONFIGURATION_HOST_INVALID_CONFIG")
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         listener.bind(("127.0.0.1", config.port))
@@ -209,7 +211,11 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--stop-file", type=Path)
         args = parser.parse_args(argv)
         stop_file = _validated_stop_file(args.stop_file, args.manifest)
-        config = load_host_configuration(args.manifest, os.environ)
+        config = (
+            load_host_configuration(args.manifest, os.environ, controlled_stop=True)
+            if stop_file
+            else load_host_configuration(args.manifest, os.environ)
+        )
         asyncio.run(_command(config, stop_file=stop_file) if stop_file else _command(config))
     except ConfigurationHostError as error:
         _emit({"state": "CONFIGURATION_HOST_FAILED", "code": error.code})

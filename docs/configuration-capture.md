@@ -1,5 +1,50 @@
 # Region configuration image: capture-only software boundary
 
+## Explicit local operator command
+
+`smartsite-ai-configuration-capture --manifest /private/capture.json` hosts the
+existing authenticated observer route on127.0.0.1 only. It binds the socket before
+constructing/starting one capture owner. It never loads YOLO or changes the
+existing inference app. Import/help/config validation do not open a source.
+
+Private manifest (source/token values remain in the named environment variables):
+
+```json
+{
+  "schemaVersion": "1.0.0",
+  "streamId": "configuration-source",
+  "cameraExternalId": "configured-camera-external-id",
+  "sourceKind": "LIVE",
+  "sourceEnv": "SMARTSITE_AI_CONFIGURATION_SOURCE",
+  "tokenEnv": "SMARTSITE_AI_CONFIGURATION_TOKEN",
+  "resourceId": "aa732b3e-73f8-4e85-b914-0b529f78a181",
+  "lockDirectory": "/private/shared-physical-source-locks",
+  "port": 5091,
+  "durationSeconds": 120
+}
+```
+
+Use one operator-assigned physical-resource UUID/shared private local directory
+for every alias; the sample UUID is not discovered hardware identity. Local video
+requires REPLAY and is paced; camera indices require LIVE. Network kind/rights
+still require operator commissioning. Source/token arguments, raw config/error
+values and viewer-controlled source URLs are not supported. JSON is <=16KiB,
+regular/non-symlink, strict fields and unique keys; token is bounded ASCII.
+
+SIGINT/SIGTERM/SIGBREAK requests server exit, as does the finite duration (<=1h)
+or terminal capture state. Uvicorn signal re-raising is disabled so the original
+capture can drain first. Bounded stop returningFalse emits DRAIN_PENDING, then
+the host waits for the same native task without cancelling it or repeating close.
+Repeated cancellation of a waiter does not release ownership. Failed close emits
+STOP_UNRESOLVED/exit1; it is never graceful/native-release proof. A stuck native
+driver can outlive the requested duration and require explicit verified-process
+recovery. Do not automatically relaunch while that process/its native work lives.
+
+Startup reports BOUND_NOT_READY with its local port, not pixel availability.
+Poll the existing authenticated endpoint for current pixels; requests cannot
+start/recover capture. Binding/protocol failures use fixed safe codes. Default
+tests use fake capture/server; actual camera/Backend/browser evidence is separate.
+
 This purpose is independent of YOLO, tracking, Region configuration and event
 ingestion. It does not make a PPE observation or identify a Worker. The existing
 inference application, startup and preview routes are unchanged.

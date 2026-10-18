@@ -121,3 +121,12 @@ class ConfigurationCaptureRuntime:
         if released:
             self._process_lease.release()
         return released
+
+    async def wait_for_release(self) -> bool:
+        """Keep OS ownership while the existing source task drains after stop."""
+        if not self._stop_requested:
+            raise RuntimeError("Stop must be requested before waiting for release")
+        released = await self._capture.wait_for_release()
+        if released:
+            self._process_lease.release()
+        return released

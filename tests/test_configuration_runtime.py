@@ -18,6 +18,66 @@ TOKEN = SecretStr("synthetic-configuration-runtime-service-token")
 PATH = "/v1/realtime/configuration-image?cameraExternalId=camera-a"
 
 
+def test_wait_for_release_keeps_process_lock_until_original_read_drains(tmp_path):
+    async def scenario():
+        runtime, source, _ = runtime_pair(tmp_path)
+        other, _, builds = runtime_pair(tmp_path)
+        assert hasattr(runtime, "wait_for_release"), "Host drain boundary is missing"
+        with pytest.raises(RuntimeError):
+            await runtime.wait_for_release()
+        await runtime.start()
+        await source.reading.wait()
+        assert not await runtime.stop()
+        waiting = asyncio.create_task(runtime.wait_for_release())
+        await asyncio.sleep(0)
+        assert not waiting.done() and source.closes == 0
+        with pytest.raises(RuntimeError, match="ownership"):
+            await other.start()
+        assert builds == []
+        source.items.put_nowait(None)
+        assert await waiting
+        assert source.closes == 1
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_release_waiter_does_not_cancel_or_close_the_source(tmp_path):
+    async def scenario():
+        runtime, source, _ = runtime_pair(tmp_path)
+        assert hasattr(runtime, "wait_for_release"), "Host drain boundary is missing"
+        await runtime.start()
+        await source.reading.wait()
+        assert not await runtime.stop()
+        waiting = asyncio.create_task(runtime.wait_for_release())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert source.closes == 0
+        source.items.put_nowait(None)
+        assert await runtime.wait_for_release()
+        assert source.closes == 1
+
+    asyncio.run(scenario())
+
+
+def test_wait_for_release_never_unpoisons_a_failed_native_close(tmp_path):
+    async def scenario():
+        runtime, source, _ = runtime_pair(tmp_path)
+        other, _, builds = runtime_pair(tmp_path)
+        source.close_error = True
+        await runtime.start()
+        await source.reading.wait()
+        source.items.put_nowait(None)
+        assert not await runtime.stop()
+        assert not await runtime.wait_for_release()
+        with pytest.raises(RuntimeError, match="ownership"):
+            await other.start()
+        assert builds == [] and source.closes == 1
+
+    asyncio.run(scenario())
+
+
 def runtime_pair(directory: Path, source=None, *, source_factory=None, **changes):
     name = "smartsite_ai.configuration_runtime"
     assert importlib.util.find_spec(name) is not None, "Explicit configuration runtime is missing"

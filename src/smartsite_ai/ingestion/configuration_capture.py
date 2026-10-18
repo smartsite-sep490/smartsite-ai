@@ -273,3 +273,18 @@ class ConfigurationCapture:
         if self._task.done() and not self._task.cancelled():
             self._task.result()
         return self._released
+
+    async def wait_for_release(self) -> bool:
+        """Wait for the original task after stop; never cancel its native work.
+
+        No deadline is promised here. A stuck driver requires explicit process
+        recovery. Cancelling this waiter preserves the task and ownership.
+        """
+        if not self._stop.is_set():
+            raise RuntimeError("Stop must be requested before waiting for release")
+        if self._task is None:
+            return self._state == "STOPPED"
+        if self._task.cancelled():
+            return False
+        await asyncio.shield(self._task)
+        return self._released

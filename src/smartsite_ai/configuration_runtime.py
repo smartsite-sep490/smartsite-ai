@@ -102,6 +102,10 @@ class ConfigurationCaptureRuntime:
     def state(self) -> str:
         return self._capture.state
 
+    @property
+    def reason(self) -> str | None:
+        return self._capture.reason
+
     async def start(self) -> None:
         if self._stop_requested or (self._started and self.state != "RUNNING"):
             raise RuntimeError("Configuration runtime lifecycle has ended")

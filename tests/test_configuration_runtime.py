@@ -18,6 +18,20 @@ TOKEN = SecretStr("synthetic-configuration-runtime-service-token")
 PATH = "/v1/realtime/configuration-image?cameraExternalId=camera-a"
 
 
+def test_runtime_exposes_source_end_reason_after_release(tmp_path):
+    async def scenario():
+        runtime, source, _ = runtime_pair(tmp_path)
+        assert runtime.reason is None
+        await runtime.start()
+        source.items.put_nowait(None)
+        await until(lambda: runtime.state == "STOPPED")
+        assert runtime.reason == "source_ended"
+        assert await runtime.stop()
+        assert runtime.reason == "source_ended"
+
+    asyncio.run(scenario())
+
+
 def test_wait_for_release_keeps_process_lock_until_original_read_drains(tmp_path):
     async def scenario():
         runtime, source, _ = runtime_pair(tmp_path)

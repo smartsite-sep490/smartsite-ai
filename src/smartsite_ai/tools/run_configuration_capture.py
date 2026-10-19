@@ -82,6 +82,7 @@ async def serve_host(
     port = listener.getsockname()[1]
     runtime, server, watcher = None, None, None
     failure, cancelled = False, False
+    termination_reason = "server_returned"
     result: dict[str, object] = {}
     try:
         emit({"state": "CONFIGURATION_HOST_BOUND_NOT_READY", "port": port})
@@ -90,26 +91,47 @@ async def serve_host(
         await runtime.start()
 
         async def watch() -> None:
+            nonlocal termination_reason
             deadline = asyncio.get_running_loop().time() + config.duration_seconds
             while not server.should_exit:
-                if (
-                    (stop_requested is not None and stop_requested.is_set())
-                    or asyncio.get_running_loop().time() >= deadline
-                    or runtime.state not in ("IDLE", "RUNNING")
-                ):
-                    server.should_exit = True
-                    return
-                await asyncio.sleep(0.025)
+                if runtime.state not in ("IDLE", "RUNNING"):
+                    termination_reason = "capture_terminal"
+                elif stop_requested is not None and stop_requested.is_set():
+                    termination_reason = "operator_stop"
+                elif asyncio.get_running_loop().time() >= deadline:
+                    termination_reason = "deadline_elapsed"
+                else:
+                    await asyncio.sleep(0.025)
+                    continue
+                server.should_exit = True
+                return
 
         watcher = asyncio.create_task(watch())
         await server.serve(sockets=[listener])
         failure = runtime.state == "FAILED"
     except asyncio.CancelledError:
+        termination_reason = "host_cancelled"
         cancelled = True
         raise
     except (Exception, SystemExit):
+        termination_reason = "host_failed"
         raise ConfigurationHostError("CONFIGURATION_HOST_SERVER_FAILED") from None
     finally:
+        # Snapshot before stop changes lifecycle state; only known codes may reach logs.
+        capture_state = runtime.state if runtime is not None else None
+        capture_reason = runtime.reason if runtime is not None else None
+        if capture_state not in (None, "IDLE", "RUNNING", "STOPPING", "STOPPED", "FAILED"):
+            capture_state = "UNKNOWN"
+        if capture_reason not in (
+            None,
+            "source_ended",
+            "frame_identity_invalid",
+            "image_encoding_failed",
+            "capture_cancelled",
+            "source_failed",
+            "source_release_failed",
+        ):
+            capture_reason = "unknown"
         if server is not None:
             server.should_exit = True
         if watcher is not None:
@@ -131,6 +153,9 @@ async def serve_host(
                 else "CONFIGURATION_HOST_STOP_UNRESOLVED",
                 "port": port,
                 "nativeReleaseProved": released,
+                "terminationReason": termination_reason,
+                "captureStateBeforeStop": capture_state,
+                "captureReasonBeforeStop": capture_reason,
             }
             emit(result)
             if not released:

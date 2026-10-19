@@ -45,6 +45,7 @@ class Runtime:
     def __init__(self, calls, *, released=True, start_failure=False):
         self.calls, self.released, self.start_failure = calls, released, start_failure
         self.state, self.app = "IDLE", object()
+        self.reason = None
 
     async def start(self):
         self.calls.append("start")
@@ -113,7 +114,7 @@ def test_occupied_port_refuses_before_runtime_or_source_factory(tmp_path):
 @pytest.mark.parametrize("kind", ["start", "serve"])
 def test_failures_still_stop_once_and_do_not_expose_exception(tmp_path, kind):
     module = api()
-    calls = []
+    calls, events = [], []
     runtime = Runtime(calls, start_failure=kind == "start")
     server = Server(calls, fail=kind == "serve")
     with pytest.raises(module.ConfigurationHostError) as error:
@@ -122,11 +123,13 @@ def test_failures_still_stop_once_and_do_not_expose_exception(tmp_path, kind):
                 configuration(tmp_path),
                 runtime_factory=lambda _: runtime,
                 server_factory=lambda _: server,
-                emit=lambda _: None,
+                emit=events.append,
             )
         )
     assert calls.count("stop") == 1
     assert "private-credential" not in str(error.value) and "server-secret" not in str(error.value)
+    assert events[-1]["terminationReason"] == "host_failed"
+    assert "private-credential" not in json.dumps(events)
 
 
 def test_unresolved_native_stop_is_not_reported_as_release(tmp_path):
@@ -161,11 +164,64 @@ def test_deadline_requests_server_exit_and_releases_source(tmp_path):
     )
     assert server.should_exit and result["nativeReleaseProved"]
     assert calls == ["start", "serve", "stop"]
+    assert result["terminationReason"] == "deadline_elapsed"
+    assert result["captureStateBeforeStop"] == "RUNNING"
+
+
+@pytest.mark.parametrize("reason", ["source_ended", "source://private-credential"])
+def test_source_terminal_reason_survives_cleanup_without_exposing_arbitrary_text(tmp_path, reason):
+    module = api()
+    calls, events = [], []
+
+    class ClearingRuntime(Runtime):
+        async def stop(self):
+            self.reason = None
+            return await super().stop()
+
+    runtime = ClearingRuntime(calls)
+
+    class EndedServer(Server):
+        async def serve(self, *, sockets):
+            runtime.state, runtime.reason = "STOPPED", reason
+            await super().serve(sockets=sockets)
+
+    result = asyncio.run(
+        module.serve_host(
+            configuration(tmp_path),
+            runtime_factory=lambda _: runtime,
+            server_factory=lambda _: EndedServer(calls, wait=True),
+            emit=events.append,
+        )
+    )
+    assert result["terminationReason"] == "capture_terminal"
+    assert result["captureStateBeforeStop"] == "STOPPED"
+    assert result["captureReasonBeforeStop"] == (
+        "source_ended" if reason == "source_ended" else "unknown"
+    )
+    assert "private-credential" not in json.dumps(events)
+    assert calls.count("start") == calls.count("stop") == 1
+
+
+def test_operator_stop_is_distinct_from_deadline(tmp_path):
+    module = api()
+    calls = []
+    requested = asyncio.Event()
+    requested.set()
+    result = asyncio.run(
+        module.serve_host(
+            configuration(tmp_path),
+            runtime_factory=lambda _: Runtime(calls),
+            server_factory=lambda _: Server(calls, wait=True),
+            stop_requested=requested,
+            emit=lambda _: None,
+        )
+    )
+    assert result["terminationReason"] == "operator_stop"
 
 
 def test_cancelled_host_drains_capture_and_propagates_cancellation(tmp_path):
     module = api()
-    calls = []
+    calls, events = [], []
     runtime, server = Runtime(calls), Server(calls, wait=True)
 
     async def scenario():
@@ -174,7 +230,7 @@ def test_cancelled_host_drains_capture_and_propagates_cancellation(tmp_path):
                 configuration(tmp_path),
                 runtime_factory=lambda _: runtime,
                 server_factory=lambda _: server,
-                emit=lambda _: None,
+                emit=events.append,
             )
         )
         while "serve" not in calls:
@@ -183,18 +239,20 @@ def test_cancelled_host_drains_capture_and_propagates_cancellation(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await task
         assert calls.count("stop") == 1
+        assert events[-1]["terminationReason"] == "host_cancelled"
 
     asyncio.run(scenario())
 
 
 def test_source_failure_ends_host_without_restarting_it(tmp_path):
     module = api()
-    calls = []
+    calls, events = [], []
     runtime = Runtime(calls)
 
     class FailedServer(Server):
         async def serve(self, *, sockets):
             runtime.state = "FAILED"
+            runtime.reason = "source_failed"
             await super().serve(sockets=sockets)
 
     with pytest.raises(module.ConfigurationHostError) as error:
@@ -203,11 +261,14 @@ def test_source_failure_ends_host_without_restarting_it(tmp_path):
                 configuration(tmp_path),
                 runtime_factory=lambda _: runtime,
                 server_factory=lambda _: FailedServer(calls, wait=True),
-                emit=lambda _: None,
+                emit=events.append,
             )
         )
     assert error.value.code == "CONFIGURATION_HOST_CAPTURE_FAILED"
     assert calls.count("start") == 1 and calls.count("stop") == 1
+    assert events[-1]["terminationReason"] == "capture_terminal"
+    assert events[-1]["captureStateBeforeStop"] == "FAILED"
+    assert events[-1]["captureReasonBeforeStop"] == "source_failed"
 
 
 def test_repeated_cancellation_during_stop_must_drain_before_closing_socket(tmp_path):

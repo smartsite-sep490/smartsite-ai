@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import hmac
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -17,12 +18,11 @@ from smartsite_ai.inference.identity import (
     FaceVerificationFrame,
     FaceVerificationResult,
 )
+from smartsite_ai.mf06_identity_cache import Mf06IdentityCache
 from smartsite_ai.mf06_identity_wire import (
     MAX_MF06_REQUEST_BODY_BYTES,
-    SafetyMf06CandidateWire,
     SafetyMf06InvocationWire,
     SafetyMf06ResolveRequestWire,
-    build_mf06_candidate_response,
     build_mf06_unavailable_response,
 )
 
@@ -33,11 +33,18 @@ NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    cache = getattr(app.state, "mf06_face_cache", None)
+    if cache is not None:
+        cache.close()
+    app.state.mf06_face_cache = None
     app.state.mf06_face_draining = False
     try:
         yield
     finally:
         app.state.mf06_face_draining = True
+        cache = getattr(app.state, "mf06_face_cache", None)
+        if cache is not None:
+            cache.close()
         active = getattr(app.state, "mf06_face_active", None)
         if active is not None and not active.done():
             try:
@@ -138,7 +145,7 @@ async def _read_bounded_body(request: Request, max_bytes: int) -> bytes:
 def _map_verification_result(
     invocation: SafetyMf06InvocationWire,
     invocation_uuid: UUID,
-    candidate_by_hash: dict[str, SafetyMf06CandidateWire],
+    candidate_by_hash: dict[str, str],
     result: Any,
 ) -> dict[str, Any]:
     if not isinstance(result, FaceVerificationResult):
@@ -156,11 +163,17 @@ def _map_verification_result(
             return build_mf06_unavailable_response(invocation, "SERVICE_UNAVAILABLE")
 
         matched_hash = hashlib.sha256(raw_reference.encode("utf-8")).hexdigest()
-        matched_candidate = candidate_by_hash.get(matched_hash)
-        if matched_candidate is None:
+        revision = candidate_by_hash.get(matched_hash)
+        if revision is None:
             return build_mf06_unavailable_response(invocation, "SERVICE_UNAVAILABLE")
 
-        return build_mf06_candidate_response(invocation, matched_candidate)
+        return {
+            **invocation.to_echo_dict(),
+            "state": "CANDIDATE",
+            "provenance": "TRUSTED_SERVICE",
+            "profileReferenceHash": matched_hash,
+            "profileRevision": revision,
+        }
 
     if result.status in ("UNKNOWN", "LOW_CONFIDENCE", "QUALITY_FAILED"):
         return build_mf06_unavailable_response(invocation, "NO_MATCH")
@@ -189,18 +202,45 @@ async def resolve_safety_mf06_face(request: Request, response: Response) -> dict
     if recognizer is None:
         return build_mf06_unavailable_response(parsed.invocation, "SERVICE_UNAVAILABLE")
 
-    if not parsed.candidates:
-        return build_mf06_unavailable_response(parsed.invocation, "NO_MATCH")
-
     active = getattr(request.app.state, "mf06_face_active", None)
-    if getattr(request.app.state, "mf06_face_draining", False) or (
-        active is not None and not active.done()
-    ):
+    if getattr(request.app.state, "mf06_face_draining", False):
         return build_mf06_unavailable_response(parsed.invocation, "SERVICE_UNAVAILABLE")
 
     invocation_uuid = UUID(parsed.invocation.invocationId)
+    invocation_key = str(invocation_uuid)
+    fingerprint = hashlib.sha256(
+        json.dumps(parsed.model_dump(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    cache = getattr(request.app.state, "mf06_face_cache", None)
+    if cache is None or cache.provider is not recognizer:
+        if cache is not None:
+            cache.close()
+        cache = Mf06IdentityCache(recognizer)
+        request.app.state.mf06_face_cache = cache
+    try:
+        cached = cache.lookup(invocation_key, fingerprint)
+    except ValueError:
+        raise HTTPException(
+            409, "MF06 invocation input conflict", headers=NO_STORE_HEADERS
+        ) from None
+    if cached is not None:
+        return cached
+    if active is not None and not active.done():
+        prior = getattr(request.app.state, "mf06_face_active_binding", None)
+        if (
+            prior is not None
+            and prior[0] is recognizer
+            and prior[1] == invocation_key
+            and prior[2] != fingerprint
+        ):
+            raise HTTPException(409, "MF06 invocation input conflict", headers=NO_STORE_HEADERS)
+        return build_mf06_unavailable_response(parsed.invocation, "SERVICE_UNAVAILABLE")
+
+    if not parsed.candidates:
+        return build_mf06_unavailable_response(parsed.invocation, "NO_MATCH")
+
     candidate_by_hash = {
-        candidate.profileReferenceHash: candidate for candidate in parsed.candidates
+        candidate.profileReferenceHash: candidate.profileRevision for candidate in parsed.candidates
     }
     frame = FaceVerificationFrame(
         verification_id=invocation_uuid,
@@ -219,14 +259,20 @@ async def resolve_safety_mf06_face(request: Request, response: Response) -> dict
     )
 
     # No await between slot inspection and reservation on this application's event loop.
-    active = asyncio.create_task(recognizer.verify(frame))
+    active = asyncio.create_task(
+        _verify_and_remember(
+            recognizer, frame, parsed.invocation, candidate_by_hash, cache, fingerprint
+        )
+    )
     request.app.state.mf06_face_active = active
+    request.app.state.mf06_face_active_binding = (recognizer, invocation_key, fingerprint)
 
     def settled(task: asyncio.Task[Any]) -> None:
         if not task.cancelled():
             task.exception()  # Observe late failures after the HTTP caller has left.
         if getattr(request.app.state, "mf06_face_active", None) is task:
             request.app.state.mf06_face_active = None
+            request.app.state.mf06_face_active_binding = None
 
     active.add_done_callback(settled)
     try:
@@ -241,9 +287,18 @@ async def resolve_safety_mf06_face(request: Request, response: Response) -> dict
     except Exception:
         return build_mf06_unavailable_response(parsed.invocation, "SERVICE_UNAVAILABLE")
 
-    return _map_verification_result(
-        parsed.invocation,
-        invocation_uuid,
-        candidate_by_hash,
-        result,
-    )
+    return result
+
+
+async def _verify_and_remember(
+    recognizer: FaceRecognizerProtocol,
+    frame: FaceVerificationFrame,
+    invocation: SafetyMf06InvocationWire,
+    candidates: dict[str, str],
+    cache: Mf06IdentityCache,
+    fingerprint: str,
+) -> dict[str, Any]:
+    result = await recognizer.verify(frame)
+    response = _map_verification_result(invocation, frame.verification_id, candidates, result)
+    cache.remember(str(frame.verification_id), fingerprint, response)
+    return response

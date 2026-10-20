@@ -9,7 +9,10 @@ from uuid import UUID
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from pydantic import SecretStr
 
+from smartsite_ai.app import create_app
+from smartsite_ai.config import Settings
 from smartsite_ai.inference.identity import (
     FaceVerificationFrame,
     FaceVerificationResult,
@@ -394,3 +397,102 @@ def test_resolve_fails_closed_on_mismatched_model_invocation_id_or_unlisted_refe
         assert "profileRevision" not in body
         assert "fp_unlisted_candidate" not in res.text
         assert RAW_REFERENCE not in res.text
+
+
+def test_create_app_mounts_mf06_route_and_enforces_token_and_default_disabled_recognizer() -> None:
+    invocation = _make_invocation()
+    payload = _make_payload(invocation=invocation)
+
+    unconfigured_app = create_app(Settings(_env_file=None))
+    with TestClient(unconfigured_app) as unconfigured_client:
+        missing_token_res = unconfigured_client.post(
+            ENDPOINT,
+            json=payload,
+            headers=_auth_headers(),
+        )
+    assert missing_token_res.status_code == 503
+    assert missing_token_res.headers.get("cache-control") == "no-store"
+
+    configured_app = create_app(Settings(_env_file=None, identity_service_token=SecretStr(TOKEN)))
+    with TestClient(configured_app) as client:
+        missing_auth_res = client.post(ENDPOINT, json=payload)
+        assert missing_auth_res.status_code == 401
+        assert missing_auth_res.headers.get("cache-control") == "no-store"
+
+        wrong_auth_res = client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"authorization": "Bearer wrong-token"},
+        )
+        assert wrong_auth_res.status_code == 401
+        assert wrong_auth_res.headers.get("cache-control") == "no-store"
+
+        disabled_res = client.post(
+            ENDPOINT,
+            json=payload,
+            headers=_auth_headers(),
+        )
+    assert disabled_res.status_code == 200
+    assert disabled_res.headers.get("cache-control") == "no-store"
+    assert disabled_res.json() == {
+        **invocation,
+        "state": "UNAVAILABLE",
+        "provenance": "TRUSTED_SERVICE",
+        "reason": "SERVICE_UNAVAILABLE",
+    }
+
+
+def test_create_app_mf06_route_injected_candidate_returns_uuidv8_candidate_reference_only() -> None:
+    uuidv8_invocation_id = "11111111-1111-8111-8111-111111111111"
+    uuidv8_request_id = "22222222-2222-8222-8222-222222222222"
+    uuidv8_revision = "99999999-9999-8999-8999-999999999999"
+    invocation = _make_invocation(
+        invocationId=uuidv8_invocation_id,
+        requestId=uuidv8_request_id,
+    )
+    payload = _make_payload(
+        invocation=invocation,
+        candidates=[_make_candidate(profile_revision=uuidv8_revision)],
+    )
+
+    app = create_app(Settings(_env_file=None, identity_service_token=SecretStr(TOKEN)))
+    fake = _FakeFaceRecognizer(
+        FaceVerificationResult(
+            verification_id=UUID(uuidv8_invocation_id),
+            status="MATCHED",
+            model_version=MODEL_VERSION,
+            candidate_profile_reference=RAW_REFERENCE,
+            score_band="HIGH",
+            reason_code="FACE_MATCHED",
+        )
+    )
+    app.state.face_recognizer = fake
+
+    with TestClient(app) as client:
+        res = client.post(ENDPOINT, json=payload, headers=_auth_headers())
+
+    assert res.status_code == 200
+    assert res.headers.get("cache-control") == "no-store"
+    body = res.json()
+    assert body == {
+        **invocation,
+        "state": "CANDIDATE",
+        "provenance": "TRUSTED_SERVICE",
+        "profileReferenceHash": REFERENCE_HASH,
+        "profileRevision": uuidv8_revision,
+    }
+    assert len(fake.frames) == 1
+    assert RAW_REFERENCE not in res.text
+    assert FERNET_TEMPLATE not in res.text
+    for forbidden_key in (
+        "workerId",
+        "candidateProfileReference",
+        "encryptedTemplate",
+        "scoreBand",
+        "allowed",
+        "denied",
+        "permission",
+        "decision",
+    ):
+        assert forbidden_key not in body
+        assert forbidden_key not in res.text

@@ -1,12 +1,14 @@
-"""Dedicated unmounted FastAPI router for MF06 Safety face identity transport."""
+"""Bounded MF06 Safety face transport; candidates never establish Worker identity."""
 
 import asyncio
 import hashlib
 import hmac
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response, status
 from pydantic import ValidationError
 
 from smartsite_ai.inference.identity import (
@@ -28,7 +30,28 @@ from smartsite_ai.mf06_identity_wire import (
 VERIFICATION_TIMEOUT_SECONDS = 8.0
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
-router = APIRouter(prefix="/v1/identity/safety-mf06", tags=["identity-safety-mf06"])
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.mf06_face_draining = False
+    try:
+        yield
+    finally:
+        app.state.mf06_face_draining = True
+        active = getattr(app.state, "mf06_face_active", None)
+        if active is not None and not active.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(asyncio.gather(active, return_exceptions=True)),
+                    VERIFICATION_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                raise RuntimeError("MF06_FACE_DRAIN_TIMEOUT") from None
+
+
+router = APIRouter(
+    prefix="/v1/identity/safety-mf06", tags=["identity-safety-mf06"], lifespan=_lifespan
+)
 
 
 def _require_single_bearer_token(request: Request) -> None:
@@ -169,6 +192,12 @@ async def resolve_safety_mf06_face(request: Request, response: Response) -> dict
     if not parsed.candidates:
         return build_mf06_unavailable_response(parsed.invocation, "NO_MATCH")
 
+    active = getattr(request.app.state, "mf06_face_active", None)
+    if getattr(request.app.state, "mf06_face_draining", False) or (
+        active is not None and not active.done()
+    ):
+        return build_mf06_unavailable_response(parsed.invocation, "SERVICE_UNAVAILABLE")
+
     invocation_uuid = UUID(parsed.invocation.invocationId)
     candidate_by_hash = {
         candidate.profileReferenceHash: candidate for candidate in parsed.candidates
@@ -189,9 +218,20 @@ async def resolve_safety_mf06_face(request: Request, response: Response) -> dict
         ),
     )
 
+    # No await between slot inspection and reservation on this application's event loop.
+    active = asyncio.create_task(recognizer.verify(frame))
+    request.app.state.mf06_face_active = active
+
+    def settled(task: asyncio.Task[Any]) -> None:
+        if not task.cancelled():
+            task.exception()  # Observe late failures after the HTTP caller has left.
+        if getattr(request.app.state, "mf06_face_active", None) is task:
+            request.app.state.mf06_face_active = None
+
+    active.add_done_callback(settled)
     try:
         result = await asyncio.wait_for(
-            recognizer.verify(frame),
+            asyncio.shield(active),
             timeout=VERIFICATION_TIMEOUT_SECONDS,
         )
     except TimeoutError:

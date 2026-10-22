@@ -130,6 +130,7 @@ def assemble_sessions(
             evidence_publisher = LocalEvidencePublisher(
                 root_dir=camera.evidence_dir,
                 max_jpeg_bytes=evidence_max_bytes,
+                bind_content_hash=True,
             )
         pipeline = Mf05Mf06Pipeline(
             tracker=IoUPersonTracker(),

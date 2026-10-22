@@ -219,11 +219,12 @@ class EvidenceItem(StrictWireModel):
     uri: str = Field(..., min_length=1, pattern=POSTGRES_SAFE_STRING_PATTERN)
     track_id: JsonInteger | None = Field(default=None, ge=0, le=MAX_SAFE_INTEGER, alias="trackId")
     bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class TechnicalObservationEvent(StrictWireModel):
     event_id: str = Field(..., alias="eventId")
-    schema_version: Literal["1.0.0", "1.1.0"] = Field(..., alias="schemaVersion")
+    schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0"] = Field(..., alias="schemaVersion")
     camera_external_id: str = Field(
         ...,
         min_length=1,
@@ -239,12 +240,17 @@ class TechnicalObservationEvent(StrictWireModel):
 
     @model_validator(mode="after")
     def enforce_ppe_version_boundary(self) -> "TechnicalObservationEvent":
-        if self.schema_version == "1.0.0" and any(
+        if self.schema_version in ("1.0.0", "1.2.0") and any(
             isinstance(observation, PpeObservation)
             and observation.ppe_item not in ("HARD_HAT", "SAFETY_VEST")
             for observation in self.observations
         ):
             raise ValueError("expanded PPE observations require schemaVersion 1.1.0")
+        if self.schema_version in ("1.2.0", "1.3.0"):
+            if any(item.sha256 is None for item in self.evidence):
+                raise ValueError("hash-bound evidence requires sha256")
+        elif any(item.sha256 is not None for item in self.evidence):
+            raise ValueError("evidence sha256 requires schemaVersion 1.2.0 or 1.3.0")
         return self
 
     @field_validator("event_id")
@@ -283,7 +289,7 @@ class TechnicalObservationEvent(StrictWireModel):
         frame_dimensions: FrameDimensions | dict[str, Any],
         observations: list[Any],
         evidence: list[Any] | None = None,
-        schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
+        schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0"] = "1.0.0",
     ) -> "TechnicalObservationEvent":
         """Convenience constructor for internal Python usage, keeping wire validation strict."""
         fd = (

@@ -1440,3 +1440,145 @@ def test_cooldown_blocked_new_episode_emits_at_cooldown_expiry_if_missing_persis
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
     assert res_after == ()
+
+
+def test_expired_same_session_cooldowns_and_states_are_pruned_across_new_track_ids() -> None:
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=1,
+        cooldown=timedelta(seconds=10),
+        track_expiry=timedelta(seconds=1),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    for index, track_id in enumerate((1, 2, 3)):
+        observed_at = t0 + timedelta(seconds=11 * index)
+        candidates = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=observed_at,
+            active_track_ids=(track_id,),
+            observations=(ppe_obs(track_id, "HARD_HAT", "MISSING"),),
+        )
+        assert [candidate.track_id for candidate in candidates] == [track_id]
+        assert set(gate._cooldowns) == {(STREAM_ID, SESSION_ID, track_id, "HARD_HAT")}
+
+    assert (
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(seconds=33),
+            active_track_ids=(),
+            observations=(),
+        )
+        == ()
+    )
+    assert gate._cooldowns == {}
+    assert gate._states == {}
+
+
+def test_cooldown_expiry_preserves_other_session_clock() -> None:
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=1,
+        clear_frames=1,
+        cooldown=timedelta(seconds=10),
+        track_expiry=timedelta(seconds=1),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+    other_stream = "stream-02"
+    other_session = UUID("00000000-0000-4000-8000-000000000002")
+    primary_key = (STREAM_ID, SESSION_ID, 1, "HARD_HAT")
+    other_key = (other_stream, other_session, 1, "HARD_HAT")
+
+    assert (
+        len(
+            gate.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0,
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            gate.update(
+                stream_id=other_stream,
+                session_id=other_session,
+                observed_at=t0,
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+            )
+        )
+        == 1
+    )
+
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=2),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    assert gate._cooldowns[primary_key] == t0
+
+    assert (
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(seconds=9, milliseconds=999),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        == ()
+    )
+    assert gate._cooldowns[primary_key] == t0
+
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=9, milliseconds=999, microseconds=500),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+
+    t_expiry = t0 + timedelta(seconds=10)
+    reconfirmed = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_expiry,
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert len(reconfirmed) == 1
+    assert reconfirmed[0].confirmed_at == t_expiry
+    assert gate._cooldowns[primary_key] == t_expiry
+
+    # Expiring the primary cooldown must not prune the other session.
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=25),
+        active_track_ids=(),
+        observations=(),
+    )
+    assert gate._cooldowns == {other_key: t0}
+
+    gate.update(
+        stream_id=other_stream,
+        session_id=other_session,
+        observed_at=t0 + timedelta(seconds=1),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    assert (
+        gate.update(
+            stream_id=other_stream,
+            session_id=other_session,
+            observed_at=t0 + timedelta(seconds=5),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        == ()
+    )

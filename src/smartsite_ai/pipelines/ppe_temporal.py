@@ -80,6 +80,11 @@ class TemporalPpeCandidateGate:
             )
         self._last_observed_at[stream_key] = observed_at
 
+        # Other sessions have independent clocks; expire only this session's cooldowns.
+        for key, confirmed_at in tuple(self._cooldowns.items()):
+            if key[:2] == stream_key and observed_at - confirmed_at >= self._cooldown:
+                del self._cooldowns[key]
+
         # Deduplicate active tracks preserving order
         unique_active_track_ids = tuple(dict.fromkeys(active_track_ids))
         active_track_set = set(unique_active_track_ids)

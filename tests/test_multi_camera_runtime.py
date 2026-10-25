@@ -681,6 +681,12 @@ class _Stream:
 
 
 class _RecordingPipeline:
+    def checkpoint_temporal_state(self) -> None:
+        return None
+
+    def restore_temporal_state(self, state: object) -> None:
+        assert state is None
+
     def __init__(self, region_id: str) -> None:
         self.region_id = region_id
         self.cameras: list[str] = []

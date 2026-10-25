@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -52,6 +53,10 @@ def validate_frame_batch_binding(frame: FrameEnvelope, batch: DetectionBatch) ->
 
 
 class TechnicalPipelineProtocol(Protocol):
+    def checkpoint_temporal_state(self) -> object: ...
+
+    def restore_temporal_state(self, state: object) -> None: ...
+
     def process(
         self,
         batch: DetectionBatch,
@@ -235,69 +240,110 @@ class HeadlessCameraProcessingWorker:
 
         batch = await self._detector.detect(frame)
         validate_frame_batch_binding(frame, batch)
+        if self._configuration_guard is not None:
+            self._configuration_guard()
+        # LIVE must not publish an obsolete view; REPLAY retains frame-boundary semantics.
         if (
-            self._current_session_id != batch.session_id
-            or self._current_ppe_geometry_version != ppe_region.geometry_version
+            self._stream.config.is_live
+            and await self._configurations.get(frame.camera_external_id) is not configuration
         ):
-            self._current_session_id = batch.session_id
-            self._current_ppe_geometry_version = ppe_region.geometry_version
-            self._temporal_gate = TemporalPpeCandidateGate()
-
-        event = self._pipeline.process(
-            batch,
-            region_configuration=configuration,
-            event_id=str(
-                uuid5(
-                    NAMESPACE_URL,
-                    "smartsite-headless:"
-                    f"{batch.camera_external_id}:{batch.stream_id}:"
-                    f"{batch.session_id}:{batch.sequence_number}",
-                )
-            ),
-        )
-        active_track_ids: tuple[int, ...] = ()
-        ppe_observations = ()
-        if event is not None:
-            active_track_ids = tuple(
-                observation.track_id
-                for observation in event.observations
-                if observation.type == "PERSON"
-            )
-            ppe_observations = tuple(
-                observation for observation in event.observations if observation.type == "PPE"
-            )
-
-        confirmed_candidates = self._temporal_gate.update(
-            stream_id=batch.stream_id,
-            session_id=batch.session_id,
-            observed_at=batch.captured_at,
-            active_track_ids=active_track_ids,
-            observations=ppe_observations,
-        )
-        if event is None:
             return
-        delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-        if delivery_event is not None:
-            event_to_enqueue = delivery_event
-            if self._evidence_publisher is not None:
-                try:
-                    event_to_enqueue = await self._evidence_publisher.publish(
-                        frame=frame,
-                        event=delivery_event,
+        previous = (
+            (
+                self._current_session_id,
+                self._current_ppe_geometry_version,
+                deepcopy(self._temporal_gate),
+                self._pipeline.checkpoint_temporal_state(),
+            )
+            if self._stream.config.is_live
+            else None
+        )
+        rollback = True
+        try:
+            if (
+                self._current_session_id != batch.session_id
+                or self._current_ppe_geometry_version != ppe_region.geometry_version
+            ):
+                self._current_session_id = batch.session_id
+                self._current_ppe_geometry_version = ppe_region.geometry_version
+                self._temporal_gate = TemporalPpeCandidateGate()
+
+            event = self._pipeline.process(
+                batch,
+                region_configuration=configuration,
+                event_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        "smartsite-headless:"
+                        f"{batch.camera_external_id}:{batch.stream_id}:"
+                        f"{batch.session_id}:{batch.sequence_number}",
                     )
-                except Exception as error:
-                    _LOGGER.warning(
-                        "evidence publication failed; continuing durable event delivery",
-                        extra={
-                            "event_id": delivery_event.event_id,
-                            "stream_id": frame.stream_id,
-                            "sequence_number": frame.sequence_number,
-                            "exception_type": type(error).__name__,
-                        },
-                    )
-                    event_to_enqueue = delivery_event
-            await self._outbox.enqueue(event_to_enqueue)
-            self._last_frame_enqueued = True
+                ),
+            )
+            active_track_ids: tuple[int, ...] = ()
+            ppe_observations = ()
+            if event is not None:
+                active_track_ids = tuple(
+                    observation.track_id
+                    for observation in event.observations
+                    if observation.type == "PERSON"
+                )
+                ppe_observations = tuple(
+                    observation for observation in event.observations if observation.type == "PPE"
+                )
+
+            confirmed_candidates = self._temporal_gate.update(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                observed_at=batch.captured_at,
+                active_track_ids=active_track_ids,
+                observations=ppe_observations,
+            )
+            if event is None:
+                rollback = False
+                return
+            delivery_event = filter_event_for_delivery(event, confirmed_candidates)
+            if delivery_event is not None:
+                if self._configuration_guard is not None:
+                    self._configuration_guard()
+                event_to_enqueue = delivery_event
+                if self._evidence_publisher is not None:
+                    try:
+                        event_to_enqueue = await self._evidence_publisher.publish(
+                            frame=frame,
+                            event=delivery_event,
+                        )
+                    except Exception as error:
+                        _LOGGER.warning(
+                            "evidence publication failed; continuing durable event delivery",
+                            extra={
+                                "event_id": delivery_event.event_id,
+                                "stream_id": frame.stream_id,
+                                "sequence_number": frame.sequence_number,
+                                "exception_type": type(error).__name__,
+                            },
+                        )
+                        event_to_enqueue = delivery_event
+                if self._configuration_guard is not None:
+                    self._configuration_guard()
+                if (
+                    self._stream.config.is_live
+                    and await self._configurations.get(frame.camera_external_id)
+                    is not configuration
+                ):
+                    return
+                # Enqueue cancellation can race a durable SQLite commit; do not undo it.
+                rollback = False
+                await self._outbox.enqueue(event_to_enqueue)
+                self._last_frame_enqueued = True
+            rollback = False
+        finally:
+            if rollback and previous is not None:
+                session_id, geometry_version, temporal_gate, pipeline_state = previous
+                self._current_session_id = session_id
+                self._current_ppe_geometry_version = geometry_version
+                self._temporal_gate = temporal_gate
+                self._pipeline.restore_temporal_state(pipeline_state)
 
 
 __all__ = [

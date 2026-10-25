@@ -151,6 +151,12 @@ class FakeDetector:
 
 
 class FakePipeline:
+    def checkpoint_temporal_state(self) -> None:
+        return None
+
+    def restore_temporal_state(self, state: object) -> None:
+        assert state is None
+
     def process(
         self,
         batch: DetectionBatch,

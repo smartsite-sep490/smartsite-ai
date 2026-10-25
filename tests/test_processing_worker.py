@@ -115,6 +115,12 @@ class FakeDetector:
 
 
 class RecordingPipeline:
+    def checkpoint_temporal_state(self) -> None:
+        return None
+
+    def restore_temporal_state(self, state: object) -> None:
+        assert state is None
+
     def __init__(self) -> None:
         self.configuration_versions: list[int] = []
         self.event_ids: list[str] = []
@@ -658,3 +664,98 @@ async def test_ppe_confirmation_resets_when_region_geometry_changes(tmp_path: Pa
     assert result.frames_processed == 5
     assert result.events_enqueued == 1
     assert result.outbox.delivered == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("expires_during", ["inference", "evidence"])
+async def test_worker_rechecks_configuration_before_pipeline_and_durable_enqueue(expires_during):
+    from unittest.mock import AsyncMock
+
+    from smartsite_ai.integrations.configuration_poller import ConfigurationStaleError
+
+    fresh = True
+
+    def guard():
+        if not fresh:
+            raise ConfigurationStaleError("configuration expired during processing")
+
+    class ExpiringDetector(FakeDetector):
+        async def detect(self, frame):
+            nonlocal fresh
+            result = await super().detect(frame)
+            if expires_during == "inference":
+                fresh = False
+            return result
+
+    class ExpiringPublisher:
+        async def publish(self, *, frame, event):
+            nonlocal fresh
+            fresh = False
+            return event
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    pipeline = RecordingPipeline()
+    enqueue = AsyncMock()
+    worker = HeadlessCameraProcessingWorker(
+        stream=FakeStream([]),
+        detector=ExpiringDetector(),
+        pipeline=pipeline,
+        ppe_region_id=REGION_ID,
+        configurations=store,
+        outbox=SimpleNamespace(enqueue=enqueue),
+        dispatcher=SimpleNamespace(),
+        configuration_guard=guard,
+        evidence_publisher=ExpiringPublisher(),
+    )
+    with pytest.raises(ConfigurationStaleError):
+        await worker._process_frame(_frame(1))
+    enqueue.assert_not_awaited()
+    if expires_during == "inference":
+        assert pipeline.configuration_versions == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("changes_during", ["inference", "evidence"])
+async def test_worker_discards_inflight_old_configuration_and_processes_next(changes_during):
+    from unittest.mock import AsyncMock
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration(1))
+
+    class UpdatingDetector(FakeDetector):
+        async def detect(self, frame):
+            result = await super().detect(frame)
+            if frame.sequence_number == 1 and changes_during == "inference":
+                await store.apply(_configuration(2))
+            return result
+
+    class UpdatingPublisher:
+        async def publish(self, *, frame, event):
+            if frame.sequence_number == 1 and changes_during == "evidence":
+                await store.apply(_configuration(2))
+            return event
+
+    pipeline = RecordingPipeline()
+    enqueue = AsyncMock()
+    stream = FakeStream([])
+    stream.config = stream.config.model_copy(update={"is_live": True})
+    worker = HeadlessCameraProcessingWorker(
+        stream=stream,
+        detector=UpdatingDetector(),
+        pipeline=pipeline,
+        ppe_region_id=REGION_ID,
+        configurations=store,
+        outbox=SimpleNamespace(enqueue=enqueue),
+        dispatcher=SimpleNamespace(),
+        evidence_publisher=UpdatingPublisher(),
+    )
+    await worker._process_frame(_frame(1))
+    enqueue.assert_not_awaited()
+    assert not worker._last_frame_enqueued
+    if changes_during == "inference":
+        assert pipeline.configuration_versions == []
+    await worker._process_frame(_frame(2))
+    enqueue.assert_awaited_once()
+    assert pipeline.configuration_versions[-1] == 2
+    assert worker._last_frame_enqueued

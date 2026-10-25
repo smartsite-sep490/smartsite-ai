@@ -12,7 +12,7 @@ from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.pipelines._geometry import to_observation_bounding_box
 from smartsite_ai.pipelines.ppe import PpePipeline
-from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.pipelines.zones import RestrictedZonePipeline, ZoneTemporalState
 from smartsite_ai.tracking.protocol import TrackerProtocol
 
 
@@ -39,6 +39,15 @@ class Mf05Mf06Pipeline:
         self._zones = zones
         self._ppe_region_id = ppe_region_id.casefold()
         self._schema_version = schema_version
+
+    def checkpoint_temporal_state(self) -> ZoneTemporalState:
+        return self._zones.checkpoint_temporal_state()
+
+    def restore_temporal_state(self, state: object) -> None:
+        if not isinstance(state, ZoneTemporalState):
+            raise TypeError("Invalid zone confirmation checkpoint")
+        # Keep processed tracking state and its monotonically allocated IDs.
+        self._zones.restore_temporal_state(state)
 
     def process(
         self,

@@ -1,5 +1,6 @@
 """Small deterministic IoU tracker for the technical pipeline boundary."""
 
+from collections import Counter
 from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
@@ -36,7 +37,7 @@ class _MutableTrack:
 
 
 class IoUPersonTracker:
-    """Track person detections with deterministic greedy IoU association.
+    """Track person detections with unambiguous one-to-one IoU association.
 
     This tracker deliberately tracks only temporal continuity. Its integer track ID
     is not a worker identity and is reset when the stream session changes.
@@ -85,7 +86,9 @@ class IoUPersonTracker:
             for detection in batch.detections
             if detection.class_name.casefold() in self._person_class_names
         )
-        assignments = self._match(person_detections)
+        assignments, retired_track_ids = self._match(person_detections)
+        for track_id in retired_track_ids:
+            del self._tracks[track_id]
         matched_detection_indexes = set(assignments.values())
 
         for track_id, track in tuple(self._tracks.items()):
@@ -116,22 +119,27 @@ class IoUPersonTracker:
         )
         return TrackedFrame(batch=batch, persons=current_persons)
 
-    def _match(self, detections: tuple[NormalizedDetection, ...]) -> dict[int, int]:
-        candidates: list[tuple[float, int, int]] = []
+    def _match(
+        self, detections: tuple[NormalizedDetection, ...]
+    ) -> tuple[dict[int, int], set[int]]:
+        candidates: list[tuple[int, int]] = []
         for track_id, track in self._tracks.items():
             for detection_index, detection in enumerate(detections):
                 iou = bounding_box_iou(track.detection.bounding_box, detection.bounding_box)
                 if iou >= self._iou_threshold:
-                    candidates.append((-iou, track_id, detection_index))
+                    candidates.append((track_id, detection_index))
 
-        assignments: dict[int, int] = {}
-        used_detections: set[int] = set()
-        for _negative_iou, track_id, detection_index in sorted(candidates):
-            if track_id in assignments or detection_index in used_detections:
-                continue
-            assignments[track_id] = detection_index
-            used_detections.add(detection_index)
-        return assignments
+        track_counts = Counter(track_id for track_id, _ in candidates)
+        detection_counts = Counter(index for _, index in candidates)
+        assignments = {
+            track_id: index
+            for track_id, index in candidates
+            if track_counts[track_id] == 1 and detection_counts[index] == 1
+        }
+        # Retire ambiguous owners permanently: a later frame must not resurrect
+        # their pending PPE/Zone state after a crossing, merge or split.
+        retired_track_ids = set(track_counts) - assignments.keys()
+        return assignments, retired_track_ids
 
     def _reset_for_source(self, source_key: tuple[str, UUID]) -> None:
         self._source_key = source_key

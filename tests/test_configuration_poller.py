@@ -30,6 +30,70 @@ from smartsite_ai.integrations.configuration_poller import (
 CAMERA_ID = UUID("11111111-1111-4111-8111-111111111111")
 
 
+@pytest.mark.parametrize("field", ["poll_interval_seconds", "stale_after_seconds"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_poller_rejects_nonfinite_timing(field, value):
+    with pytest.raises(ValueError):
+        CameraConfigurationPoller(
+            client=FakeClient([]),
+            store=RegionConfigurationStore(),
+            camera_id=CAMERA_ID,
+            camera_external_id="CAM-GATE-01",
+            **{field: value},
+        )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+async def test_invalid_clock_cannot_confirm_or_keep_configuration_fresh(value):
+    clock = FakeClock()
+    store = RegionConfigurationStore()
+    client = FakeClient([ConfigurationBundleResult(_configuration(1), '"v1"')])
+    poller = CameraConfigurationPoller(
+        client=client,
+        store=store,
+        camera_id=CAMERA_ID,
+        camera_external_id="CAM-GATE-01",
+        monotonic_clock=clock,
+    )
+    clock.value = value
+    with pytest.raises(ConfigurationStaleError):
+        await poller.refresh()
+    assert await store.get_active_configuration("CAM-GATE-01") is None
+    with pytest.raises(ConfigurationStaleError):
+        poller.ensure_fresh()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 99.0])
+@pytest.mark.parametrize("refresh", [False, True])
+async def test_invalid_clock_revokes_previously_confirmed_freshness(value, refresh):
+    clock = FakeClock()
+    poller = CameraConfigurationPoller(
+        client=FakeClient(
+            [
+                ConfigurationBundleResult(_configuration(1), '"v1"'),
+                ConfigurationNotModifiedResult('"v1"'),
+            ]
+        ),
+        store=RegionConfigurationStore(),
+        camera_id=CAMERA_ID,
+        camera_external_id="CAM-GATE-01",
+        monotonic_clock=clock,
+    )
+    await poller.refresh()
+    clock.value = value
+    with pytest.raises(ConfigurationStaleError):
+        if refresh:
+            await poller.refresh()
+        else:
+            poller.ensure_fresh()
+    assert poller.etag is None
+    clock.value = 100.0
+    with pytest.raises(ConfigurationStaleError, match="never been confirmed"):
+        poller.ensure_fresh()
+
+
 def _configuration(version: int) -> CameraConfigurationBundle:
     content = {
         "schemaVersion": "1.0.0",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Callable
 from time import monotonic
 from uuid import UUID
@@ -43,9 +44,9 @@ class CameraConfigurationPoller:
         stale_after_seconds: float = 60.0,
         monotonic_clock: Callable[[], float] = monotonic,
     ) -> None:
-        if poll_interval_seconds <= 0:
+        if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             raise ValueError("configuration poll interval must be positive")
-        if stale_after_seconds < poll_interval_seconds:
+        if not math.isfinite(stale_after_seconds) or stale_after_seconds < poll_interval_seconds:
             raise ValueError("configuration stale window must be at least the poll interval")
         if not camera_external_id:
             raise ValueError("camera external ID must not be empty")
@@ -78,7 +79,7 @@ class CameraConfigurationPoller:
             self._last_success = None
             raise
 
-        now = self._clock()
+        now = self._read_clock()
         if isinstance(result, ConfigurationNotModifiedResult):
             if self._last_success is None:
                 raise RuntimeError("configuration poller received 304 before an initial snapshot")
@@ -109,11 +110,19 @@ class CameraConfigurationPoller:
     def ensure_fresh(self) -> None:
         if self._last_success is None:
             raise ConfigurationStaleError("camera configuration has never been confirmed")
-        age = self._clock() - self._last_success
-        if age < 0:
-            raise ConfigurationStaleError("configuration monotonic clock moved backwards")
+        age = self._read_clock() - self._last_success
         if age > self._stale_after_seconds:
             raise ConfigurationStaleError("camera configuration exceeded its stale window")
+
+    def _read_clock(self) -> float:
+        now = self._clock()
+        if not math.isfinite(now) or (self._last_success is not None and now < self._last_success):
+            self._etag = None
+            self._last_success = None
+            raise ConfigurationStaleError(
+                "configuration monotonic clock is invalid or moved backwards"
+            )
+        return now
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if self._last_success is None:

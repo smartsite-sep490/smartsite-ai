@@ -147,6 +147,12 @@ class LocalEvidencePublisher:
         event: TechnicalObservationEvent,
     ) -> TechnicalObservationEvent:
         # 1. Exact-frame binding checks
+        if event.frame_partition is not None and not self._bind_content_hash:
+            raise EvidenceBindingError("partitioned frame evidence requires content hashing")
+        if event.frame_partition is not None and event.frame_partition.sequence_number != str(
+            frame.sequence_number
+        ):
+            raise EvidenceBindingError("frame partition sequence does not match source frame")
         if str(frame.session_id) != event.stream_session_id:
             raise EvidenceBindingError(
                 f"frame session_id {frame.session_id} does not match "
@@ -265,7 +271,14 @@ class LocalEvidencePublisher:
             frame_dimensions=event.frame_dimensions,
             observations=event.observations,
             evidence=combined_evidence,
-            schema_version=("1.2.0" if event.schema_version in ("1.0.0", "1.2.0") else "1.3.0")
+            frame_partition=event.frame_partition,
+            schema_version=(
+                event.schema_version
+                if event.schema_version == "1.4.0"
+                else "1.2.0"
+                if event.schema_version in ("1.0.0", "1.2.0")
+                else "1.3.0"
+            )
             if self._bind_content_hash
             else event.schema_version,
         )

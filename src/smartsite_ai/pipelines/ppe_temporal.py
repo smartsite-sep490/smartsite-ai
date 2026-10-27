@@ -315,6 +315,7 @@ def filter_event_for_delivery(
         observations=filtered_observations,
         evidence=event.evidence,
         schema_version=event.schema_version,
+        frame_partition=event.frame_partition,
     )
 
 

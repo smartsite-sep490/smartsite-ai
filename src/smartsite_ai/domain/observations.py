@@ -222,9 +222,34 @@ class EvidenceItem(StrictWireModel):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
+class ObservationFramePartition(StrictWireModel):
+    frame_id: str = Field(..., alias="frameId")
+    sequence_number: str = Field(..., alias="sequenceNumber", pattern=r"^(0|[1-9][0-9]{0,19})$")
+    part_index: JsonInteger = Field(..., alias="partIndex", ge=0, le=1023)
+    part_count: JsonInteger = Field(..., alias="partCount", ge=1, le=1024)
+
+    @field_validator("frame_id")
+    @classmethod
+    def check_frame_id(cls, value: str) -> str:
+        validate_uuid_str(value, "frameId")
+        if value != value.lower():
+            raise ValueError("frameId must be lowercase")
+        return value
+
+    @model_validator(mode="after")
+    def check_partition(self) -> "ObservationFramePartition":
+        if self.part_index >= self.part_count:
+            raise ValueError("partIndex must be less than partCount")
+        if int(self.sequence_number) > 18_446_744_073_709_551_615:
+            raise ValueError("sequenceNumber must be uint64 decimal text")
+        return self
+
+
 class TechnicalObservationEvent(StrictWireModel):
     event_id: str = Field(..., alias="eventId")
-    schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0"] = Field(..., alias="schemaVersion")
+    schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"] = Field(
+        ..., alias="schemaVersion"
+    )
     camera_external_id: str = Field(
         ...,
         min_length=1,
@@ -237,16 +262,28 @@ class TechnicalObservationEvent(StrictWireModel):
     frame_dimensions: FrameDimensions = Field(..., alias="frameDimensions")
     observations: list[Observation] = Field(..., min_length=1, max_length=256)
     evidence: list[EvidenceItem] = Field(..., max_length=256, alias="evidence")
+    frame_partition: ObservationFramePartition | None = Field(default=None, alias="framePartition")
 
     @model_validator(mode="after")
     def enforce_ppe_version_boundary(self) -> "TechnicalObservationEvent":
+        if self.schema_version == "1.4.0":
+            if self.frame_partition is None:
+                raise ValueError("partitioned events require framePartition")
+            people: dict[int, int] = {}
+            for observation in self.observations:
+                if observation.type == "PERSON":
+                    people[observation.track_id] = people.get(observation.track_id, 0) + 1
+            if any(people.get(observation.track_id) != 1 for observation in self.observations):
+                raise ValueError("each track requires exactly one same-part PERSON")
+        elif self.frame_partition is not None:
+            raise ValueError("framePartition requires schemaVersion 1.4.0")
         if self.schema_version in ("1.0.0", "1.2.0") and any(
             isinstance(observation, PpeObservation)
             and observation.ppe_item not in ("HARD_HAT", "SAFETY_VEST")
             for observation in self.observations
         ):
             raise ValueError("expanded PPE observations require schemaVersion 1.1.0")
-        if self.schema_version in ("1.2.0", "1.3.0"):
+        if self.schema_version in ("1.2.0", "1.3.0", "1.4.0"):
             if any(item.sha256 is None for item in self.evidence):
                 raise ValueError("hash-bound evidence requires sha256")
         elif any(item.sha256 is not None for item in self.evidence):
@@ -289,7 +326,8 @@ class TechnicalObservationEvent(StrictWireModel):
         frame_dimensions: FrameDimensions | dict[str, Any],
         observations: list[Any],
         evidence: list[Any] | None = None,
-        schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0"] = "1.0.0",
+        schema_version: Literal["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"] = "1.0.0",
+        frame_partition: ObservationFramePartition | None = None,
     ) -> "TechnicalObservationEvent":
         """Convenience constructor for internal Python usage, keeping wire validation strict."""
         fd = (
@@ -311,4 +349,6 @@ class TechnicalObservationEvent(StrictWireModel):
                 ev.to_wire_dict() if hasattr(ev, "to_wire_dict") else ev for ev in (evidence or [])
             ],
         }
+        if frame_partition is not None:
+            data["framePartition"] = frame_partition.to_wire_dict()
         return cls.model_validate(data)

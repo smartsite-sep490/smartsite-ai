@@ -21,7 +21,7 @@ class MissingPpePipeline:
     def restore_temporal_state(self, state):
         assert state is None
 
-    def process(self, batch, *, region_configuration, event_id):
+    def observe(self, batch, *, region_configuration, event_id):
         return TechnicalObservationEvent.create(
             event_id=event_id,
             camera_external_id=batch.camera_external_id,

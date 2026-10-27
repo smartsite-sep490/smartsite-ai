@@ -111,20 +111,31 @@ def test_realtime_expanded_config_requires_consumer_and_exact_taxonomy(
 
 
 def test_expanded_preview_keeps_unobserved_items_unknown_not_compliant() -> None:
-    from unittest.mock import MagicMock
-
     from smartsite_ai import realtime
+    from smartsite_ai.domain.observations import TechnicalObservationEvent
     from smartsite_ai.inference.ppe_profiles import NATIVE_PPE_10_PROFILE
 
-    event = MagicMock()
-    event.to_wire_dict.return_value = {
-        "cameraExternalId": "CAM-A",
-        "observations": [
+    event = TechnicalObservationEvent.create(
+        event_id="00000000-0000-4000-8000-000000000001",
+        camera_external_id="CAM-A",
+        stream_session_id="00000000-0000-4000-8000-000000000002",
+        captured_at="2026-10-27T12:00:00Z",
+        frame_dimensions={"width": 640, "height": 480},
+        observations=[
             {"type": "PERSON", "trackId": 1, "confidence": 0.9},
-            {"type": "PPE", "trackId": 1, "ppeItem": "HARD_HAT", "status": "PRESENT"},
-            {"type": "PPE", "trackId": 1, "ppeItem": "SAFETY_VEST", "status": "PRESENT"},
+            *(
+                {
+                    "type": "PPE",
+                    "trackId": 1,
+                    "ppeItem": item,
+                    "status": "PRESENT",
+                    "regionId": "00000000-0000-4000-8000-000000000003",
+                    "geometryVersion": 1,
+                }
+                for item in ("HARD_HAT", "SAFETY_VEST")
+            ),
         ],
-    }
+    )
     payload = realtime._ui_frame(event, 640, 480, ppe_items=NATIVE_PPE_10_PROFILE.present_items)
     result = payload["detections"][0]
     assert result["ppeStatus"]["GLOVES"] == "UNKNOWN"

@@ -13,8 +13,10 @@ def test_replay_preview_paces_and_uses_one_existing_capture(monkeypatch):
 
     monkeypatch.setattr(module, "OpenCvFrameSource", source)
     config = StreamConfig(
-        stream_id="preview", camera_external_id="camera",
-        source_url="D:/clips/replay.mp4", is_live=False,
+        stream_id="preview",
+        camera_external_id="camera",
+        source_url="D:/clips/replay.mp4",
+        is_live=False,
     )
     sink = object()
     result = module.build_replay_preview_source(config, sink)
@@ -27,7 +29,10 @@ def test_replay_preview_paces_and_uses_one_existing_capture(monkeypatch):
 
 def test_replay_preview_refuses_physical_camera():
     config = StreamConfig(
-        stream_id="preview", camera_external_id="camera", source_url="0", is_live=True,
+        stream_id="preview",
+        camera_external_id="camera",
+        source_url="0",
+        is_live=True,
     )
     with pytest.raises(ValueError, match="finite recorded"):
         module.build_replay_preview_source(config, object())

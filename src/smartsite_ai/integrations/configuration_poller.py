@@ -1,4 +1,4 @@
-"""Version-aware polling for Backend-owned camera region configuration."""
+"""Version-aware polling for whole Backend-owned camera configuration bundles."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from smartsite_ai.core.region_configuration_store import (
 )
 from smartsite_ai.integrations.backend_configuration_client import (
     BackendConfigurationClient,
+    BackendConfigurationError,
     BackendConfigurationTransientError,
+    ConfigurationBundleResult,
     ConfigurationNotModifiedResult,
-    ConfigurationSnapshotResult,
 )
 
 
@@ -64,7 +65,7 @@ class CameraConfigurationPoller:
 
     async def refresh(self) -> RegionConfigurationApplyOutcome | None:
         try:
-            result = await self._client.fetch(
+            result = await self._client.fetch_bundle(
                 self._camera_id,
                 expected_camera_external_id=self._camera_external_id,
                 etag=self._etag,
@@ -72,6 +73,10 @@ class CameraConfigurationPoller:
         except BackendConfigurationTransientError:
             self.ensure_fresh()
             return None
+        except BackendConfigurationError:
+            self._etag = None
+            self._last_success = None
+            raise
 
         now = self._clock()
         if isinstance(result, ConfigurationNotModifiedResult):
@@ -81,13 +86,19 @@ class CameraConfigurationPoller:
             self._last_success = now
             return RegionConfigurationApplyOutcome.IDEMPOTENT
 
-        if not isinstance(result, ConfigurationSnapshotResult):
+        if not isinstance(result, ConfigurationBundleResult):
+            self._etag = None
+            self._last_success = None
             raise RuntimeError("configuration client returned an unsupported result")
         try:
-            outcome = await self._store.apply(result.configuration)
+            outcome = await self._store.apply_bundle(result.bundle)
         except RegionConfigurationConflict:
+            self._etag = None
+            self._last_success = None
             raise
         if outcome is RegionConfigurationApplyOutcome.STALE:
+            self._etag = None
+            self._last_success = None
             raise ConfigurationRegressionError(
                 "Backend returned an older camera configuration in a sequential poll"
             )

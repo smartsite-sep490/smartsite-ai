@@ -128,6 +128,7 @@ class HeadlessCameraProcessingWorker:
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
+        self._current_configuration_version: int | None = None
         self._temporal_gate = TemporalPpeCandidateGate()
         self._started = False
 
@@ -252,6 +253,7 @@ class HeadlessCameraProcessingWorker:
             (
                 self._current_session_id,
                 self._current_ppe_geometry_version,
+                self._current_configuration_version,
                 deepcopy(self._temporal_gate),
                 self._pipeline.checkpoint_temporal_state(),
             )
@@ -263,9 +265,11 @@ class HeadlessCameraProcessingWorker:
             if (
                 self._current_session_id != batch.session_id
                 or self._current_ppe_geometry_version != ppe_region.geometry_version
+                or self._current_configuration_version != configuration.configuration_version
             ):
                 self._current_session_id = batch.session_id
                 self._current_ppe_geometry_version = ppe_region.geometry_version
+                self._current_configuration_version = configuration.configuration_version
                 self._temporal_gate = TemporalPpeCandidateGate()
 
             event = self._pipeline.process(
@@ -339,9 +343,16 @@ class HeadlessCameraProcessingWorker:
             rollback = False
         finally:
             if rollback and previous is not None:
-                session_id, geometry_version, temporal_gate, pipeline_state = previous
+                (
+                    session_id,
+                    geometry_version,
+                    configuration_version,
+                    temporal_gate,
+                    pipeline_state,
+                ) = previous
                 self._current_session_id = session_id
                 self._current_ppe_geometry_version = geometry_version
+                self._current_configuration_version = configuration_version
                 self._temporal_gate = temporal_gate
                 self._pipeline.restore_temporal_state(pipeline_state)
 

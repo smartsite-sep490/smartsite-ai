@@ -2,7 +2,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -10,6 +10,7 @@ import httpx
 from pydantic import SecretStr
 
 from smartsite_ai.config import Settings
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.regions import (
     MAX_CAMERA_REGION_PAYLOAD_BYTES,
     CameraRegionConfiguration,
@@ -70,12 +71,21 @@ class ConfigurationSnapshotResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigurationBundleResult:
+    bundle: CameraConfigurationBundle
+    etag: str
+    kind: Literal["bundle"] = "bundle"
+
+
+@dataclass(frozen=True, slots=True)
 class ConfigurationNotModifiedResult:
     etag: str
     kind: Literal["not_modified"] = "not_modified"
 
 
 ConfigurationFetchResult = ConfigurationSnapshotResult | ConfigurationNotModifiedResult
+ConfigurationBundleFetchResult = ConfigurationBundleResult | ConfigurationNotModifiedResult
+_ResultT = TypeVar("_ResultT")
 
 
 def _validated_etag(value: str | None, *, source: str) -> str:
@@ -228,6 +238,79 @@ class BackendConfigurationClient:
         expected_camera_external_id: str,
         etag: str | None = None,
     ) -> ConfigurationFetchResult:
+        def parse_snapshot(
+            payload: bytes,
+            validated_etag: str,
+            _normalized_camera_id: str,
+            expected_external_id: str,
+        ) -> ConfigurationSnapshotResult:
+            try:
+                configuration = CameraRegionConfiguration.from_wire_bytes(payload)
+            except (TypeError, ValueError):
+                raise BackendConfigurationResponseError(
+                    "Backend configuration response body is invalid"
+                ) from None
+            if configuration.camera_external_id != expected_external_id:
+                raise BackendConfigurationResponseError(
+                    "Backend configuration cameraExternalId does not match the expected camera"
+                )
+            return ConfigurationSnapshotResult(configuration, validated_etag)
+
+        return await self._fetch_conditional(
+            camera_id,
+            endpoint_suffix="configuration",
+            expected_camera_external_id=expected_camera_external_id,
+            etag=etag,
+            parse_ok=parse_snapshot,
+        )
+
+    async def fetch_bundle(
+        self,
+        camera_id: UUID | str,
+        *,
+        expected_camera_external_id: str,
+        etag: str | None = None,
+    ) -> ConfigurationBundleFetchResult:
+        def parse_bundle(
+            payload: bytes,
+            validated_etag: str,
+            normalized_camera_id: str,
+            expected_external_id: str,
+        ) -> ConfigurationBundleResult:
+            try:
+                bundle = CameraConfigurationBundle.from_wire_bytes(payload)
+            except (TypeError, ValueError):
+                raise BackendConfigurationResponseError(
+                    "Backend configuration bundle response body is invalid"
+                ) from None
+            if bundle.camera_id != normalized_camera_id:
+                raise BackendConfigurationResponseError(
+                    "Backend configuration bundle cameraId does not match the requested camera"
+                )
+            if bundle.camera_external_id != expected_external_id:
+                raise BackendConfigurationResponseError(
+                    "Backend configuration bundle cameraExternalId does not match "
+                    "the expected camera"
+                )
+            return ConfigurationBundleResult(bundle, validated_etag)
+
+        return await self._fetch_conditional(
+            camera_id,
+            endpoint_suffix="configuration-bundle",
+            expected_camera_external_id=expected_camera_external_id,
+            etag=etag,
+            parse_ok=parse_bundle,
+        )
+
+    async def _fetch_conditional(
+        self,
+        camera_id: UUID | str,
+        *,
+        endpoint_suffix: Literal["configuration", "configuration-bundle"],
+        expected_camera_external_id: str,
+        etag: str | None,
+        parse_ok: Callable[[bytes, str, str, str], _ResultT],
+    ) -> _ResultT | ConfigurationNotModifiedResult:
         try:
             normalized_camera_id = str(UUID(str(camera_id)))
         except (ValueError, AttributeError, TypeError) as exc:
@@ -244,7 +327,10 @@ class BackendConfigurationClient:
             except BackendConfigurationResponseError as exc:
                 raise ValueError("etag must be a non-empty, header-safe value") from exc
 
-        url = f"{self._origin}{CONFIGURATION_ENDPOINT_PREFIX}/{normalized_camera_id}/configuration"
+        url = (
+            f"{self._origin}{CONFIGURATION_ENDPOINT_PREFIX}/"
+            f"{normalized_camera_id}/{endpoint_suffix}"
+        )
         client = await self._get_client()
         attempts = self._max_retries + 1
 
@@ -256,18 +342,12 @@ class BackendConfigurationClient:
                         response_etag = response.headers.get("ETag")
                         validated_etag = _validated_etag(response_etag, source="response")
                         payload = await _read_bounded_configuration_body(response)
-                        try:
-                            configuration = CameraRegionConfiguration.from_wire_bytes(payload)
-                        except (TypeError, ValueError) as exc:
-                            raise BackendConfigurationResponseError(
-                                "Backend configuration response body is invalid"
-                            ) from exc
-                        if configuration.camera_external_id != expected_external_id:
-                            raise BackendConfigurationResponseError(
-                                "Backend configuration cameraExternalId does not match "
-                                "the expected camera"
-                            )
-                        return ConfigurationSnapshotResult(configuration, validated_etag)
+                        return parse_ok(
+                            payload,
+                            validated_etag,
+                            normalized_camera_id,
+                            expected_external_id,
+                        )
 
                     if status == 304:
                         if etag is None:
@@ -318,6 +398,8 @@ __all__ = [
     "BackendConfigurationNotFoundError",
     "BackendConfigurationResponseError",
     "BackendConfigurationTransientError",
+    "ConfigurationBundleFetchResult",
+    "ConfigurationBundleResult",
     "ConfigurationFetchResult",
     "ConfigurationNotModifiedResult",
     "ConfigurationSnapshotResult",

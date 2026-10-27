@@ -28,6 +28,7 @@ from smartsite_ai.ingestion.live_latest_source import LiveLatestFrameSource
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
+from smartsite_ai.live_source_recovery import LiveSourceRecovery
 from smartsite_ai.media_preview import MediaPreviewHub
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
@@ -422,6 +423,11 @@ class RealtimeStreamGateTracker:
         self._current_session_id = session_id
         return self._gate
 
+    def reset(self) -> None:
+        """Discard confirmation streaks and episodes after source discontinuity."""
+        self._gate = self._gate_factory()
+        self._current_session_id = None
+
 
 async def stream_realtime(
     websocket: RealtimePreviewSink, settings: Settings, *, media_hub: MediaPreviewHub | None = None
@@ -468,12 +474,28 @@ async def stream_realtime(
             return
         gate_tracker = RealtimeStreamGateTracker()
         failures = 0
+        recovery = LiveSourceRecovery(
+            settings.realtime_live_reconnect_attempts if not replay_file else 0
+        )
+
+        async def recover_live_source() -> bool:
+            if recovery.maximum == 0:
+                return False
+            await websocket.send_json({"type": "error", "message": "Realtime source reconnecting"})
+            if media_hub is not None:
+                media_hub.clear()
+            gate_tracker.reset()
+            return await recovery.reconnect(frame_source)
+
         while True:
             try:
                 envelope = await frame_source.read_frame()
             except SourceReadError:
                 failures += 1
                 if failures >= 3:
+                    if await recover_live_source():
+                        failures = 0
+                        continue
                     await websocket.send_json(
                         {"type": "error", "message": "Realtime source stopped producing frames"}
                     )
@@ -487,6 +509,9 @@ async def stream_realtime(
                     continue
                 failures += 1
                 if failures >= 3:
+                    if await recover_live_source():
+                        failures = 0
+                        continue
                     await websocket.send_json(
                         {"type": "error", "message": "Realtime source stopped producing frames"}
                     )
@@ -494,6 +519,7 @@ async def stream_realtime(
                 await asyncio.sleep(0.2)
                 continue
             failures = 0
+            recovery.observed_frame()
             batch = await detector.detect(envelope)
             if isinstance(frame_source, LiveLatestFrameSource) and not frame_source.is_connected:
                 continue

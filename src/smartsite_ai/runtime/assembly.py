@@ -169,6 +169,7 @@ def assemble_sessions(
         source = source_factory(source_config)
         if plan.generation is not None:
             source = GenerationBoundSource(source, plan.generation)
+            plan.poller.enable_generation_ack(source)
         worker = HeadlessCameraProcessingWorker(
             stream=StreamWorker(config=source_config, source=source),
             detector=detector,

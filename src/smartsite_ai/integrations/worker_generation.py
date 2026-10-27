@@ -123,6 +123,15 @@ class GenerationBoundSource:
     def is_connected(self) -> bool:
         return self._source.is_connected
 
+    @property
+    def binding(self) -> WorkerGenerationCredential:
+        return self._binding
+
+    @property
+    def is_ready_for_ack(self) -> bool:
+        self._binding.ensure_current(self._clock())
+        return self.is_connected and self._underlying_session is not None
+
     async def connect(self) -> None:
         self._binding.ensure_current(self._clock())
         if self._opened:

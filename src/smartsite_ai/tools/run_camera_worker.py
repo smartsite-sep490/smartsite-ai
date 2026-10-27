@@ -212,6 +212,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             if generation is not None:
                 generation.ensure_current(datetime.now(UTC))
                 frame_source = GenerationBoundSource(frame_source, generation)
+                poller.enable_generation_ack(frame_source)
             stream = StreamWorker(config=source_config, source=frame_source)
             pipeline = Mf05Mf06Pipeline(
                 tracker=IoUPersonTracker(),

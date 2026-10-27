@@ -6,13 +6,14 @@ import asyncio
 import math
 from collections.abc import Callable
 from time import monotonic
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from smartsite_ai.core.region_configuration_store import (
     RegionConfigurationApplyOutcome,
     RegionConfigurationConflict,
     RegionConfigurationStore,
 )
+from smartsite_ai.domain.configuration_ack import CameraConfigurationAcknowledgement
 from smartsite_ai.integrations.backend_configuration_client import (
     BackendConfigurationClient,
     BackendConfigurationError,
@@ -20,6 +21,7 @@ from smartsite_ai.integrations.backend_configuration_client import (
     ConfigurationBundleResult,
     ConfigurationNotModifiedResult,
 )
+from smartsite_ai.integrations.worker_generation import GenerationBoundSource
 
 
 class ConfigurationStaleError(RuntimeError):
@@ -59,6 +61,62 @@ class CameraConfigurationPoller:
         self._clock = monotonic_clock
         self._etag: str | None = None
         self._last_success: float | None = None
+        self._bound_source: GenerationBoundSource | None = None
+        self._pending_ack: CameraConfigurationAcknowledgement | None = None
+        self._confirmed_ack: CameraConfigurationAcknowledgement | None = None
+        self._acknowledged_at: float | None = None
+
+    def enable_generation_ack(self, source: GenerationBoundSource) -> None:
+        if self._bound_source is not None or source.binding.camera_id != str(self._camera_id):
+            raise ValueError("configuration acknowledgement source binding mismatch")
+        self._bound_source = source
+
+    async def acknowledge_loaded(self) -> None:
+        source = self._bound_source
+        if source is None or not source.is_ready_for_ack:
+            return
+        self.ensure_fresh()
+        bundle = await self._store.get_bundle(self._camera_external_id)
+        if bundle is None or bundle.camera_id != str(self._camera_id):
+            raise RuntimeError("configuration acknowledgement requires the installed camera bundle")
+        now = self._read_clock()
+        current = self._pending_ack or self._confirmed_ack
+        same_bundle = current is not None and (
+            current.configuration_version == bundle.configuration_version
+            and current.bundle_sha256 == bundle.bundle_sha256
+            and current.view_revision == bundle.view_revision
+        )
+        if (
+            self._pending_ack is None
+            and same_bundle
+            and self._acknowledged_at is not None
+            and now - self._acknowledged_at < 30
+        ):
+            return
+        if self._pending_ack is None or not same_bundle:
+            self._pending_ack = CameraConfigurationAcknowledgement(
+                commandId=str(uuid4()),
+                workerGenerationId=source.binding.worker_generation_id,
+                streamSessionId=source.binding.stream_session_id,
+                configurationVersion=bundle.configuration_version,
+                bundleSha256=bundle.bundle_sha256,
+                viewRevision=bundle.view_revision,
+                outcome="LOADED",
+            )
+        try:
+            await self._client.acknowledge_configuration(
+                self._camera_id,
+                generation_secret=source.binding.secret,
+                acknowledgement=self._pending_ack,
+            )
+        except BackendConfigurationTransientError:
+            return
+        self.ensure_fresh()
+        if not source.is_ready_for_ack:
+            return
+        self._confirmed_ack = self._pending_ack
+        self._pending_ack = None
+        self._acknowledged_at = self._read_clock()
 
     @property
     def etag(self) -> str | None:
@@ -128,6 +186,8 @@ class CameraConfigurationPoller:
         if self._last_success is None:
             await self.refresh()
             self.ensure_fresh()
+        if not stop_event.is_set():
+            await self.acknowledge_loaded()
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -135,7 +195,8 @@ class CameraConfigurationPoller:
                     timeout=self._poll_interval_seconds,
                 )
             except TimeoutError:
-                await self.refresh()
+                if await self.refresh() is not None and not stop_event.is_set():
+                    await self.acknowledge_loaded()
 
 
 __all__ = [

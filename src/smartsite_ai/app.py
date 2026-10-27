@@ -249,6 +249,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/ws/realtime")
     async def realtime(websocket: WebSocket) -> None:
+        if settings.environment == "production" or app.state.preview_hub.started:
+            await _reject_realtime(websocket, "Use the authorized Backend preview")
+            return
         if not _realtime_authorized(websocket):
             await _reject_realtime(websocket, "Realtime source is not authorized")
             return

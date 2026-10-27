@@ -23,12 +23,14 @@ def test_production_cannot_use_legacy_query_token_to_start_preview(monkeypatch):
             backend_service_token="fixture-token",
         )
     )
-    with TestClient(app) as client:
-        with client.websocket_connect("/ws/realtime?token=fixture-token") as socket:
-            assert socket.receive_json() == {
-                "type": "error",
-                "message": "Use the authorized Backend preview",
-            }
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/ws/realtime?token=fixture-token") as socket,
+    ):
+        assert socket.receive_json() == {
+            "type": "error",
+            "message": "Use the authorized Backend preview",
+        }
     assert starts == []
 
 

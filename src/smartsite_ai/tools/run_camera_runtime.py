@@ -62,7 +62,11 @@ async def run_manifest(
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
 ) -> int:
-    runtime_settings = settings or Settings()
+    supervised = any(
+        value is not None
+        for value in (generation_credential_file, expected_camera_id, expected_outbox)
+    )
+    runtime_settings = settings or (Settings(_env_file=None) if supervised else Settings())
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())

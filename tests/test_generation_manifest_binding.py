@@ -132,3 +132,41 @@ def test_actual_run_refuses_wrong_camera_before_preflight_or_model(tmp_path, mon
             )
         )
     assert calls == []
+
+
+def test_supervisor_bound_run_never_discovers_local_dotenv(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    from smartsite_ai.config import Settings
+    from smartsite_ai.tools import run_camera_runtime as cli
+
+    source = tmp_path / "manifest.json"
+    source.write_text(
+        json.dumps(manifest(tmp_path).model_dump(by_alias=True, mode="json")), encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "SMARTSITE_AI_BACKEND_SERVICE_TOKEN=fixture-dotenv-token", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SMARTSITE_AI_BACKEND_SERVICE_TOKEN", raising=False)
+    observed = []
+
+    def settings(**kwargs):
+        value = Settings(**kwargs)
+        observed.append(
+            (kwargs.get("_env_file", "DEFAULT"), value.backend_service_token is not None)
+        )
+        return value
+
+    monkeypatch.setattr(cli, "Settings", settings)
+    with pytest.raises(CameraRuntimeError, match="mismatch"):
+        asyncio.run(
+            cli.run_manifest(
+                source,
+                generation_credential_file=tmp_path / "fresh.json",
+                expected_camera_id=UUID(CAMERA_B),
+                expected_outbox=tmp_path / "outbox.sqlite3",
+            )
+        )
+    assert observed == [(None, False)]

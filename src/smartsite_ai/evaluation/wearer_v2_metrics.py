@@ -65,6 +65,11 @@ def measure_wearer_states(batch: WearerEvaluationBatch) -> WearerMeasurementRepo
                     observable,
                     "NO_OBSERVABLE_REFERENCE",
                 ),
+                present_recall=_rate(
+                    counts["correct_present"],
+                    counts["visible_present"],
+                    "NO_VISIBLE_PRESENT_REFERENCE",
+                ),
                 missing_recall=_rate(
                     counts["correct_missing"],
                     counts["visible_missing"],

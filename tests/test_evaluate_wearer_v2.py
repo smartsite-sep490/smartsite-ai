@@ -35,6 +35,8 @@ def test_cli_writes_explicit_unknown_coverage_report(tmp_path):
     gloves = next(row for row in result["items"] if row["item"] == "GLOVES")
     assert gloves["abstained_observable"] == 1
     assert gloves["missing_recall"]["value"] == 0.0
+    assert result["schema_version"] == "2.1.0"
+    assert gloves["present_recall"]["reason"] == "NO_VISIBLE_PRESENT_REFERENCE"
     assert result["model_accepted"] is False
 
 

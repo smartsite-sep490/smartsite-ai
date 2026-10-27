@@ -104,6 +104,7 @@ class ItemStateMeasurement(MeasurementModel):
     abstained_observable: int = Field(ge=0)
     claims_on_unobservable: int = Field(ge=0)
     decision_coverage: MeasuredRate
+    present_recall: MeasuredRate
     missing_recall: MeasuredRate
     false_missing_rate: MeasuredRate
     false_present_rate: MeasuredRate
@@ -124,6 +125,7 @@ class ItemStateMeasurement(MeasurementModel):
         observable = self.visible_present + self.visible_missing
         expected = (
             (self.decision_coverage, observable - self.abstained_observable, observable),
+            (self.present_recall, self.correct_present, self.visible_present),
             (self.missing_recall, self.correct_missing, self.visible_missing),
             (self.false_missing_rate, self.false_missing, self.visible_present),
             (self.false_present_rate, self.false_present, self.visible_missing),
@@ -135,7 +137,7 @@ class ItemStateMeasurement(MeasurementModel):
 
 
 class WearerMeasurementReport(MeasurementModel):
-    schema_version: Literal["2.0.0"] = "2.0.0"
+    schema_version: Literal["2.1.0"] = "2.1.0"
     scope: Literal["OFFLINE_SUBMITTED_WEARER_STATE_MEASUREMENT"] = (
         "OFFLINE_SUBMITTED_WEARER_STATE_MEASUREMENT"
     )

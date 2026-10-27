@@ -287,3 +287,43 @@ def test_deserialized_reports_cannot_silently_change_coverage_or_item_partitions
         values["items"][2]["missed_missing"] = 1
     with pytest.raises(ValidationError):
         WearerMeasurementReport.model_validate(values)
+
+
+@pytest.mark.parametrize("item", WEARER_ITEMS_V2)
+def test_visible_positive_abstentions_remain_in_present_recall(item):
+    result = metric(
+        measure_wearer_states(
+            batch(
+                [reference(item, status="PRESENT", frame=i) for i in (1, 2, 3)],
+                [
+                    prediction(item, status="PRESENT", frame=1),
+                    prediction(item, status="UNKNOWN", frame=2),
+                ],
+            )
+        ),
+        item,
+    )
+    assert result.present_recall.numerator == 1
+    assert result.present_recall.denominator == 3
+    assert result.present_recall.value == 1 / 3
+    assert result.abstained_observable == 2
+
+
+def test_no_visible_positive_has_undefined_present_recall():
+    result = metric(measure_wearer_states(batch([reference(status="MISSING")], [prediction()])))
+    assert result.present_recall.value is None
+    assert result.present_recall.reason == "NO_VISIBLE_PRESENT_REFERENCE"
+
+
+def test_report_version_and_present_recall_cannot_hide_an_abstention():
+    report = measure_wearer_states(batch([reference(status="PRESENT")]))
+    assert report.schema_version == "2.1.0"
+    values = report.model_dump()
+    values["items"][2]["present_recall"] = {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1.0,
+        "reason": None,
+    }
+    with pytest.raises(ValidationError):
+        WearerMeasurementReport.model_validate(values)

@@ -41,7 +41,9 @@ class PpePipeline:
     The pipeline emits technical ``PRESENT``/``MISSING`` observations only when the
     detector explicitly identifies an affirmative or negative PPE class. It does not
     decide which PPE a site policy requires or whether a person violated it. An
-    undetected item remains unknown by default. Evidence fitting multiple people
+    undetected item remains unknown by default. An opt-in head-position filter
+    omits misplaced positive evidence; it does not establish physical wearing.
+    Evidence fitting multiple people
     is also unknown, including competitors outside the configured region. Callers
     can opt into legacy absence-based observations for a controlled evaluation,
     but that fallback cannot override ambiguous or contradictory evidence.
@@ -57,11 +59,18 @@ class PpePipeline:
         minimum_association_coverage: float = 0.25,
         minimum_observable_person_height: float = 0.1,
         emit_missing: bool = False,
+        head_item_max_relative_center_y: float | None = None,
     ) -> None:
         if not 0.0 <= minimum_association_coverage <= 1.0:
             raise ValueError("minimum_association_coverage must be between 0 and 1")
         if not 0.0 < minimum_observable_person_height <= 1.0:
             raise ValueError("minimum_observable_person_height must be greater than 0")
+        if head_item_max_relative_center_y is not None and (
+            isinstance(head_item_max_relative_center_y, bool)
+            or not isinstance(head_item_max_relative_center_y, (int, float))
+            or not 0.0 < head_item_max_relative_center_y <= 1.0
+        ):
+            raise ValueError("head_item_max_relative_center_y must be greater than 0 and at most 1")
 
         present_mapping = (
             DEFAULT_PPE_CLASS_NAMES if class_names_by_item is None else class_names_by_item
@@ -92,6 +101,7 @@ class PpePipeline:
         self._minimum_association_coverage = minimum_association_coverage
         self._minimum_observable_person_height = minimum_observable_person_height
         self._emit_missing = emit_missing
+        self._head_item_max_relative_center_y = head_item_max_relative_center_y
 
     @property
     def minimum_schema_version(self) -> Literal["1.0.0", "1.1.0"]:
@@ -103,14 +113,16 @@ class PpePipeline:
         )
 
     @classmethod
-    def for_model_profile(cls, profile: PpeModelProfile) -> "PpePipeline":
+    def for_model_profile(
+        cls, profile: PpeModelProfile, *, head_item_max_relative_center_y: float | None = None
+    ) -> "PpePipeline":
         """Opt into exact native evidence; never derive negatives from absence.
 
         Association still requires one observable person owner. A profile is
         a taxonomy declaration, not model accuracy or wire-version acceptance.
         """
         if profile == LEGACY_PPE_5_PROFILE:
-            return cls()
+            return cls(head_item_max_relative_center_y=head_item_max_relative_center_y)
         if profile not in (NATIVE_PPE_10_PROFILE, UNIFIED_PPE_15_PROFILE):
             raise ValueError("unsupported PPE model profile")
         present = {
@@ -127,7 +139,11 @@ class PpePipeline:
         }
         if profile == UNIFIED_PPE_15_PROFILE:
             missing["SAFETY_VEST"] = DEFAULT_MISSING_PPE_CLASS_NAMES["SAFETY_VEST"]
-        return cls(class_names_by_item=present, missing_class_names_by_item=missing)
+        return cls(
+            class_names_by_item=present,
+            missing_class_names_by_item=missing,
+            head_item_max_relative_center_y=head_item_max_relative_center_y,
+        )
 
     def process(
         self,
@@ -189,6 +205,7 @@ class PpePipeline:
         ] = {}
         eligible_track_ids = {person.track_id for person in eligible_people}
         conflicted: set[tuple[int, PpeItem]] = set()
+        position_unknown: set[tuple[int, PpeItem]] = set()
         for detection_index, detection in enumerate(tracked_frame.batch.detections):
             observation = self._class_to_observation.get(detection.class_name.casefold())
             if observation is None:
@@ -218,6 +235,21 @@ class PpePipeline:
             ((coverage, person),) = candidates
             if person.track_id not in eligible_track_ids:
                 continue
+            # shortcut: opt-in upright-box filter; qualify body landmarks for posture/crops.
+            if (
+                self._head_item_max_relative_center_y is not None
+                and status == "PRESENT"
+                and item in ("HARD_HAT", "GOGGLES")
+                and (
+                    not self._is_observable(person)
+                    or detection_center[1]
+                    > person.bounding_box.y1
+                    + (person.bounding_box.y2 - person.bounding_box.y1)
+                    * self._head_item_max_relative_center_y
+                )
+            ):
+                position_unknown.add((person.track_id, item))
+                continue
             status_key = (person.track_id, item, status)
             candidate = (coverage, detection.confidence, -detection_index, detection)
             current = best_by_status.get(status_key)
@@ -242,6 +274,10 @@ class PpePipeline:
             elif len(statuses) > 1:
                 conflicted.add((track_id, item))
 
+        # Keep raw contradictions unknown; a carried spare cannot cancel valid PRESENT.
+        conflicted.update(
+            key for key in position_unknown if key not in result or result[key][0] != "PRESENT"
+        )
         return result, conflicted
 
     def _is_observable(self, person: TrackedPerson) -> bool:

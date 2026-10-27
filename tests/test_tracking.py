@@ -86,6 +86,16 @@ def test_tracked_frame_accepts_no_current_person_tracks() -> None:
     assert frame.persons == ()
 
 
+@pytest.mark.parametrize("next_bounds", [(0.60, 0.10, 0.90, 0.80), (0.40, 0.10, 0.70, 0.80)])
+def test_zero_threshold_does_not_link_disjoint_or_edge_touching_people(next_bounds) -> None:
+    tracker = IoUPersonTracker(iou_threshold=0)
+    first = tracker.update(batch(1, detection("person", (0.10, 0.10, 0.40, 0.80))))
+    second = tracker.update(batch(2, detection("person", next_bounds)))
+    third = tracker.update(batch(3, detection("person", next_bounds)))
+    assert second.persons[0].track_id != first.persons[0].track_id
+    assert third.persons[0].track_id == second.persons[0].track_id
+
+
 def test_iou_tracker_keeps_person_id_and_ignores_ppe_detections() -> None:
     tracker = IoUPersonTracker(iou_threshold=0.3)
 

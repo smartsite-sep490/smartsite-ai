@@ -126,7 +126,8 @@ class IoUPersonTracker:
         for track_id, track in self._tracks.items():
             for detection_index, detection in enumerate(detections):
                 iou = bounding_box_iou(track.detection.bounding_box, detection.bounding_box)
-                if iou >= self._iou_threshold:
+                # Zero overlap provides no continuity, even at the lowest threshold.
+                if iou > 0 and iou >= self._iou_threshold:
                     candidates.append((track_id, detection_index))
 
         track_counts = Counter(track_id for track_id, _ in candidates)

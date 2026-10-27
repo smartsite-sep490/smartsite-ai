@@ -61,7 +61,7 @@ class Settings(BaseSettings):
         "8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt"
     )
     realtime_model_license: str = "MIT (repository declaration; checkpoint terms unverified)"
-    realtime_experimental_model_profile: Literal["native-ppe-10"] | None = None
+    realtime_experimental_model_profile: Literal["native-ppe-10", "unified-ppe-15"] | None = None
     realtime_observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0"
 
     @model_validator(mode="after")

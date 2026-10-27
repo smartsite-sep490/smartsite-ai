@@ -17,9 +17,14 @@ from PIL import Image
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.experimental_object_preview import unified_object_preview
 from smartsite_ai.inference.artifacts import ModelArtifactSpec
 from smartsite_ai.inference.loading import load_artifact_spec, load_detector_artifact
-from smartsite_ai.inference.ppe_profiles import LEGACY_PPE_5_PROFILE, NATIVE_PPE_10_PROFILE
+from smartsite_ai.inference.ppe_profiles import (
+    LEGACY_PPE_5_PROFILE,
+    UNIFIED_PPE_15_PROFILE,
+    experimental_ppe_profile,
+)
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
@@ -183,6 +188,7 @@ def build_realtime_preview(
     confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
     occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
     ppe_items: tuple[str, ...] = LEGACY_PPE_5_PROFILE.present_items,
+    model_objects: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind diagnostic detections and bounded JPEG pixels in one socket message.
 
@@ -221,6 +227,8 @@ def build_realtime_preview(
             if region.region_id.casefold() != ppe_region_id.casefold()
         ],
     )
+    if model_objects is not None:
+        payload["modelObjects"] = model_objects
     return payload
 
 
@@ -323,13 +331,9 @@ def _load_realtime_stack(
         if artifact_spec is not None
         else _load_class_map(Path(settings.realtime_class_map_path))
     )
-    profile = (
-        NATIVE_PPE_10_PROFILE
-        if settings.realtime_experimental_model_profile is not None
-        else LEGACY_PPE_5_PROFILE
-    )
+    profile = experimental_ppe_profile(settings.realtime_experimental_model_profile)
     if profile.experimental and tuple(sorted(class_map.items())) != profile.class_map:
-        raise ValueError("realtime taxonomy contradicts native-ppe-10 profile")
+        raise ValueError(f"realtime taxonomy contradicts {profile.name} profile")
     # Validate configuration before allocating a provider/GPU resource.
     configuration = read_configuration(Path(settings.realtime_region_configuration_path))
     if configuration.camera_external_id != settings.realtime_camera_external_id:
@@ -356,6 +360,8 @@ def _load_realtime_stack(
         image_size=(640, 640),
         device=settings.realtime_device,
     )
+    if profile == UNIFIED_PPE_15_PROFILE and spec.model_family != "yolo11s":
+        raise ValueError("unified object preview requires YOLO11s")
     # Artifact preprocessing is the frozen evaluation recipe. Legacy defaults
     # must not silently replace its image size, NMS or confidence threshold.
     target_device = (
@@ -579,10 +585,13 @@ async def stream_realtime(
                     ppe_region_id=settings.realtime_ppe_region_id,
                     confirmed_ppe_items=confirmed_ppe_items,
                     occupied_zone_regions=occupied_zone_regions,
-                    ppe_items=(
-                        NATIVE_PPE_10_PROFILE.present_items
-                        if settings.realtime_experimental_model_profile is not None
-                        else LEGACY_PPE_5_PROFILE.present_items
+                    ppe_items=experimental_ppe_profile(
+                        settings.realtime_experimental_model_profile
+                    ).present_items,
+                    model_objects=(
+                        unified_object_preview(batch, envelope)
+                        if settings.realtime_experimental_model_profile == "unified-ppe-15"
+                        else None
                     ),
                 )
             )

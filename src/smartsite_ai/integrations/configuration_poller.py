@@ -171,6 +171,9 @@ class CameraConfigurationPoller:
         age = self._read_clock() - self._last_success
         if age > self._stale_after_seconds:
             raise ConfigurationStaleError("camera configuration exceeded its stale window")
+        if self._bound_source is not None:
+            # A cached bundle cannot extend the independently expiring worker lease.
+            self._bound_source.ensure_current()
 
     def _read_clock(self) -> float:
         now = self._clock()

@@ -127,22 +127,25 @@ class GenerationBoundSource:
     def binding(self) -> WorkerGenerationCredential:
         return self._binding
 
+    def ensure_current(self) -> None:
+        self._binding.ensure_current(self._clock())
+
     @property
     def is_ready_for_ack(self) -> bool:
-        self._binding.ensure_current(self._clock())
+        self.ensure_current()
         return self.is_connected and self._underlying_session is not None
 
     async def connect(self) -> None:
-        self._binding.ensure_current(self._clock())
+        self.ensure_current()
         if self._opened:
             raise RuntimeError("Worker generation requires trusted renewal before reconnect")
         self._opened = True
         await self._source.connect()
 
     async def read_frame(self) -> FrameEnvelope | None:
-        self._binding.ensure_current(self._clock())
+        self.ensure_current()
         frame = await self._source.read_frame()
-        self._binding.ensure_current(self._clock())
+        self.ensure_current()
         if frame is None:
             return None
         if self._underlying_session is None:

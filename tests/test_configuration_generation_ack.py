@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -21,7 +22,7 @@ from smartsite_ai.integrations.worker_generation import (
 )
 
 
-async def setup_ack():
+async def setup_ack(*, generation_clock=lambda: NOW, poll_interval=5):
     client = AsyncMock()
     clock = FakeClock()
     store = RegionConfigurationStore()
@@ -29,7 +30,7 @@ async def setup_ack():
     source = GenerationBoundSource(
         FakeSource(),
         WorkerGenerationCredential.model_validate(credential_payload()),
-        clock=lambda: NOW,
+        clock=generation_clock,
     )
     poller = CameraConfigurationPoller(
         client=client,
@@ -37,11 +38,69 @@ async def setup_ack():
         camera_id=CAMERA_ID,
         camera_external_id="CAM-GATE-01",
         monotonic_clock=clock,
+        poll_interval_seconds=poll_interval,
     )
     poller.enable_generation_ack(source)
     client.fetch_bundle.return_value = ConfigurationBundleResult(_configuration(1), '"v1"')
     await poller.refresh()
     return client, clock, store, source, poller
+
+
+@pytest.mark.anyio
+async def test_generation_expiry_invalidates_fresh_metadata_guard():
+    now = [NOW]
+    _, _, _, _, poller = await setup_ack(generation_clock=lambda: now[0])
+    poller.ensure_fresh()
+    now[0] += timedelta(hours=1)
+    with pytest.raises(RuntimeError, match="generation expired"):
+        poller.ensure_fresh()
+
+
+@pytest.mark.anyio
+async def test_transient_fetch_cannot_keep_expired_generation_running():
+    now = [NOW]
+    client, _, _, source, poller = await setup_ack(generation_clock=lambda: now[0])
+    await source.connect()
+    await source.read_frame()
+    await poller.acknowledge_loaded()
+    client.fetch_bundle.side_effect = BackendConfigurationTransientError(attempts=1)
+    now[0] += timedelta(hours=1)
+    try:
+        with pytest.raises(RuntimeError, match="generation expired"):
+            await poller.refresh()
+        assert client.acknowledge_configuration.await_count == 1
+    finally:
+        await source.close()
+
+
+@pytest.mark.anyio
+async def test_expiry_during_backend_outage_cancels_owned_worker_and_closes_source():
+    from smartsite_ai.tools.run_camera_worker import _coordinate
+
+    now = [NOW]
+    client, _, _, source, poller = await setup_ack(
+        generation_clock=lambda: now[0], poll_interval=0.01
+    )
+    closed = asyncio.Event()
+
+    class BlockedWorker:
+        async def run(self):
+            await source.connect()
+            await source.read_frame()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await source.close()
+                closed.set()
+
+    async def outage(*args, **kwargs):
+        now[0] = NOW + timedelta(hours=1)
+        raise BackendConfigurationTransientError(attempts=1)
+
+    client.fetch_bundle.side_effect = outage
+    with pytest.raises(RuntimeError, match="generation expired"):
+        await asyncio.wait_for(_coordinate(BlockedWorker(), poller), timeout=0.5)
+    assert closed.is_set() and not source.is_connected
 
 
 @pytest.mark.anyio

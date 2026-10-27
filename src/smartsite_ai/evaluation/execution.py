@@ -68,6 +68,7 @@ from smartsite_ai.evaluation.report import (
 from smartsite_ai.inference.artifacts import ModelArtifactSpec
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import ConfirmedPpeCandidate
 
 MAX_EPISODES_FILE_BYTES = 16 * 1024 * 1024
@@ -89,13 +90,13 @@ class AsyncDetector(Protocol):
 
 
 class EvaluationPipeline(Protocol):
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,
         region_configuration: CameraRegionConfiguration,
         event_id: str,
-    ) -> TechnicalObservationEvent | None: ...
+    ) -> ObservationFrame | TechnicalObservationEvent | None: ...
 
 
 class CandidateGate(Protocol):
@@ -405,7 +406,7 @@ class _OfflineSubjectSegments:
 
 def _prediction_overlay_context(
     predictions: Sequence[EvaluationPrediction],
-    event: TechnicalObservationEvent | None,
+    event: ObservationFrame | TechnicalObservationEvent | None,
     confirmed: Sequence[ConfirmedPpeCandidate],
 ) -> tuple[PredictionOverlayContext, ...]:
     """Map pipeline track/candidate facts back onto the exact detector predictions."""
@@ -615,7 +616,7 @@ async def execute_evaluation(
             if services.evidence_writer is not None:
                 services.evidence_writer(frame, source, plan)
             continue
-        event = services.pipeline.process(
+        event = services.pipeline.observe(
             batch,
             region_configuration=region_configuration,
             event_id=str(uuid5(NAMESPACE_URL, f"smartsite-evaluation:{frame.frame_id}")),

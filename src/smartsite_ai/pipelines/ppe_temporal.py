@@ -2,11 +2,12 @@
 
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from smartsite_ai.domain.observations import PpeObservation, TechnicalObservationEvent
+from smartsite_ai.domain.observations import Observation, PpeObservation, TechnicalObservationEvent
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe import PPE_ITEMS, PpeItem
 
 
@@ -242,14 +243,14 @@ def _event_capture_time(value: str) -> datetime | None:
         return None
 
 
-def filter_event_for_delivery(
-    event: TechnicalObservationEvent,
+def _delivery_observations(
+    event: TechnicalObservationEvent | ObservationFrame,
     confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
     | Iterable[ConfirmedPpeCandidate] = (),
-) -> TechnicalObservationEvent | None:
-    """Filter an event for Backend delivery and timeline recording.
+) -> list[Observation] | None:
+    """Select full-frame observations for Backend delivery and timeline recording.
 
-    Returns an event containing:
+    Returns observations containing:
     - PERSON, ZONE_ENTRY, and other non-PPE observations unchanged.
     - PPE observations with status PRESENT unchanged.
     - PPE observations with status MISSING only when track, item and region geometry match
@@ -306,17 +307,54 @@ def filter_event_for_delivery(
     if not has_deliverable_trigger or not filtered_observations:
         return None
 
+    return filtered_observations
+
+
+def filter_event_for_delivery(
+    event: TechnicalObservationEvent,
+    confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
+    | Iterable[ConfirmedPpeCandidate] = (),
+) -> TechnicalObservationEvent | None:
+    """Retain the single-event API for already bounded transport events."""
+    observations = _delivery_observations(event, confirmed_ppe_candidates)
+    if observations is None:
+        return None
     return TechnicalObservationEvent.create(
         event_id=event.event_id,
         camera_external_id=event.camera_external_id,
         stream_session_id=event.stream_session_id,
         captured_at=event.captured_at,
         frame_dimensions=event.frame_dimensions,
-        observations=filtered_observations,
+        observations=observations,
         evidence=event.evidence,
         schema_version=event.schema_version,
         frame_partition=event.frame_partition,
     )
+
+
+def events_for_delivery(
+    frame: ObservationFrame | TechnicalObservationEvent,
+    confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
+    | Iterable[ConfirmedPpeCandidate] = (),
+    *,
+    partition_sequence_number: int | None = None,
+) -> tuple[TechnicalObservationEvent, ...]:
+    """Confirm/filter the full frame once, then validate bounded transport parts."""
+    if isinstance(frame, TechnicalObservationEvent):
+        if partition_sequence_number is not None:
+            raise ValueError("Partitioned delivery requires the full ObservationFrame")
+        event = filter_event_for_delivery(frame, confirmed_ppe_candidates)
+        return () if event is None else (event,)
+    observations = _delivery_observations(frame, confirmed_ppe_candidates)
+    if observations is None:
+        return ()
+    selected = replace(frame, observations=tuple(observations))
+    if partition_sequence_number is not None:
+        return selected.to_partitioned_events(sequence_number=partition_sequence_number)
+    events = selected.to_events()
+    if len(events) > 1:
+        raise ValueError("Multipart delivery requires explicit v1.4 frame metadata")
+    return events
 
 
 def should_post_event(
@@ -333,5 +371,6 @@ __all__ = [
     "ConfirmedPpeCandidate",
     "TemporalPpeCandidateGate",
     "filter_event_for_delivery",
+    "events_for_delivery",
     "should_post_event",
 ]

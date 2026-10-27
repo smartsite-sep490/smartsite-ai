@@ -12,6 +12,7 @@ from smartsite_ai.domain.observations import (
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.pipelines._geometry import to_observation_bounding_box
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline, ZoneTemporalState
 from smartsite_ai.tracking.protocol import TrackerProtocol
@@ -58,6 +59,18 @@ class Mf05Mf06Pipeline:
         event_id: str,
     ) -> TechnicalObservationEvent | None:
         """Create one technical event, or ``None`` when no person is observable."""
+
+        frame = self.observe(batch, region_configuration=region_configuration, event_id=event_id)
+        return None if frame is None else frame.to_event()
+
+    def observe(
+        self,
+        batch: DetectionBatch,
+        *,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        event_id: str,
+    ) -> ObservationFrame | None:
+        """Observe the whole frame before transport capacity or delivery filtering."""
 
         if batch.camera_external_id != region_configuration.camera_external_id:
             raise ValueError(
@@ -114,14 +127,14 @@ class Mf05Mf06Pipeline:
         if not observations:
             return None
 
-        return TechnicalObservationEvent.create(
+        return ObservationFrame(
             schema_version=self._schema_version,
             event_id=event_id,
             camera_external_id=batch.camera_external_id,
             stream_session_id=str(batch.session_id),
             captured_at=batch.captured_at.isoformat(),
             frame_dimensions=FrameDimensions(width=batch.frame_width, height=batch.frame_height),
-            observations=observations,
+            observations=tuple(observations),
         )
 
     def occupied_zone_track_regions(

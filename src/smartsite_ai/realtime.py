@@ -31,7 +31,7 @@ from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
-    filter_event_for_delivery,
+    events_for_delivery,
 )
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.runtime_device import validate_runtime_device
@@ -61,11 +61,11 @@ def _ui_frame(
             "detections": [],
             "zoneDetections": [],
         }
-    payload = event.to_wire_dict()
     people: dict[int, dict[str, Any]] = {}
     ppe_status: dict[int, dict[str, str]] = {}
     entered_zone_regions: set[tuple[int, str]] = set()
-    for observation in payload["observations"]:
+    for item in event.observations:
+        observation = item.to_wire_dict()
         track_id = int(observation["trackId"])
         kind = observation["type"]
         if kind == "PERSON":
@@ -156,7 +156,7 @@ def _ui_frame(
         "type": "frame",
         "width": width,
         "height": height,
-        "cameraExternalId": payload["cameraExternalId"],
+        "cameraExternalId": event.camera_external_id,
         "detections": detections,
         "zoneDetections": zone_detections,
     }
@@ -479,7 +479,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 continue
             failures = 0
             batch = await detector.detect(envelope)
-            event = pipeline.process(
+            event = pipeline.observe(
                 batch,
                 region_configuration=configuration,
                 event_id=str(
@@ -531,8 +531,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 )
             )
             if backend is not None and event is not None:
-                delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-                if delivery_event is not None:
+                for delivery_event in events_for_delivery(event, confirmed_candidates):
                     with suppress(Exception):
                         await backend.post_event(delivery_event)
             await asyncio.sleep(0)

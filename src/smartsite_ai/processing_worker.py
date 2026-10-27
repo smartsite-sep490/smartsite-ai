@@ -23,9 +23,10 @@ from smartsite_ai.ingestion.queue import QueueClosedError
 from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
-    filter_event_for_delivery,
+    events_for_delivery,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,13 +59,13 @@ class TechnicalPipelineProtocol(Protocol):
 
     def restore_temporal_state(self, state: object) -> None: ...
 
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,
         region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
         event_id: str,
-    ) -> TechnicalObservationEvent | None: ...
+    ) -> ObservationFrame | TechnicalObservationEvent | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,11 +112,14 @@ class HeadlessCameraProcessingWorker:
         configuration_guard: Callable[[], None] | None = None,
         delivery_interval_seconds: float = 0.25,
         evidence_publisher: EvidencePublisherProtocol | None = None,
+        partitioned_frame_delivery: bool = False,
     ) -> None:
         if delivery_interval_seconds <= 0:
             raise ValueError("delivery interval must be positive")
         if not ppe_region_id:
             raise ValueError("PPE region ID must not be empty")
+        if type(partitioned_frame_delivery) is not bool:
+            raise ValueError("partitioned frame delivery must be a boolean")
         self._stream = stream
         self._detector = detector
         self._pipeline = pipeline
@@ -126,6 +130,7 @@ class HeadlessCameraProcessingWorker:
         self._configuration_guard = configuration_guard
         self._delivery_interval_seconds = delivery_interval_seconds
         self._evidence_publisher = evidence_publisher
+        self._partitioned_frame_delivery = partitioned_frame_delivery
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_configuration: (
@@ -183,7 +188,7 @@ class HeadlessCameraProcessingWorker:
                 await self._process_frame(frame)
                 frames_processed += 1
                 if self._last_frame_enqueued:
-                    events_enqueued += 1
+                    events_enqueued += self._last_frame_event_count
         finally:
             if frame_task is not None and not frame_task.done():
                 frame_task.cancel()
@@ -225,6 +230,7 @@ class HeadlessCameraProcessingWorker:
 
     async def _process_frame(self, frame: FrameEnvelope) -> None:
         self._last_frame_enqueued = False
+        self._last_frame_event_count = 0
         if self._configuration_guard is not None:
             self._configuration_guard()
         configuration = await self._configurations.get_active_configuration(
@@ -268,7 +274,7 @@ class HeadlessCameraProcessingWorker:
                 self._current_configuration = configuration
                 self._temporal_gate = TemporalPpeCandidateGate()
 
-            event = self._pipeline.process(
+            event = self._pipeline.observe(
                 batch,
                 region_configuration=configuration,
                 event_id=str(
@@ -302,8 +308,15 @@ class HeadlessCameraProcessingWorker:
             if event is None:
                 rollback = False
                 return
-            delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-            if delivery_event is not None:
+            delivery_events = events_for_delivery(
+                event,
+                confirmed_candidates,
+                partition_sequence_number=(
+                    batch.sequence_number if self._partitioned_frame_delivery else None
+                ),
+            )
+            events_to_enqueue = []
+            for delivery_event in delivery_events:
                 if self._configuration_guard is not None:
                     self._configuration_guard()
                 event_to_enqueue = delivery_event
@@ -334,10 +347,16 @@ class HeadlessCameraProcessingWorker:
                     is not configuration
                 ):
                     return
-                # Enqueue cancellation can race a durable SQLite commit; do not undo it.
+                events_to_enqueue.append(event_to_enqueue)
+            if events_to_enqueue:
+                # A cancelled SQLite write may still commit; all parts share one transaction.
                 rollback = False
-                await self._outbox.enqueue(event_to_enqueue)
+                if len(events_to_enqueue) == 1:
+                    await self._outbox.enqueue(events_to_enqueue[0])
+                else:
+                    await self._outbox.enqueue_many(tuple(events_to_enqueue))
                 self._last_frame_enqueued = True
+                self._last_frame_event_count = len(events_to_enqueue)
             rollback = False
         finally:
             if rollback and previous is not None:

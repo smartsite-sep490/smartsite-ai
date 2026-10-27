@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,6 +19,71 @@ from smartsite_ai.integrations.outbox import (
     OutboxEnqueueOutcome,
     SqliteEventOutbox,
 )
+
+
+@pytest.mark.anyio
+async def test_enqueue_many_conflict_rolls_back_new_parts(tmp_path: Path) -> None:
+    outbox = SqliteEventOutbox((tmp_path / "atomic.sqlite3").resolve())
+    existing = _event()
+    await outbox.enqueue(existing)
+    first = _event("11111111-1111-4111-8111-111111111112")
+    conflict = _event(camera_external_id="OTHER")
+    with pytest.raises(OutboxConflict):
+        await outbox.enqueue_many((first, conflict))
+    assert [item.event.event_id for item in await outbox.ready()] == [existing.event_id]
+
+
+@pytest.mark.anyio
+async def test_enqueue_many_durable_failure_is_all_or_nothing_and_retryable(tmp_path: Path) -> None:
+    path = (tmp_path / "atomic.sqlite3").resolve()
+    outbox = SqliteEventOutbox(path)
+    await outbox.initialize()
+    events = (_event(), _event("11111111-1111-4111-8111-111111111112"))
+    with sqlite3.connect(path) as connection:
+        connection.execute("""CREATE TRIGGER fail_second BEFORE INSERT ON observation_outbox
+            WHEN NEW.event_id='11111111-1111-4111-8111-111111111112'
+            BEGIN SELECT RAISE(ABORT, 'simulated disk write failure'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="simulated"):
+        await outbox.enqueue_many(events)
+    assert (await outbox.counts()).pending == 0
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TRIGGER fail_second")
+    assert await outbox.enqueue_many(events) == (OutboxEnqueueOutcome.ENQUEUED,) * 2
+    assert await outbox.enqueue_many(events) == (OutboxEnqueueOutcome.IDEMPOTENT,) * 2
+    recovered = SqliteEventOutbox(path)
+    assert {item.event.event_id for item in await recovered.ready()} == {e.event_id for e in events}
+
+
+@pytest.mark.anyio
+async def test_cancelled_batch_write_can_finish_without_losing_its_second_part(
+    tmp_path, monkeypatch
+):
+    path = (tmp_path / "cancel.sqlite3").resolve()
+    outbox = SqliteEventOutbox(path)
+    events = (_event(), _event("11111111-1111-4111-8111-111111111112"))
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = outbox._enqueue_many_sync
+
+    def delayed(rows, now):
+        started.set()
+        try:
+            assert release.wait(5)
+            return original(rows, now)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(outbox, "_enqueue_many_sync", delayed)
+    task = asyncio.create_task(outbox.enqueue_many(events))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 5)
+    recovered = SqliteEventOutbox(path)
+    assert {item.event.event_id for item in await recovered.ready()} == {e.event_id for e in events}
 
 
 class MutableClock:

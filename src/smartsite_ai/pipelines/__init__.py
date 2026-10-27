@@ -5,6 +5,7 @@ from smartsite_ai.pipelines.ppe import PpeItem, PpePipeline
 from smartsite_ai.pipelines.ppe_temporal import (
     ConfirmedPpeCandidate,
     TemporalPpeCandidateGate,
+    events_for_delivery,
     filter_event_for_delivery,
     should_post_event,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "PpePipeline",
     "RestrictedZonePipeline",
     "TemporalPpeCandidateGate",
+    "events_for_delivery",
     "filter_event_for_delivery",
     "should_post_event",
 ]

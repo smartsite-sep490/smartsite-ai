@@ -157,7 +157,7 @@ class FakePipeline:
     def restore_temporal_state(self, state: object) -> None:
         assert state is None
 
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,

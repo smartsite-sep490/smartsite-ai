@@ -692,7 +692,7 @@ class _RecordingPipeline:
         self.region_id = region_id
         self.cameras: list[str] = []
 
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,

@@ -125,7 +125,7 @@ class RecordingPipeline:
         self.configuration_versions: list[int] = []
         self.event_ids: list[str] = []
 
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,
@@ -276,7 +276,7 @@ async def test_worker_replays_crash_surviving_event_before_new_source_session(
             json={"eventId": event_id, "status": "PROCESSED", "alertIds": []},
         )
 
-    old_event = RecordingPipeline().process(
+    old_event = RecordingPipeline().observe(
         DetectionBatch.from_frame(
             _frame(99),
             model_artifact_id="ppe-model",
@@ -595,7 +595,7 @@ async def test_ppe_confirmation_resets_when_region_geometry_changes(tmp_path: Pa
             return await super().detect(frame)
 
     class MissingPpePipeline:
-        def process(
+        def observe(
             self,
             batch: DetectionBatch,
             *,

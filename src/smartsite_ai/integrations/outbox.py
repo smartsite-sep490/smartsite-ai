@@ -196,28 +196,56 @@ class SqliteEventOutbox:
         payload_hash: str,
         now: float,
     ) -> OutboxEnqueueOutcome:
+        return self._enqueue_many_sync(((event_id, payload_json, payload_hash),), now)[0]
+
+    async def enqueue_many(
+        self, events: tuple[TechnicalObservationEvent, ...]
+    ) -> tuple[OutboxEnqueueOutcome, ...]:
+        """Durably commit every part of a frame, or none of its new parts."""
+        await self.initialize()
+        rows = tuple(
+            (
+                event.event_id,
+                json.dumps(
+                    event.to_wire_dict(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                ),
+                event.compute_payload_hash(),
+            )
+            for event in events
+        )
+        now = _require_aware_utc(self._clock()).timestamp()
+        async with self._lock:
+            return await asyncio.to_thread(self._enqueue_many_sync, rows, now)
+
+    def _enqueue_many_sync(
+        self, rows: tuple[tuple[str, str, str], ...], now: float
+    ) -> tuple[OutboxEnqueueOutcome, ...]:
+        outcomes: list[OutboxEnqueueOutcome] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT payload_hash FROM observation_outbox WHERE event_id = ?",
-                (event_id,),
-            ).fetchone()
-            if existing is not None:
-                if existing["payload_hash"] != payload_hash:
-                    raise OutboxConflict(
-                        "outbox event ID already exists with different canonical content"
-                    )
-                return OutboxEnqueueOutcome.IDEMPOTENT
-            connection.execute(
-                """
-                INSERT INTO observation_outbox (
-                    event_id, payload_json, payload_hash, state,
-                    attempt_count, next_attempt_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?)
-                """,
-                (event_id, payload_json, payload_hash, now, now, now),
-            )
-        return OutboxEnqueueOutcome.ENQUEUED
+            for event_id, payload_json, payload_hash in rows:
+                existing = connection.execute(
+                    "SELECT payload_hash FROM observation_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        raise OutboxConflict(
+                            "outbox event ID already exists with different canonical content"
+                        )
+                    outcomes.append(OutboxEnqueueOutcome.IDEMPOTENT)
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO observation_outbox (
+                        event_id, payload_json, payload_hash, state,
+                        attempt_count, next_attempt_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?)
+                    """,
+                    (event_id, payload_json, payload_hash, now, now, now),
+                )
+                outcomes.append(OutboxEnqueueOutcome.ENQUEUED)
+        return tuple(outcomes)
 
     async def ready(self, *, limit: int = 32) -> tuple[PendingOutboxEvent, ...]:
         if limit < 1 or limit > 1024:

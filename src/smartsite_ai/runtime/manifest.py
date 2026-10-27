@@ -78,12 +78,19 @@ class CameraManifestEntry(_StrictModel):
     evidence_dir: str | None = Field(
         default=None, alias="evidenceDir", min_length=1, max_length=1024
     )
+    generation_credential_file: str | None = Field(
+        default=None, alias="generationCredentialFile", min_length=1, max_length=1024
+    )
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
         if not _is_portable_absolute_path(self.outbox):
             raise ValueError("camera runtime manifest is invalid")
         if self.evidence_dir is not None and not _is_portable_absolute_path(self.evidence_dir):
+            raise ValueError("camera runtime manifest is invalid")
+        if self.generation_credential_file is not None and not _is_portable_absolute_path(
+            self.generation_credential_file
+        ):
             raise ValueError("camera runtime manifest is invalid")
         return self
 

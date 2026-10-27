@@ -130,6 +130,23 @@ class CameraConfigurationBundle(_StrictFrozenModel):
             raise ValueError("bundleSha256 does not match canonical bundle content")
         return self
 
+    def to_region_configuration(self) -> CameraRegionConfiguration:
+        """Project validated bundle geometry for legacy geometry-only consumers."""
+        return CameraRegionConfiguration(
+            schemaVersion=self.schema_version,
+            configurationVersion=self.configuration_version,
+            cameraExternalId=self.camera_external_id,
+            regions=tuple(
+                CameraObservationRegionConfiguration(
+                    regionId=region.region_id,
+                    geometryVersion=region.geometry_version,
+                    coordinateSpace=region.coordinate_space,
+                    polygon=region.polygon,
+                )
+                for region in self.regions
+            ),
+        )
+
     @classmethod
     def from_wire_bytes(cls, payload: bytes) -> CameraConfigurationBundle:
         if not isinstance(payload, bytes):

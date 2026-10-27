@@ -11,6 +11,7 @@ from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.evidence.models import FrameBatchBindingError
@@ -61,7 +62,7 @@ class TechnicalPipelineProtocol(Protocol):
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
         event_id: str,
     ) -> TechnicalObservationEvent | None: ...
 
@@ -127,8 +128,9 @@ class HeadlessCameraProcessingWorker:
         self._evidence_publisher = evidence_publisher
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
-        self._current_ppe_geometry_version: int | None = None
-        self._current_configuration_version: int | None = None
+        self._current_configuration: (
+            CameraRegionConfiguration | CameraConfigurationBundle | None
+        ) = None
         self._temporal_gate = TemporalPpeCandidateGate()
         self._started = False
 
@@ -138,7 +140,7 @@ class HeadlessCameraProcessingWorker:
         self._started = True
 
         camera_external_id = self._stream.config.camera_external_id
-        if await self._configurations.get(camera_external_id) is None:
+        if await self._configurations.get_active_configuration(camera_external_id) is None:
             raise RuntimeError("camera region configuration must be loaded before worker start")
 
         await self._outbox.initialize()
@@ -225,7 +227,9 @@ class HeadlessCameraProcessingWorker:
         self._last_frame_enqueued = False
         if self._configuration_guard is not None:
             self._configuration_guard()
-        configuration = await self._configurations.get(frame.camera_external_id)
+        configuration = await self._configurations.get_active_configuration(
+            frame.camera_external_id
+        )
         if configuration is None:
             raise RuntimeError("active camera region configuration became unavailable")
         ppe_region = next(
@@ -246,14 +250,14 @@ class HeadlessCameraProcessingWorker:
         # LIVE must not publish an obsolete view; REPLAY retains frame-boundary semantics.
         if (
             self._stream.config.is_live
-            and await self._configurations.get(frame.camera_external_id) is not configuration
+            and await self._configurations.get_active_configuration(frame.camera_external_id)
+            is not configuration
         ):
             return
         previous = (
             (
                 self._current_session_id,
-                self._current_ppe_geometry_version,
-                self._current_configuration_version,
+                self._current_configuration,
                 deepcopy(self._temporal_gate),
                 self._pipeline.checkpoint_temporal_state(),
             )
@@ -264,12 +268,10 @@ class HeadlessCameraProcessingWorker:
         try:
             if (
                 self._current_session_id != batch.session_id
-                or self._current_ppe_geometry_version != ppe_region.geometry_version
-                or self._current_configuration_version != configuration.configuration_version
+                or self._current_configuration is not configuration
             ):
                 self._current_session_id = batch.session_id
-                self._current_ppe_geometry_version = ppe_region.geometry_version
-                self._current_configuration_version = configuration.configuration_version
+                self._current_configuration = configuration
                 self._temporal_gate = TemporalPpeCandidateGate()
 
             event = self._pipeline.process(
@@ -332,7 +334,9 @@ class HeadlessCameraProcessingWorker:
                     self._configuration_guard()
                 if (
                     self._stream.config.is_live
-                    and await self._configurations.get(frame.camera_external_id)
+                    and await self._configurations.get_active_configuration(
+                        frame.camera_external_id
+                    )
                     is not configuration
                 ):
                     return
@@ -345,14 +349,12 @@ class HeadlessCameraProcessingWorker:
             if rollback and previous is not None:
                 (
                     session_id,
-                    geometry_version,
-                    configuration_version,
+                    previous_configuration,
                     temporal_gate,
                     pipeline_state,
                 ) = previous
                 self._current_session_id = session_id
-                self._current_ppe_geometry_version = geometry_version
-                self._current_configuration_version = configuration_version
+                self._current_configuration = previous_configuration
                 self._temporal_gate = temporal_gate
                 self._pipeline.restore_temporal_state(pipeline_state)
 

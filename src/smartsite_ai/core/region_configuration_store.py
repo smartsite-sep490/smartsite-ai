@@ -4,7 +4,6 @@ from enum import StrEnum
 from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.regions import (
-    CameraObservationRegionConfiguration,
     CameraRegionConfiguration,
 )
 
@@ -58,20 +57,7 @@ class RegionConfigurationStore:
     async def apply_bundle(
         self, bundle: CameraConfigurationBundle
     ) -> RegionConfigurationApplyOutcome:
-        projection = CameraRegionConfiguration(
-            schemaVersion=bundle.schema_version,
-            configurationVersion=bundle.configuration_version,
-            cameraExternalId=bundle.camera_external_id,
-            regions=tuple(
-                CameraObservationRegionConfiguration(
-                    regionId=region.region_id,
-                    geometryVersion=region.geometry_version,
-                    coordinateSpace=region.coordinate_space,
-                    polygon=region.polygon,
-                )
-                for region in bundle.regions
-            ),
-        )
+        projection = bundle.to_region_configuration()
         async with self._lock:
             current = self._snapshots.get(bundle.camera_external_id)
             if current is not None:
@@ -108,6 +94,16 @@ class RegionConfigurationStore:
         async with self._lock:
             current = self._snapshots.get(camera_external_id)
             return current[0] if current is not None else None
+
+    async def get_active_configuration(
+        self, camera_external_id: str
+    ) -> CameraRegionConfiguration | CameraConfigurationBundle | None:
+        """Read one immutable frame-boundary snapshot, retaining policy when present."""
+        async with self._lock:
+            current = self._snapshots.get(camera_external_id)
+            if current is None:
+                return None
+            return current[2] if current[2] is not None else current[0]
 
 
 __all__ = [

@@ -16,23 +16,32 @@ receipt. The legacy `fetch` method remains available to existing explicit caller
 `CameraConfigurationPoller` now uses the bundle endpoint. The target Backend must
 provide it before this source is used. A successful response atomically stores
 the full bundle, including per-region Zone, policy revision and required PPE.
-The store retains a stable geometry projection for current processing callers;
-it replaces that projection when the full bundle changes, even if the polygon
-does not. Geometry-only updates cannot overwrite a loaded policy bundle.
+The store retains a stable geometry projection for explicit legacy callers and
+returns the whole bundle atomically to the headless frame worker. Either active
+snapshot changes identity when policy changes, even if the polygon does not.
+Geometry-only updates cannot overwrite a loaded policy bundle.
+
+With a full bundle, the pipeline evaluates configured PPE independently in every
+region, retaining each observation's region and geometry version. Empty requirements
+disable only that binding; they do not cancel overlapping regions. Unsupported or
+unobserved PPE stays unknown without inventing missing evidence. Geometry-only
+snapshots retain the legacy single-PPE-region behavior. Existing MF06 geometry
+selection and Backend ownership of permissions and violations remain unchanged.
 
 Configuration and captured-view versions cannot regress. Changing content at the
 same configuration version or changing the camera UUID behind an existing bundle
 is a conflict. An identical bundle preserves object identity. A legacy snapshot
 can upgrade at the same version only when its geometry matches the bundle.
 
-The frame worker resets temporal PPE confirmation when configuration version
-changes, as well as when session or geometry changes. Frames from two policy
-versions cannot accumulate into one confirmation. Its live-frame rollback also
-restores the configuration version after a discarded frame.
+The frame worker resets temporal PPE confirmation when the immutable active
+snapshot changes or a new stream session starts. This includes a same-version
+legacy-to-bundle upgrade; an idempotent read preserves the snapshot identity.
+Frames from different policy contexts cannot accumulate into one confirmation.
+Live-frame rollback also restores the previous snapshot after a discarded frame.
 
 The poller/runtime do not yet send application ACKs, provision worker generations, verify
 physical camera pose, qualify a model or establish production acceptance. Operator
-credential injection, ACK delivery, final contract vendoring and actual paired
+credential injection, automatic ACK delivery, final contract vendoring and actual paired
 runtime evidence remain release gates. No camera or model is started by import or
 by the focused unit checks.
 

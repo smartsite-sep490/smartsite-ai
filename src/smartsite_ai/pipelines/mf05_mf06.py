@@ -3,6 +3,7 @@
 from typing import Literal
 from uuid import UUID
 
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.observations import (
     FrameDimensions,
     PersonObservation,
@@ -53,7 +54,7 @@ class Mf05Mf06Pipeline:
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
         event_id: str,
     ) -> TechnicalObservationEvent | None:
         """Create one technical event, or ``None`` when no person is observable."""
@@ -87,12 +88,23 @@ class Mf05Mf06Pipeline:
             )
             for person in tracked_frame.persons
         )
-        ppe_observations = self._ppe.process(tracked_frame, ppe_region)
-        restricted_zone_configuration = region_configuration.model_copy(
+        if isinstance(region_configuration, CameraConfigurationBundle):
+            ppe_observations = tuple(
+                observation
+                for region in region_configuration.regions
+                if region.required_ppe
+                for observation in self._ppe.process(tracked_frame, region)
+                if observation.ppe_item in region.required_ppe
+            )
+            geometry_configuration = region_configuration.to_region_configuration()
+        else:
+            ppe_observations = self._ppe.process(tracked_frame, ppe_region)
+            geometry_configuration = region_configuration
+        restricted_zone_configuration = geometry_configuration.model_copy(
             update={
                 "regions": tuple(
                     region
-                    for region in region_configuration.regions
+                    for region in geometry_configuration.regions
                     if region.region_id.casefold() != self._ppe_region_id
                 )
             }

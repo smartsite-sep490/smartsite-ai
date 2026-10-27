@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from uuid import UUID
 
 from smartsite_ai.config import Settings
 from smartsite_ai.inference.loading import load_warmed_yolo11_detector
@@ -22,6 +23,7 @@ from smartsite_ai.runtime.assembly import (
     close_configuration_clients,
     preflight_manifest,
 )
+from smartsite_ai.runtime.generation_manifest import bind_generation_manifest
 from smartsite_ai.runtime.inference_lane import share_detector
 from smartsite_ai.runtime.manifest import (
     CameraRuntimeError,
@@ -46,14 +48,27 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="absolute path of the 1-3 camera runtime manifest",
     )
+    parser.add_argument("--generation-credential-file", type=Path)
+    parser.add_argument("--expected-camera-id", type=UUID)
+    parser.add_argument("--expected-outbox", type=Path)
     return parser
 
 
-async def run_manifest(manifest_path: Path, *, settings: Settings | None = None) -> int:
+async def run_manifest(
+    manifest_path: Path,
+    *,
+    settings: Settings | None = None,
+    generation_credential_file: Path | None = None,
+    expected_camera_id: UUID | None = None,
+    expected_outbox: Path | None = None,
+) -> int:
     runtime_settings = settings or Settings()
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())
+    manifest = bind_generation_manifest(
+        manifest, generation_credential_file, expected_camera_id, expected_outbox
+    )
     bound = bind_manifest(manifest, os.environ)
     plans: list[CameraPlan] = []
     backend_clients: list[BackendClient] = []
@@ -132,6 +147,22 @@ async def run_manifest(manifest_path: Path, *, settings: Settings | None = None)
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if any(
+            value is not None
+            for value in (
+                args.generation_credential_file,
+                args.expected_camera_id,
+                args.expected_outbox,
+            )
+        ):
+            return asyncio.run(
+                run_manifest(
+                    args.manifest,
+                    generation_credential_file=args.generation_credential_file,
+                    expected_camera_id=args.expected_camera_id,
+                    expected_outbox=args.expected_outbox,
+                )
+            )
         return asyncio.run(run_manifest(args.manifest))
     except KeyboardInterrupt:
         return 130

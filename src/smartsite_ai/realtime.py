@@ -37,6 +37,7 @@ from smartsite_ai.pipelines.ppe_temporal import (
     events_for_delivery,
 )
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.realtime_configuration import RealtimeConfigurationState, read_configuration
 from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
@@ -330,11 +331,10 @@ def _load_realtime_stack(
     if profile.experimental and tuple(sorted(class_map.items())) != profile.class_map:
         raise ValueError("realtime taxonomy contradicts native-ppe-10 profile")
     # Validate configuration before allocating a provider/GPU resource.
-    configuration = CameraRegionConfiguration.from_wire_bytes(
-        Path(settings.realtime_region_configuration_path).read_bytes()
-    )
+    configuration = read_configuration(Path(settings.realtime_region_configuration_path))
     if configuration.camera_external_id != settings.realtime_camera_external_id:
         raise ValueError("realtime camera id does not match the region configuration")
+    RealtimeConfigurationState(configuration, settings.realtime_ppe_region_id)
     pipeline = Mf05Mf06Pipeline(
         tracker=IoUPersonTracker(),
         ppe=PpePipeline.for_model_profile(profile),
@@ -473,6 +473,11 @@ async def stream_realtime(
             )
             return
         gate_tracker = RealtimeStreamGateTracker()
+        configuration_state = (
+            RealtimeConfigurationState(configuration, settings.realtime_ppe_region_id)
+            if settings.realtime_region_configuration_reload
+            else None
+        )
         failures = 0
         recovery = LiveSourceRecovery(
             settings.realtime_live_reconnect_attempts if not replay_file else 0
@@ -520,6 +525,13 @@ async def stream_realtime(
                 continue
             failures = 0
             recovery.observed_frame()
+            if configuration_state is not None:
+                replacement = await asyncio.to_thread(
+                    read_configuration, Path(settings.realtime_region_configuration_path)
+                )
+                if configuration_state.apply(replacement):
+                    gate_tracker.reset()
+                configuration = configuration_state.configuration
             batch = await detector.detect(envelope)
             if isinstance(frame_source, LiveLatestFrameSource) and not frame_source.is_connected:
                 continue

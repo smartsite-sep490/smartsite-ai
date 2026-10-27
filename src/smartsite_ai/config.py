@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     realtime_camera_external_id: str = "ppe-demo"
     realtime_class_map_path: str | None = None
     realtime_region_configuration_path: str | None = None
+    realtime_region_configuration_reload: bool = False
     realtime_ppe_region_id: str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
     realtime_model_artifact_id: str = "ansarimajid-construction-ppe-yolov8-reference"
     realtime_model_version: str = "8139436e91aecb109362e13cacfea44a16e08358"

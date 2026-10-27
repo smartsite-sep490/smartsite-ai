@@ -272,6 +272,8 @@ class _Gate:
                 session_id=session_id,
                 track_id=active_track_ids[0],
                 ppe_item="HARD_HAT",
+                region_id=REGION_ID,
+                geometry_version=1,
                 first_seen_at=observed_at,
                 confirmed_at=observed_at,
             ),

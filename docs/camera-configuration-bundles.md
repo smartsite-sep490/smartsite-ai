@@ -44,3 +44,11 @@ and outcome. Transient retries reuse identical bytes; semantic/auth conflicts
 are not retried. An idempotent receipt retains the original server receipt time.
 The response contains no generation credential. Automatic invocation must wait
 for runtime policy/capability validation and operator generation/session binding.
+
+## Region-bound temporal confirmation
+
+PPE confirmation, clearing and cooldown are scoped to stream session, person track,
+PPE item, region ID and geometry version. Consecutive missing evidence from one
+region cannot confirm another region or a revised polygon. Delivery also matches
+the candidate's exact region geometry. This internal binding does not change event
+schemas, infer identity, authorize access or establish model accuracy.

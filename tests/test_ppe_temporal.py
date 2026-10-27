@@ -180,6 +180,8 @@ def test_confirmation_at_third_consecutive_missing_observation() -> None:
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=t0,
         confirmed_at=t_confirm,
     )
@@ -978,6 +980,8 @@ def test_filter_event_for_delivery_mixed_event_without_leaking_raw_missing() -> 
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC) - timedelta(milliseconds=400),
         confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
@@ -1214,6 +1218,8 @@ def test_delivery_filtering_rejects_candidate_from_different_session() -> None:
         session_id=session_b,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
         confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
@@ -1233,6 +1239,8 @@ def test_delivery_filter_rejects_ppe_confirmation_from_a_different_frame(delta: 
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=t0 - timedelta(seconds=1),
         confirmed_at=t0 + delta,
     )
@@ -1261,6 +1269,8 @@ def test_delivery_filter_matches_the_exact_instant_not_timestamp_spelling(captur
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=t0 - timedelta(milliseconds=400),
         confirmed_at=t0,
     )
@@ -1289,6 +1299,8 @@ def test_unrepresentable_event_time_cannot_reuse_confirmation_but_keeps_zone(
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=t0,
         confirmed_at=t0,
     )
@@ -1313,6 +1325,8 @@ def test_stale_ppe_confirmation_does_not_poison_current_item_or_zone_evidence() 
             session_id=SESSION_ID,
             track_id=1,
             ppe_item="HARD_HAT",
+            region_id=REGION_ID,
+            geometry_version=1,
             first_seen_at=t0 - timedelta(seconds=1),
             confirmed_at=t0 - timedelta(microseconds=1),
         ),
@@ -1321,6 +1335,8 @@ def test_stale_ppe_confirmation_does_not_poison_current_item_or_zone_evidence() 
             session_id=SESSION_ID,
             track_id=1,
             ppe_item="SAFETY_VEST",
+            region_id=REGION_ID,
+            geometry_version=1,
             first_seen_at=t0 - timedelta(milliseconds=400),
             confirmed_at=t0,
         ),
@@ -1346,6 +1362,8 @@ def test_invalid_candidate_time_cannot_confirm_ppe(invalid_time: str) -> None:
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=first_seen_at,
         confirmed_at=t0.replace(tzinfo=None) if invalid_time == "naive_confirmed" else t0,
     )
@@ -1460,7 +1478,7 @@ def test_expired_same_session_cooldowns_and_states_are_pruned_across_new_track_i
             observations=(ppe_obs(track_id, "HARD_HAT", "MISSING"),),
         )
         assert [candidate.track_id for candidate in candidates] == [track_id]
-        assert set(gate._cooldowns) == {(STREAM_ID, SESSION_ID, track_id, "HARD_HAT")}
+        assert set(gate._cooldowns) == {(STREAM_ID, SESSION_ID, track_id, "HARD_HAT", REGION_ID, 1)}
 
     assert (
         gate.update(
@@ -1486,8 +1504,8 @@ def test_cooldown_expiry_preserves_other_session_clock() -> None:
     t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
     other_stream = "stream-02"
     other_session = UUID("00000000-0000-4000-8000-000000000002")
-    primary_key = (STREAM_ID, SESSION_ID, 1, "HARD_HAT")
-    other_key = (other_stream, other_session, 1, "HARD_HAT")
+    primary_key = (STREAM_ID, SESSION_ID, 1, "HARD_HAT", REGION_ID, 1)
+    other_key = (other_stream, other_session, 1, "HARD_HAT", REGION_ID, 1)
 
     assert (
         len(

@@ -18,6 +18,8 @@ class ConfirmedPpeCandidate:
     session_id: UUID
     track_id: int
     ppe_item: PpeItem
+    region_id: str
+    geometry_version: int
     first_seen_at: datetime
     confirmed_at: datetime
 
@@ -57,8 +59,8 @@ class TemporalPpeCandidateGate:
         self._track_expiry = track_expiry
 
         self._last_observed_at: dict[tuple[str, UUID], datetime] = {}
-        self._states: dict[tuple[str, UUID, int, PpeItem], _TrackItemState] = {}
-        self._cooldowns: dict[tuple[str, UUID, int, PpeItem], datetime] = {}
+        self._states: dict[tuple[str, UUID, int, PpeItem, str, int], _TrackItemState] = {}
+        self._cooldowns: dict[tuple[str, UUID, int, PpeItem, str, int], datetime] = {}
 
     def update(
         self,
@@ -103,12 +105,12 @@ class TemporalPpeCandidateGate:
                             state.consecutive_missing = 0
                             state.first_seen_at = None
 
-        obs_by_track_item: dict[tuple[int, PpeItem], PpeObservation] = {}
-        conflicting_items: set[tuple[int, PpeItem]] = set()
+        obs_by_track_item: dict[tuple[int, PpeItem, str, int], PpeObservation] = {}
+        conflicting_items: set[tuple[int, PpeItem, str, int]] = set()
         for obs in observations:
             if obs.type != "PPE":
                 continue
-            key = (obs.track_id, obs.ppe_item)
+            key = (obs.track_id, obs.ppe_item, obs.region_id.casefold(), obs.geometry_version)
             if key in conflicting_items:
                 continue
             previous = obs_by_track_item.get(key)
@@ -121,11 +123,22 @@ class TemporalPpeCandidateGate:
             else:
                 obs_by_track_item[key] = obs
 
+        # Missing evidence and cooldown belong to one immutable region geometry.
+        bindings = (
+            set(obs_by_track_item)
+            | conflicting_items
+            | {key[2:] for key in self._states if key[:2] == stream_key}
+        )
         confirmed_candidates: list[ConfirmedPpeCandidate] = []
         for track_id in unique_active_track_ids:
-            for item in PPE_ITEMS:
-                state_key = (stream_id, session_id, track_id, item)
-                obs = obs_by_track_item.get((track_id, item))
+            track_bindings = sorted(
+                (key for key in bindings if key[0] == track_id),
+                key=lambda key: (PPE_ITEMS.index(key[1]), key[2], key[3]),
+            )
+            for binding in track_bindings:
+                _, item, region_id, geometry_version = binding
+                state_key = (stream_id, session_id, *binding)
+                obs = obs_by_track_item.get(binding)
                 state = self._states.get(state_key)
 
                 # Reappearance expiry: if active track reappears after > track_expiry
@@ -158,6 +171,8 @@ class TemporalPpeCandidateGate:
                                 session_id=session_id,
                                 track_id=track_id,
                                 ppe_item=item,
+                                region_id=region_id,
+                                geometry_version=geometry_version,
                                 first_seen_at=state.first_seen_at,
                                 confirmed_at=observed_at,
                             )
@@ -202,7 +217,7 @@ class TemporalPpeCandidateGate:
         active = set(active_track_ids)
         return frozenset(
             (track_id, item)
-            for (state_stream, state_session, track_id, item), state in self._states.items()
+            for (state_stream, state_session, track_id, item, _, _), state in self._states.items()
             if state_stream == stream_id
             and state_session == session_id
             and track_id in active
@@ -237,14 +252,14 @@ def filter_event_for_delivery(
     Returns an event containing:
     - PERSON, ZONE_ENTRY, and other non-PPE observations unchanged.
     - PPE observations with status PRESENT unchanged.
-    - PPE observations with status MISSING only when (track_id, ppe_item) matches
+    - PPE observations with status MISSING only when track, item and region geometry match
       a confirmed candidate belonging to this event's stream session and capture instant.
     - Returns None if no deliverable trigger (ZONE_ENTRY or confirmed PPE/MISSING) remains.
     """
 
     event_session_id = UUID(event.stream_session_id)
     captured_at = _event_capture_time(event.captured_at)
-    confirmed_keys: set[tuple[int, PpeItem]] = set()
+    confirmed_keys: set[tuple[int, PpeItem, str, int]] = set()
     if captured_at is not None:
         for candidate in confirmed_ppe_candidates:
             if (
@@ -259,7 +274,14 @@ def filter_event_for_delivery(
             except (ValueError, OverflowError):
                 continue
             if confirmed_at == captured_at and first_seen_at <= confirmed_at:
-                confirmed_keys.add((candidate.track_id, candidate.ppe_item))
+                confirmed_keys.add(
+                    (
+                        candidate.track_id,
+                        candidate.ppe_item,
+                        candidate.region_id.casefold(),
+                        candidate.geometry_version,
+                    )
+                )
 
     filtered_observations = []
     has_deliverable_trigger = False
@@ -271,7 +293,11 @@ def filter_event_for_delivery(
         elif obs.type == "PPE":
             if obs.status == "PRESENT":
                 filtered_observations.append(obs)
-            elif obs.status == "MISSING" and (obs.track_id, obs.ppe_item) in confirmed_keys:
+            elif (
+                obs.status == "MISSING"
+                and (obs.track_id, obs.ppe_item, obs.region_id.casefold(), obs.geometry_version)
+                in confirmed_keys
+            ):
                 filtered_observations.append(obs)
                 has_deliverable_trigger = True
         else:

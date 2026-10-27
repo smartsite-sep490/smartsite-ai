@@ -349,6 +349,8 @@ def test_should_post_event_gating_behavior() -> None:
         session_id=UUID("00000000-0000-4000-8000-000000000001"),
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id="f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+        geometry_version=1,
         first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
         confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
     )

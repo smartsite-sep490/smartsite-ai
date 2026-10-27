@@ -1,5 +1,5 @@
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
@@ -98,7 +98,7 @@ def test_actual_stream_recovers_new_session_without_model_reload(monkeypatch, re
             stream_id="s",
             camera_external_id="camera-1",
             session_id=UUID(int=session),
-            captured_at=datetime.now(UTC),
+            captured_at=datetime(2026, 10, 28, tzinfo=UTC) + timedelta(milliseconds=100 * sequence),
             sequence_number=sequence,
             width=4,
             height=2,

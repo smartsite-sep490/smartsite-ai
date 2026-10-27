@@ -157,17 +157,15 @@ def test_encoder_failure_clears_previously_visible_pixels():
         try:
             media.offer(frame(1))
             await asyncio.wait_for(first.wait(), 2)
-            for _ in range(100):
-                if media.latest() is not None:
-                    break
-                await asyncio.sleep(0)
+            async with asyncio.timeout(2):
+                while media.latest() is None:
+                    await asyncio.sleep(0.001)
             assert media.latest() is not None
             media.offer(frame(2))
             await asyncio.wait_for(failed.wait(), 2)
-            for _ in range(100):
-                if media.latest() is None:
-                    break
-                await asyncio.sleep(0)
+            async with asyncio.timeout(2):
+                while media.latest() is not None:
+                    await asyncio.sleep(0.001)
             assert media.latest() is None
         finally:
             await media.close()

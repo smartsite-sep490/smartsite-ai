@@ -30,8 +30,17 @@ changes, as well as when session or geometry changes. Frames from two policy
 versions cannot accumulate into one confirmation. Its live-frame rollback also
 restores the configuration version after a discarded frame.
 
-These changes do not send application ACKs, provision worker generations, verify
+The poller/runtime do not yet send application ACKs, provision worker generations, verify
 physical camera pose, qualify a model or establish production acceptance. Operator
 credential injection, ACK delivery, final contract vendoring and actual paired
 runtime evidence remain release gates. No camera or model is started by import or
 by the focused unit checks.
+
+The explicit `acknowledge_configuration` client method validates the canonical
+request and requires a `SecretStr` containing the exact 43-character generation
+credential, alongside the existing service bearer token. It sends at most4096
+bytes and accepts a bounded receipt bound to command ID, configuration version
+and outcome. Transient retries reuse identical bytes; semantic/auth conflicts
+are not retried. An idempotent receipt retains the original server receipt time.
+The response contains no generation credential. Automatic invocation must wait
+for runtime policy/capability validation and operator generation/session binding.

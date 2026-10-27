@@ -18,6 +18,40 @@ CAP_PROP_FPS = 5
 DEFAULT_REPLAY_FPS = 30.0
 
 
+class _CaptureReleaseError(SourceConnectionError):
+    """Native release failed; cancellation cannot establish safe cleanup."""
+
+
+async def _drain_native_call(
+    operation: Callable[..., Any],
+    *args: Any,
+    discard_on_cancel: Callable[[Any], Awaitable[None]] | None = None,
+) -> Any:
+    """Keep the caller's I/O lock until native work ends, even after cancellation."""
+    task = asyncio.create_task(asyncio.to_thread(operation, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            break  # Retrieve the native failure below without losing caller cancellation.
+    try:
+        result = task.result()
+    except _CaptureReleaseError:
+        raise
+    except BaseException:
+        if cancelled:
+            raise asyncio.CancelledError from None
+        raise
+    if cancelled:
+        if discard_on_cancel is not None:
+            await discard_on_cancel(result)
+        raise asyncio.CancelledError
+    return result
+
+
 class OpenCvFrameSource:
     """FrameSource implementation backed by ``cv2.VideoCapture``.
 
@@ -34,6 +68,7 @@ class OpenCvFrameSource:
     ) -> None:
         self.config = config
         self._capture: Any | None = None
+        self._release_error: str | None = None
         self._session_id: UUID | None = None
         self._session_start: datetime | None = None
         self._sequence_number = 0
@@ -98,11 +133,15 @@ class OpenCvFrameSource:
 
         return capture
 
-    @staticmethod
-    def _release_capture(capture: Any) -> None:
-        release = getattr(capture, "release", None)
-        if release is not None:
-            release()
+    def _release_capture(self, capture: Any) -> None:
+        try:
+            release = getattr(capture, "release", None)
+            if release is not None:
+                release()
+        except Exception as exc:
+            # A failed release may be partial; never retry or reopen implicitly.
+            self._release_error = f"OpenCV failed to release video source: {type(exc).__name__}"
+            raise _CaptureReleaseError(self._release_error) from exc
 
     @staticmethod
     def _frame_interval_ms(capture: Any) -> float:
@@ -172,22 +211,16 @@ class OpenCvFrameSource:
 
     async def connect(self) -> None:
         """Open the configured video source and start a fresh stream session."""
-        await self.close()
-        cv2 = await asyncio.to_thread(self._load_cv2)
-        capture = await asyncio.to_thread(self._open_capture, cv2)
-        try:
-            interval_task = asyncio.create_task(
-                asyncio.to_thread(self._frame_interval_ms, capture),
-                name=f"opencv-fps-{self.config.stream_id}",
+        async with self._io_lock:
+            await self._close_locked()
+            cv2 = await asyncio.to_thread(self._load_cv2)
+            capture = await _drain_native_call(
+                self._open_capture, cv2, discard_on_cancel=self._release_native_capture
             )
             try:
-                fallback_frame_interval_ms = await asyncio.shield(interval_task)
-            except asyncio.CancelledError:
-                # A to_thread call keeps running after its waiter is cancelled.
-                # Wait for the metadata read to finish before releasing capture.
-                await asyncio.shield(interval_task)
-                raise
-            async with self._io_lock:
+                fallback_frame_interval_ms = await _drain_native_call(
+                    self._frame_interval_ms, capture
+                )
                 self._capture = capture
                 self._session_id = uuid4()
                 self._session_start = datetime.now(UTC)
@@ -200,9 +233,9 @@ class OpenCvFrameSource:
                 self._fallback_frame_interval_ms = fallback_frame_interval_ms
                 self._is_connected = True
                 capture = None
-        finally:
-            if capture is not None:
-                await asyncio.to_thread(self._release_capture, capture)
+            finally:
+                if capture is not None:
+                    await self._release_native_capture(capture)
 
     async def read_frame(self) -> FrameEnvelope | None:
         """Read one decoded BGR24 frame from the connected source."""
@@ -212,7 +245,7 @@ class OpenCvFrameSource:
                 raise SourceReadError("OpenCV source is not connected")
 
             try:
-                ok, frame = await asyncio.to_thread(self._capture.read)
+                ok, frame = await _drain_native_call(self._capture.read)
             except Exception as exc:
                 raise SourceReadError(f"OpenCV failed to read frame: {type(exc).__name__}") from exc
 
@@ -227,7 +260,7 @@ class OpenCvFrameSource:
                         "OpenCV capture is missing 'get' method for media timestamps"
                     )
                 try:
-                    raw_pos = await asyncio.to_thread(get_fn, CAP_PROP_POS_MSEC)
+                    raw_pos = await _drain_native_call(get_fn, CAP_PROP_POS_MSEC)
                 except Exception as exc:
                     raise SourceReadError(
                         f"OpenCV failed to read media timestamp: {type(exc).__name__}"
@@ -291,19 +324,22 @@ class OpenCvFrameSource:
     async def close(self) -> None:
         """Release the source if it has been connected."""
         async with self._io_lock:
-            capture = self._capture
-            self._capture = None
-            self._is_connected = False
-            self._replay_wall_start = None
-            self._replay_media_start_ms = None
-            self._last_replay_media_ms = None
-            self._last_raw_media_ms = None
-            self._last_effective_media_ms = None
-            self._fallback_frame_interval_ms = 1000.0 / DEFAULT_REPLAY_FPS
+            await self._close_locked()
+
+    async def _close_locked(self) -> None:
+        if self._release_error is not None:
+            raise _CaptureReleaseError(self._release_error)
+        capture = self._capture
+        self._capture = None
+        self._is_connected = False
+        self._replay_wall_start = None
+        self._replay_media_start_ms = None
+        self._last_replay_media_ms = None
+        self._last_raw_media_ms = None
+        self._last_effective_media_ms = None
+        self._fallback_frame_interval_ms = 1000.0 / DEFAULT_REPLAY_FPS
         if capture is not None:
-            try:
-                await asyncio.to_thread(self._release_capture, capture)
-            except Exception as exc:
-                raise SourceConnectionError(
-                    f"OpenCV failed to release video source: {type(exc).__name__}"
-                ) from exc
+            await self._release_native_capture(capture)
+
+    async def _release_native_capture(self, capture: Any) -> None:
+        await _drain_native_call(self._release_capture, capture)

@@ -6,9 +6,8 @@ import importlib
 import io
 
 import pytest
+from configuration_capture_fakes import frame
 from PIL import Image
-
-from tests.configuration_capture_fakes import frame
 
 
 def test_encoder_produces_decodable_jpeg_with_matching_hash_and_original_lineage():

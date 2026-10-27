@@ -10,12 +10,11 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from configuration_capture_fakes import NOW, FakeSource, finish, frame, until
 from fastapi import FastAPI
 from PIL import Image
 from pydantic import SecretStr
-
-from tests.configuration_capture_fakes import NOW, FakeSource, finish, frame, until
-from tests.test_configuration_capture import capture_pair
+from test_configuration_capture import capture_pair
 
 TOKEN = "synthetic-service-token-for-configuration-tests"
 PATH = "/v1/realtime/configuration-image"

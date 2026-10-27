@@ -27,3 +27,12 @@ on uncommitted configuration and remain separate with working bytes preserved.
 The HTTP test stages only the identity-endpoint assertion, retaining local preview
 endpoint expectations unstaged. Full CI must rerun; no Main merge, deployment,
 canonical vendoring, runtime activation, cloud storage or production acceptance.
+
+The next CI runfba53b5 reached pytest and exposed tests.* imports that depend on
+running python -m pytest. Reproduced with the installed pytest entry point: five
+collection errors, then one deferred function-local import in the host test. Six
+configuration tests now import same-directory fixtures like the existing suite.
+No sys.path mutation, new package or relaxed collection mode. Keep the startup,
+scope, drain/cancellation and lock-retention assertions unchanged. Entry-point
+pytest is the authoritative local reproduction; earlier module-entry passes did
+not cover this import environment.

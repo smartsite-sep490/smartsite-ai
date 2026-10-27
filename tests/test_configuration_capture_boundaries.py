@@ -7,9 +7,8 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-
-from tests.configuration_capture_fakes import NOW, finish, frame, until
-from tests.test_configuration_capture import capture_pair
+from configuration_capture_fakes import NOW, finish, frame, until
+from test_configuration_capture import capture_pair
 
 
 def test_newer_invalid_timestamp_cannot_resurrect_an_older_inflight_encode():

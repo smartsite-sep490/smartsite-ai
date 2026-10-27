@@ -327,8 +327,9 @@ def test_cli_boundary_sanitizes_an_unexpected_exception(tmp_path, monkeypatch, c
 
 def test_real_runtime_drain_retains_lock_and_native_read_after_server_ends(tmp_path):
     module = api()
+    from configuration_capture_fakes import FakeSource, until
+
     from smartsite_ai.configuration_runtime import ConfigurationCaptureRuntime
-    from tests.configuration_capture_fakes import FakeSource, until
 
     async def scenario():
         cfg = configuration(tmp_path)

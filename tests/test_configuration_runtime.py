@@ -8,10 +8,10 @@ from uuid import UUID
 
 import httpx
 import pytest
+from configuration_capture_fakes import NOW, FakeSource, frame, until
 from pydantic import SecretStr
 
 from smartsite_ai.ingestion.config import StreamConfig
-from tests.configuration_capture_fakes import NOW, FakeSource, frame, until
 
 RESOURCE = UUID("e98f6475-0660-4c71-a466-4c93d1739ee0")
 TOKEN = SecretStr("synthetic-configuration-runtime-service-token")

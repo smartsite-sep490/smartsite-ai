@@ -9,8 +9,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-
-from tests.configuration_capture_fakes import NOW, FakeSource, finish, frame, until
+from configuration_capture_fakes import NOW, FakeSource, finish, frame, until
 
 
 def capture_pair(source=None, *, kind="LIVE", clock=None, encoder=None):

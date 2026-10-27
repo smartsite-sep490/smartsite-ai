@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-ExperimentalPpeProfile = Literal["native-ppe-10"]
+ExperimentalPpeProfile = Literal["native-ppe-10", "unified-ppe-15"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,3 +49,43 @@ NATIVE_PPE_10_PROFILE = PpeModelProfile(
     explicit_missing_items=("HARD_HAT", "GLOVES", "BOOTS", "GOGGLES"),
     experimental=True,
 )
+
+# Eight detector object families; only the existing five wearer observation
+# families are eligible for the immutable technical ingestion contract.
+UNIFIED_PPE_15_PROFILE = PpeModelProfile(
+    name="unified-ppe-15",
+    class_map=tuple(
+        enumerate(
+            (
+                "Person",
+                "Hardhat",
+                "NO-Hardhat",
+                "Safety Vest",
+                "NO-Safety Vest",
+                "Gloves",
+                "NO-Gloves",
+                "Boots",
+                "NO-Boots",
+                "Goggles",
+                "NO-Goggles",
+                "Mask",
+                "NO-Mask",
+                "fullbody-Harness",
+                "Lanyard-Hook",
+            )
+        )
+    ),
+    present_items=NATIVE_PPE_10_PROFILE.present_items,
+    explicit_missing_items=("HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES"),
+    experimental=True,
+)
+
+
+def experimental_ppe_profile(name: ExperimentalPpeProfile | None) -> PpeModelProfile:
+    if name is None:
+        return LEGACY_PPE_5_PROFILE
+    if name == "native-ppe-10":
+        return NATIVE_PPE_10_PROFILE
+    if name == "unified-ppe-15":
+        return UNIFIED_PPE_15_PROFILE
+    raise ValueError("unsupported experimental PPE profile")

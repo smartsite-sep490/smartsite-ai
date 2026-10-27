@@ -14,9 +14,8 @@ from smartsite_ai.core.region_configuration_store import RegionConfigurationStor
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.ppe_profiles import (
-    LEGACY_PPE_5_PROFILE,
-    NATIVE_PPE_10_PROFILE,
     ExperimentalPpeProfile,
+    experimental_ppe_profile,
 )
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
@@ -137,13 +136,13 @@ def assemble_sessions(
 
     if not 1 <= len(plans) <= 3:
         raise CameraRuntimeError("runtime requires 1 to 3 cameras")
-    if experimental_model_profile not in (None, "native-ppe-10"):
+    if experimental_model_profile not in (None, "native-ppe-10", "unified-ppe-15"):
         raise CameraRuntimeError("unsupported experimental PPE profile")
     if observation_schema_version not in ("1.0.0", "1.1.0"):
         raise CameraRuntimeError("unsupported observation schema version")
     if experimental_model_profile is not None and observation_schema_version != "1.1.0":
         raise CameraRuntimeError("expanded PPE requires a configured v1.1.0 consumer")
-    profile = NATIVE_PPE_10_PROFILE if experimental_model_profile else LEGACY_PPE_5_PROFILE
+    profile = experimental_ppe_profile(experimental_model_profile)
     sessions: list[CameraSession] = []
     for plan in plans:
         camera = plan.bound

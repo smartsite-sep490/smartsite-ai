@@ -19,6 +19,52 @@ NATIVE_MAP = {
     "9": "NO-Goggles",
 }
 
+UNIFIED_MAP = dict(
+    enumerate(
+        (
+            "Person",
+            "Hardhat",
+            "NO-Hardhat",
+            "Safety Vest",
+            "NO-Safety Vest",
+            "Gloves",
+            "NO-Gloves",
+            "Boots",
+            "NO-Boots",
+            "Goggles",
+            "NO-Goggles",
+            "Mask",
+            "NO-Mask",
+            "fullbody-Harness",
+            "Lanyard-Hook",
+        )
+    )
+)
+
+
+def test_unified_profile_requires_explicit_opt_in_and_preserves_all_class_ids(tmp_path):
+    classes = {str(key): value for key, value in UNIFIED_MAP.items()}
+    path = document(tmp_path, classes)
+    with pytest.raises(ArtifactValidationError, match="five canonical"):
+        load_artifact_spec(path)
+    spec = load_artifact_spec(path, experimental_profile="unified-ppe-15")
+    assert spec.class_map == tuple(UNIFIED_MAP.items())
+    assert spec.class_map[9] == (9, "Goggles")
+    assert spec.class_map[10] == (10, "NO-Goggles")
+
+
+@pytest.mark.parametrize("mutation", ["swap", "extra", "missing"])
+def test_unified_profile_rejects_wrong_taxonomy(tmp_path, mutation):
+    classes = {str(key): value for key, value in UNIFIED_MAP.items()}
+    if mutation == "swap":
+        classes["9"], classes["10"] = classes["10"], classes["9"]
+    elif mutation == "extra":
+        classes["15"] = "Other"
+    else:
+        del classes["14"]
+    with pytest.raises(ArtifactValidationError, match="unified-ppe-15 taxonomy"):
+        load_artifact_spec(document(tmp_path, classes), experimental_profile="unified-ppe-15")
+
 
 def document(tmp_path: Path, classes: dict[str, str]) -> Path:
     path = tmp_path / "artifact.json"

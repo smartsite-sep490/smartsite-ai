@@ -9,6 +9,7 @@ from smartsite_ai.inference.models import NormalizedBoundingBox, NormalizedDetec
 from smartsite_ai.inference.ppe_profiles import (
     LEGACY_PPE_5_PROFILE,
     NATIVE_PPE_10_PROFILE,
+    UNIFIED_PPE_15_PROFILE,
     PpeModelProfile,
 )
 from smartsite_ai.pipelines._geometry import (
@@ -110,7 +111,7 @@ class PpePipeline:
         """
         if profile == LEGACY_PPE_5_PROFILE:
             return cls()
-        if profile != NATIVE_PPE_10_PROFILE:
+        if profile not in (NATIVE_PPE_10_PROFILE, UNIFIED_PPE_15_PROFILE):
             raise ValueError("unsupported PPE model profile")
         present = {
             **DEFAULT_PPE_CLASS_NAMES,
@@ -124,6 +125,8 @@ class PpePipeline:
             "BOOTS": frozenset({"no-boots"}),
             "GOGGLES": frozenset({"no-goggles"}),
         }
+        if profile == UNIFIED_PPE_15_PROFILE:
+            missing["SAFETY_VEST"] = DEFAULT_MISSING_PPE_CLASS_NAMES["SAFETY_VEST"]
         return cls(class_names_by_item=present, missing_class_names_by_item=missing)
 
     def process(

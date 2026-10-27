@@ -33,6 +33,7 @@ from smartsite_ai.inference.artifacts import (
 from smartsite_ai.inference.ppe_profiles import (
     LEGACY_PPE_5_PROFILE,
     NATIVE_PPE_10_PROFILE,
+    UNIFIED_PPE_15_PROFILE,
     ExperimentalPpeProfile,
 )
 from smartsite_ai.inference.yolo import RawYoloDetection, Yolo11Detector
@@ -148,6 +149,10 @@ class _ArtifactSpecDocument(_StrictFrozenModel):
             expected = {str(key): name for key, name in NATIVE_PPE_10_PROFILE.class_map}
             if value != expected:
                 raise ValueError("classMap must match the exact native-ppe-10 taxonomy")
+        elif profile == "unified-ppe-15":
+            expected = {str(key): name for key, name in UNIFIED_PPE_15_PROFILE.class_map}
+            if value != expected:
+                raise ValueError("classMap must match the exact unified-ppe-15 taxonomy")
         else:
             raise ValueError("unsupported experimental PPE profile")
         return value
@@ -211,7 +216,7 @@ def load_artifact_spec(
     detector labels; it grants no model acceptance or expanded wire capability.
     """
 
-    if experimental_profile not in (None, "native-ppe-10"):
+    if experimental_profile not in (None, "native-ppe-10", "unified-ppe-15"):
         raise ArtifactValidationError("unsupported experimental PPE profile")
 
     raw = _read_bounded_json(path)

@@ -25,8 +25,12 @@ With a full bundle, the pipeline evaluates configured PPE independently in every
 region, retaining each observation's region and geometry version. Empty requirements
 disable only that binding; they do not cancel overlapping regions. Unsupported or
 unobserved PPE stays unknown without inventing missing evidence. Geometry-only
-snapshots retain the legacy single-PPE-region behavior. Existing MF06 geometry
-selection and Backend ownership of permissions and violations remain unchanged.
+snapshots retain the legacy single-PPE-region behavior. Full bundles emit technical
+Zone entries for every configured region, including a region also used for PPE.
+They do not require the legacy manifest PPE anchor to remain present. Both
+preflight paths accept an empty full bundle; it means no regions configured,
+not proof of a clear or compliant scene. Legacy geometry-only snapshots retain
+their anchor guard and exclusion. Backend still owns permissions and violations.
 
 Configuration and captured-view versions cannot regress. Changing content at the
 same configuration version or changing the camera UUID behind an existing bundle

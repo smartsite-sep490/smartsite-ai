@@ -71,7 +71,7 @@ class Mf05Mf06Pipeline:
             ),
             None,
         )
-        if ppe_region is None:
+        if ppe_region is None and not isinstance(region_configuration, CameraConfigurationBundle):
             raise ValueError(
                 f"PPE observation region {self._ppe_region_id!r} is not in the configuration"
             )
@@ -96,19 +96,19 @@ class Mf05Mf06Pipeline:
                 for observation in self._ppe.process(tracked_frame, region)
                 if observation.ppe_item in region.required_ppe
             )
-            geometry_configuration = region_configuration.to_region_configuration()
+            restricted_zone_configuration = region_configuration.to_region_configuration()
         else:
+            assert ppe_region is not None
             ppe_observations = self._ppe.process(tracked_frame, ppe_region)
-            geometry_configuration = region_configuration
-        restricted_zone_configuration = geometry_configuration.model_copy(
-            update={
-                "regions": tuple(
-                    region
-                    for region in geometry_configuration.regions
-                    if region.region_id.casefold() != self._ppe_region_id
-                )
-            }
-        )
+            restricted_zone_configuration = region_configuration.model_copy(
+                update={
+                    "regions": tuple(
+                        region
+                        for region in region_configuration.regions
+                        if region.region_id.casefold() != self._ppe_region_id
+                    )
+                }
+            )
         zone_observations = self._zones.process(tracked_frame, restricted_zone_configuration)
         observations = [*person_observations, *ppe_observations, *zone_observations]
         if not observations:

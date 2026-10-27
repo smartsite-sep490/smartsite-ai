@@ -232,15 +232,9 @@ class HeadlessCameraProcessingWorker:
         )
         if configuration is None:
             raise RuntimeError("active camera region configuration became unavailable")
-        ppe_region = next(
-            (
-                region
-                for region in configuration.regions
-                if region.region_id.casefold() == self._ppe_region_id
-            ),
-            None,
-        )
-        if ppe_region is None:
+        if isinstance(configuration, CameraRegionConfiguration) and not any(
+            region.region_id.casefold() == self._ppe_region_id for region in configuration.regions
+        ):
             raise RuntimeError("required PPE region is absent from active camera configuration")
 
         batch = await self._detector.detect(frame)

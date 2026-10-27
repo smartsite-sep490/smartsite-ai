@@ -17,6 +17,7 @@ from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker
 from smartsite_ai.tracking import IoUPersonTracker
 
 POLICY_REGION = "33333333-3333-4333-8333-333333333333"
+LEGACY_ANCHOR = "55555555-5555-4555-8555-555555555555"
 
 
 def bundle(version: int = 1) -> CameraConfigurationBundle:
@@ -96,9 +97,9 @@ async def test_headless_worker_delivers_policy_of_nonselected_region(tmp_path: P
                 tracker=IoUPersonTracker(),
                 ppe=PpePipeline(),
                 zones=RestrictedZonePipeline(),
-                ppe_region_id=REGION_ID,
+                ppe_region_id=LEGACY_ANCHOR,
             ),
-            ppe_region_id=REGION_ID,
+            ppe_region_id=LEGACY_ANCHOR,
             configurations=store,
             outbox=outbox,
             dispatcher=OutboxDispatcher(outbox, client),

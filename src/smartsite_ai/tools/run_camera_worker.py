@@ -10,6 +10,7 @@ from uuid import UUID
 
 from smartsite_ai.config import Settings
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.loading import load_warmed_yolo11_detector
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
@@ -108,9 +109,11 @@ async def _require_ppe_region(
     camera_external_id: str,
     ppe_region_id: UUID,
 ) -> None:
-    configuration = await store.get(camera_external_id)
+    configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraWorkerRunError("Backend returned no active camera region configuration")
+    if isinstance(configuration, CameraConfigurationBundle):
+        return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):
         raise CameraWorkerRunError(

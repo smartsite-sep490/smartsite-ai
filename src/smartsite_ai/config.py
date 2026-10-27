@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     realtime_live_latest_frame: bool = False
     realtime_live_reconnect_attempts: int = Field(default=0, ge=0, le=3)
     realtime_live_media_enabled: bool = False
+    realtime_recorded_media_enabled: bool = False
     realtime_device: str = Field(
         default="auto",
         pattern=r"^(?:auto|cpu|cuda(?::[0-9]+)?)$",

@@ -1,6 +1,7 @@
 """HTTP contract for the API process, independent of future inference workers."""
 
 import asyncio
+import hashlib
 import hmac
 import json
 import time
@@ -150,6 +151,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             media_type="application/x-ndjson",
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
             background=BackgroundTask(release_viewer),
+        )
+
+    @app.get("/v1/realtime/recorded-video", tags=["preview"])
+    async def recorded_video(request: Request, cameraExternalId: str = ""):
+        expected = settings.backend_service_token
+        authorization = request.headers.getlist("authorization")
+        if (
+            expected is None
+            or len(authorization) != 1
+            or not hmac.compare_digest(
+                authorization[0].encode(), ("Bearer " + expected.get_secret_value()).encode()
+            )
+        ):
+            raise HTTPException(401, "Preview source is not authorized")
+        if list(request.query_params.multi_items()) != [("cameraExternalId", cameraExternalId)]:
+            raise HTTPException(400, "Invalid preview request")
+        if cameraExternalId != settings.realtime_camera_external_id:
+            raise HTTPException(404, "Preview source is unavailable")
+        # Only an explicitly configured, bounded local MP4. No query paths or capture startup.
+        path = Path(settings.realtime_source or "")
+        if not settings.realtime_recorded_media_enabled or path.suffix.lower() != ".mp4":
+            raise HTTPException(503, "Recorded source is unavailable")
+
+        def load_video():
+            with path.open("rb") as file:
+                return file.read(2_000_001)
+
+        try:
+            payload = await asyncio.to_thread(load_video)
+        except OSError:
+            raise HTTPException(503, "Recorded source is unavailable") from None
+        if len(payload) > 2_000_000 or len(payload) < 12 or payload[4:8] != b"ftyp":
+            raise HTTPException(503, "Recorded source is unavailable")
+        return Response(
+            payload,
+            media_type="video/mp4",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "X-Camera-External-Id": cameraExternalId,
+                "X-Source-Sha256": hashlib.sha256(payload).hexdigest(),
+            },
         )
 
     @app.get("/v1/realtime/preview/latest", tags=["preview"])

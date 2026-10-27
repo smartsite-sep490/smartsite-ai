@@ -141,3 +141,73 @@ def test_reconnect_does_not_return_old_session_frame():
         await reader.close()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("enabled,expected", [(False, [0, 1]), (True, [0, 3])])
+def test_actual_realtime_pipeline_skips_backlog_only_when_explicitly_enabled(
+    monkeypatch, enabled, expected
+):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import WebSocketDisconnect
+
+    from smartsite_ai import realtime
+    from smartsite_ai.config import Settings
+    from smartsite_ai.inference.models import DetectionBatch
+
+    async def scenario():
+        source = Source()
+        session = uuid4()
+        source.items.put_nowait(frame(0, session))
+        detector, runner, pipeline = MagicMock(), MagicMock(), MagicMock()
+        reads = 0
+
+        async def detect(envelope):
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                for i in (1, 2, 3):
+                    source.items.put_nowait(frame(i, session))
+                await spin()  # camera keeps reading while fake inference works
+            return DetectionBatch.from_frame(
+                envelope,
+                model_artifact_id="fake",
+                model_version="test",
+                model_sha256="a" * 64,
+                detections=(),
+            )
+
+        detector.detect = detect
+        pipeline.observe.return_value = None
+        pipeline.occupied_zone_track_regions.return_value = frozenset()
+        monkeypatch.setattr(realtime, "OpenCvFrameSource", lambda config: source)
+        monkeypatch.setattr(
+            realtime,
+            "_load_realtime_stack",
+            MagicMock(return_value=(detector, runner, pipeline, None)),
+        )
+        sent = []
+
+        async def send(value):
+            if value["type"] == "frame":
+                sent.append(int(value["sequenceNumber"]))
+                if len(sent) == 2:
+                    source.items.put_nowait(None)
+                    raise WebSocketDisconnect()
+
+        socket = MagicMock(accept=AsyncMock(), close=AsyncMock(), send_json=send)
+        media = MagicMock()
+        await realtime.stream_realtime(
+            socket,
+            Settings(_env_file=None, realtime_source="0", realtime_live_latest_frame=enabled),
+            media_hub=media,
+        )
+        if enabled:
+            assert media.offer.call_count >= 4
+            assert media.clear.called
+        else:
+            media.offer.assert_not_called()
+        assert sent == expected
+        runner.close.assert_called_once()
+
+    asyncio.run(scenario())

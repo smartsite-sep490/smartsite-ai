@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     realtime_model_path: str | None = None
     realtime_artifact_spec_path: Path | None = None
     realtime_source: str | None = None
+    realtime_snapshot_enabled: bool = False
+    realtime_live_latest_frame: bool = False
+    realtime_live_media_enabled: bool = False
     realtime_device: str = Field(
         default="auto",
         pattern=r"^(?:auto|cpu|cuda(?::[0-9]+)?)$",
@@ -60,6 +63,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_expanded_consumer(self) -> "Settings":
+        if self.realtime_live_media_enabled and not self.realtime_live_latest_frame:
+            raise ValueError("raw LIVE media requires latest-frame capture")
         if self.realtime_artifact_spec_path is not None and (
             self.realtime_model_path is not None or self.realtime_class_map_path is not None
         ):

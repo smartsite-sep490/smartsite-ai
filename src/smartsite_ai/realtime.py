@@ -7,12 +7,12 @@ import json
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocketDisconnect
 from PIL import Image
 
 from smartsite_ai.config import Settings
@@ -24,9 +24,11 @@ from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.live_latest_source import LiveLatestFrameSource
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
+from smartsite_ai.media_preview import MediaPreviewHub
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.ppe_temporal import (
@@ -40,6 +42,14 @@ from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 _RealtimeStack = tuple[
     Yolo11Detector, UltralyticsYoloRunner, Mf05Mf06Pipeline, CameraRegionConfiguration
 ]
+
+
+class RealtimePreviewSink(Protocol):
+    async def accept(self) -> None: ...
+
+    async def send_json(self, data: Any) -> None: ...
+
+    async def close(self, code: int = 1000) -> None: ...
 
 
 def _ui_frame(
@@ -413,12 +423,14 @@ class RealtimeStreamGateTracker:
         return self._gate
 
 
-async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
+async def stream_realtime(
+    websocket: RealtimePreviewSink, settings: Settings, *, media_hub: MediaPreviewHub | None = None
+) -> None:
     """Stream one source through the technical pipeline until the client disconnects."""
 
     await websocket.accept()
     source = settings.realtime_source or ""
-    frame_source: OpenCvFrameSource | None = None
+    frame_source: OpenCvFrameSource | LiveLatestFrameSource | None = None
     runner: UltralyticsYoloRunner | None = None
     backend: BackendClient | None = None
     try:
@@ -443,6 +455,10 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 max_consecutive_failures=3,
             )
         )
+        if settings.realtime_live_latest_frame and not replay_file:
+            frame_source = LiveLatestFrameSource(frame_source)
+            if media_hub is not None:
+                frame_source.set_media_sink(media_hub)
         try:
             await frame_source.connect()
         except SourceConnectionError:
@@ -479,6 +495,8 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 continue
             failures = 0
             batch = await detector.detect(envelope)
+            if isinstance(frame_source, LiveLatestFrameSource) and not frame_source.is_connected:
+                continue
             event = pipeline.observe(
                 batch,
                 region_configuration=configuration,

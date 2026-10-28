@@ -136,3 +136,48 @@ async def test_bounded_queue_closed_rejects_put_and_empty_get() -> None:
     # Put to closed queue -> raises QueueClosedError
     with pytest.raises(QueueClosedError):
         queue.put(make_frame(2))
+
+
+@pytest.mark.anyio
+async def test_cancelled_getter_does_not_steal_next_frame() -> None:
+    queue = BoundedFrameQueue(maxsize=2)
+    waiting = asyncio.create_task(queue.get())
+    for _ in range(4):
+        await asyncio.sleep(0)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    queue.put(make_frame(1))
+    for _ in range(4):
+        await asyncio.sleep(0)
+    try:
+        assert queue.qsize() == 1
+        assert queue.get_nowait().sequence_number == 1
+    finally:
+        queue.close()
+
+
+@pytest.mark.anyio
+async def test_parent_cancellation_during_child_cleanup_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue = BoundedFrameQueue(maxsize=2)
+    original_wait = asyncio.wait
+
+    async def cancel_after_wait(*args, **kwargs):
+        result = await original_wait(*args, **kwargs)
+        caller = asyncio.current_task()
+        assert caller is not None
+        asyncio.get_running_loop().call_soon(caller.cancel)
+        return result
+
+    monkeypatch.setattr(asyncio, "wait", cancel_after_wait)
+    waiting = asyncio.create_task(queue.get())
+    for _ in range(4):
+        await asyncio.sleep(0)
+    queue.put(make_frame(1))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    finally:
+        queue.close()

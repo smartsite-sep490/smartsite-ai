@@ -1,7 +1,6 @@
 """Bounded latest-frame queue enforcing drop-stale backpressure and graceful closure."""
 
 import asyncio
-import contextlib
 
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import IngestionError
@@ -100,23 +99,23 @@ class BoundedFrameQueue:
         queue_task = asyncio.create_task(self._queue.get())
         close_task = asyncio.create_task(self._close_event.wait())
 
-        done, pending = await asyncio.wait(
-            [queue_task, close_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        try:
+            done, _ = await asyncio.wait(
+                [queue_task, close_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if queue_task in done:
+                frame = queue_task.result()
+                self._dequeued_count += 1
+                return frame
 
-        for task in pending:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-        if queue_task in done:
-            frame = queue_task.result()
-            self._dequeued_count += 1
-            return frame
-
-        # Close event was triggered while waiting
-        raise QueueClosedError("Queue is closed")
+            raise QueueClosedError("Queue is closed")
+        finally:
+            # Own both children through cleanup without swallowing caller cancellation.
+            for task in (queue_task, close_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(queue_task, close_task, return_exceptions=True)
 
     def get_nowait(self) -> FrameEnvelope:
         """Retrieve the next frame envelope synchronously without waiting.

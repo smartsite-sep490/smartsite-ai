@@ -23,10 +23,19 @@ class TrackedPerson:
 
 @dataclass(frozen=True, slots=True)
 class TrackedFrame:
-    """Current-frame tracks together with the immutable detector batch they came from."""
+    """Current-frame tracks, unique by track ID, with their immutable detector batch.
+
+    This is an internal adapter invariant, not proof of distinct Worker identities.
+    Reject malformed output before downstream pipelines can count one track twice
+    or advance temporal confirmation more than once in the same frame.
+    """
 
     batch: DetectionBatch
     persons: tuple[TrackedPerson, ...]
+
+    def __post_init__(self) -> None:
+        if len({person.track_id for person in self.persons}) != len(self.persons):
+            raise ValueError("person track IDs must be unique within a frame")
 
 
 __all__ = ["TrackedFrame", "TrackedPerson"]

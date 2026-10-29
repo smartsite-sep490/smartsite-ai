@@ -66,9 +66,13 @@ def test_development_openapi_describes_real_endpoints():
         "/health/live",
         "/health/ready",
         "/v1/capabilities",
+        "/v1/realtime/preview/latest",
+        "/v1/realtime/video-stream",
+        "/v1/realtime/recorded-video",
         "/v1/identity/enrollments/{enrollment_id}/samples/{sample_index}",
         "/v1/identity/enrollments/{enrollment_id}/complete",
         "/v1/identity/verifications/{verification_id}",
+        "/v1/identity/safety-mf06/resolve",
     }
     assert "503" in response.json()["paths"]["/health/ready"]["get"]["responses"]
 

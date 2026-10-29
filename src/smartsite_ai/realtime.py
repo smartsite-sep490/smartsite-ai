@@ -7,38 +7,56 @@ import json
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import WebSocketDisconnect
 from PIL import Image
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.experimental_object_preview import unified_object_preview
 from smartsite_ai.inference.artifacts import ModelArtifactSpec
-from smartsite_ai.inference.loading import load_detector_artifact
+from smartsite_ai.inference.loading import load_artifact_spec, load_detector_artifact
+from smartsite_ai.inference.ppe_profiles import (
+    LEGACY_PPE_5_PROFILE,
+    UNIFIED_PPE_15_PROFILE,
+    experimental_ppe_profile,
+)
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.live_latest_source import LiveLatestFrameSource
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
+from smartsite_ai.live_source_recovery import LiveSourceRecovery
+from smartsite_ai.media_preview import MediaPreviewHub
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
-    filter_event_for_delivery,
+    events_for_delivery,
 )
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.realtime_configuration import RealtimeConfigurationState, read_configuration
 from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
 _RealtimeStack = tuple[
     Yolo11Detector, UltralyticsYoloRunner, Mf05Mf06Pipeline, CameraRegionConfiguration
 ]
+
+
+class RealtimePreviewSink(Protocol):
+    async def accept(self) -> None: ...
+
+    async def send_json(self, data: Any) -> None: ...
+
+    async def close(self, code: int = 1000) -> None: ...
 
 
 def _ui_frame(
@@ -48,6 +66,7 @@ def _ui_frame(
     *,
     confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
     occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+    ppe_items: tuple[str, ...] = LEGACY_PPE_5_PROFILE.present_items,
 ) -> dict[str, Any]:
     """Map one technical event to the JSON shape the web realtime screen already reads."""
 
@@ -59,23 +78,33 @@ def _ui_frame(
             "detections": [],
             "zoneDetections": [],
         }
-    payload = event.to_wire_dict()
     people: dict[int, dict[str, Any]] = {}
     ppe_status: dict[int, dict[str, str]] = {}
     entered_zone_regions: set[tuple[int, str]] = set()
-    for observation in payload["observations"]:
+    for item in event.observations:
+        observation = item.to_wire_dict()
         track_id = int(observation["trackId"])
         kind = observation["type"]
         if kind == "PERSON":
             people[track_id] = observation
         elif kind == "PPE":
-            ppe_status.setdefault(track_id, {})[observation["ppeItem"]] = observation["status"]
+            item_status = ppe_status.setdefault(track_id, {})
+            item = observation["ppeItem"]
+            previous = item_status.get(item)
+            # One frame can contain overlapping-region observations for a track.
+            # Contradictory evidence stays UNKNOWN even if later duplicates agree;
+            # this display projection never rewrites the original observations.
+            item_status[item] = (
+                observation["status"]
+                if previous is None or previous == observation["status"]
+                else "UNKNOWN"
+            )
         elif kind == "ZONE_ENTRY":
             entered_zone_regions.add((track_id, observation["regionId"]))
     detections = []
     zone_detections = []
     for track_id, person in people.items():
-        status = {"HARD_HAT": "UNKNOWN", "SAFETY_VEST": "UNKNOWN"}
+        status = dict.fromkeys(ppe_items, "UNKNOWN")
         status.update(ppe_status.get(track_id, {}))
         missing = [item for item, value in status.items() if value == "MISSING"]
         confirmed_missing = sorted(
@@ -89,7 +118,11 @@ def _ui_frame(
             label = "PPE CHECK PENDING"
         elif all(value == "PRESENT" for value in status.values()):
             alert_state = "COMPLIANT"
-            label = "PPE COMPLIANT"
+            label = (
+                "HELMET AND VEST DETECTED"
+                if ppe_items == LEGACY_PPE_5_PROFILE.present_items
+                else "OBSERVED PPE DETECTED"
+            )
         else:
             alert_state = "UNKNOWN"
             label = "PPE UNKNOWN"
@@ -140,7 +173,7 @@ def _ui_frame(
         "type": "frame",
         "width": width,
         "height": height,
-        "cameraExternalId": payload["cameraExternalId"],
+        "cameraExternalId": event.camera_external_id,
         "detections": detections,
         "zoneDetections": zone_detections,
     }
@@ -154,6 +187,8 @@ def build_realtime_preview(
     ppe_region_id: str = "",
     confirmed_ppe_items: frozenset[tuple[int, str]] = frozenset(),
     occupied_zone_regions: frozenset[tuple[int, str]] = frozenset(),
+    ppe_items: tuple[str, ...] = LEGACY_PPE_5_PROFILE.present_items,
+    model_objects: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind diagnostic detections and bounded JPEG pixels in one socket message.
 
@@ -173,6 +208,7 @@ def build_realtime_preview(
         image.height,
         confirmed_ppe_items=confirmed_ppe_items,
         occupied_zone_regions=occupied_zone_regions,
+        ppe_items=ppe_items,
     )
     payload.update(
         previewVersion=1,
@@ -191,6 +227,8 @@ def build_realtime_preview(
             if region.region_id.casefold() != ppe_region_id.casefold()
         ],
     )
+    if model_objects is not None:
+        payload["modelObjects"] = model_objects
     return payload
 
 
@@ -274,12 +312,41 @@ def _load_class_map(path: Path) -> dict[int, str]:
 def _load_realtime_stack(
     settings: Settings,
 ) -> _RealtimeStack:
-    if not settings.realtime_model_path or not settings.realtime_class_map_path:
+    if settings.realtime_artifact_spec_path is None and (
+        not settings.realtime_model_path or not settings.realtime_class_map_path
+    ):
         raise ValueError("Realtime model and class map are not configured")
     if not settings.realtime_region_configuration_path:
         raise ValueError("Realtime region configuration is not configured")
-    class_map = _load_class_map(Path(settings.realtime_class_map_path))
-    spec = ModelArtifactSpec(
+    artifact_spec = (
+        load_artifact_spec(
+            settings.realtime_artifact_spec_path,
+            experimental_profile=settings.realtime_experimental_model_profile,
+        )
+        if settings.realtime_artifact_spec_path is not None
+        else None
+    )
+    class_map = (
+        dict(artifact_spec.class_map)
+        if artifact_spec is not None
+        else _load_class_map(Path(settings.realtime_class_map_path))
+    )
+    profile = experimental_ppe_profile(settings.realtime_experimental_model_profile)
+    if profile.experimental and tuple(sorted(class_map.items())) != profile.class_map:
+        raise ValueError(f"realtime taxonomy contradicts {profile.name} profile")
+    # Validate configuration before allocating a provider/GPU resource.
+    configuration = read_configuration(Path(settings.realtime_region_configuration_path))
+    if configuration.camera_external_id != settings.realtime_camera_external_id:
+        raise ValueError("realtime camera id does not match the region configuration")
+    RealtimeConfigurationState(configuration, settings.realtime_ppe_region_id)
+    pipeline = Mf05Mf06Pipeline(
+        tracker=IoUPersonTracker(),
+        ppe=PpePipeline.for_model_profile(profile),
+        zones=RestrictedZonePipeline(),
+        ppe_region_id=settings.realtime_ppe_region_id,
+        schema_version=settings.realtime_observation_schema_version,
+    )
+    spec = artifact_spec or ModelArtifactSpec(
         artifact_id=settings.realtime_model_artifact_id,
         version=settings.realtime_model_version,
         model_family=settings.realtime_model_family,
@@ -291,26 +358,24 @@ def _load_realtime_stack(
         confidence_threshold=settings.realtime_confidence,
         iou_threshold=0.45,
         image_size=(640, 640),
-        device=_configured_realtime_device(settings.realtime_device),
+        device=settings.realtime_device,
     )
+    if profile == UNIFIED_PPE_15_PROFILE and spec.model_family != "yolo11s":
+        raise ValueError("unified object preview requires YOLO11s")
+    # Artifact preprocessing is the frozen evaluation recipe. Legacy defaults
+    # must not silently replace its image size, NMS or confidence threshold.
+    target_device = (
+        settings.realtime_device if "realtime_device" in settings.model_fields_set else spec.device
+    )
+    spec = spec.model_copy(update={"device": _configured_realtime_device(target_device)})
     detector, loaded_runner, _artifact, _class_map = load_detector_artifact(
         spec,
         runner_factory=UltralyticsYoloRunner,
+        require_yolo11_metadata=profile.experimental or artifact_spec is not None,
     )
     if not isinstance(loaded_runner, UltralyticsYoloRunner):
         raise TypeError("realtime detector loader returned an unexpected runner")
     runner = loaded_runner
-    configuration = CameraRegionConfiguration.from_wire_bytes(
-        Path(settings.realtime_region_configuration_path).read_bytes()
-    )
-    if configuration.camera_external_id != settings.realtime_camera_external_id:
-        raise ValueError("realtime camera id does not match the region configuration")
-    pipeline = Mf05Mf06Pipeline(
-        tracker=IoUPersonTracker(),
-        ppe=PpePipeline(),
-        zones=RestrictedZonePipeline(),
-        ppe_region_id=settings.realtime_ppe_region_id,
-    )
     return detector, runner, pipeline, configuration
 
 
@@ -364,13 +429,20 @@ class RealtimeStreamGateTracker:
         self._current_session_id = session_id
         return self._gate
 
+    def reset(self) -> None:
+        """Discard confirmation streaks and episodes after source discontinuity."""
+        self._gate = self._gate_factory()
+        self._current_session_id = None
 
-async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
+
+async def stream_realtime(
+    websocket: RealtimePreviewSink, settings: Settings, *, media_hub: MediaPreviewHub | None = None
+) -> None:
     """Stream one source through the technical pipeline until the client disconnects."""
 
     await websocket.accept()
     source = settings.realtime_source or ""
-    frame_source: OpenCvFrameSource | None = None
+    frame_source: OpenCvFrameSource | LiveLatestFrameSource | None = None
     runner: UltralyticsYoloRunner | None = None
     backend: BackendClient | None = None
     try:
@@ -395,6 +467,10 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 max_consecutive_failures=3,
             )
         )
+        if settings.realtime_live_latest_frame and not replay_file:
+            frame_source = LiveLatestFrameSource(frame_source)
+            if media_hub is not None:
+                frame_source.set_media_sink(media_hub)
         try:
             await frame_source.connect()
         except SourceConnectionError:
@@ -403,13 +479,34 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
             )
             return
         gate_tracker = RealtimeStreamGateTracker()
+        configuration_state = (
+            RealtimeConfigurationState(configuration, settings.realtime_ppe_region_id)
+            if settings.realtime_region_configuration_reload
+            else None
+        )
         failures = 0
+        recovery = LiveSourceRecovery(
+            settings.realtime_live_reconnect_attempts if not replay_file else 0
+        )
+
+        async def recover_live_source() -> bool:
+            if recovery.maximum == 0:
+                return False
+            await websocket.send_json({"type": "error", "message": "Realtime source reconnecting"})
+            if media_hub is not None:
+                media_hub.clear()
+            gate_tracker.reset()
+            return await recovery.reconnect(frame_source)
+
         while True:
             try:
                 envelope = await frame_source.read_frame()
             except SourceReadError:
                 failures += 1
                 if failures >= 3:
+                    if await recover_live_source():
+                        failures = 0
+                        continue
                     await websocket.send_json(
                         {"type": "error", "message": "Realtime source stopped producing frames"}
                     )
@@ -423,6 +520,9 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                     continue
                 failures += 1
                 if failures >= 3:
+                    if await recover_live_source():
+                        failures = 0
+                        continue
                     await websocket.send_json(
                         {"type": "error", "message": "Realtime source stopped producing frames"}
                     )
@@ -430,8 +530,18 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 await asyncio.sleep(0.2)
                 continue
             failures = 0
+            recovery.observed_frame()
+            if configuration_state is not None:
+                replacement = await asyncio.to_thread(
+                    read_configuration, Path(settings.realtime_region_configuration_path)
+                )
+                if configuration_state.apply(replacement):
+                    gate_tracker.reset()
+                configuration = configuration_state.configuration
             batch = await detector.detect(envelope)
-            event = pipeline.process(
+            if isinstance(frame_source, LiveLatestFrameSource) and not frame_source.is_connected:
+                continue
+            event = pipeline.observe(
                 batch,
                 region_configuration=configuration,
                 event_id=str(
@@ -475,11 +585,18 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                     ppe_region_id=settings.realtime_ppe_region_id,
                     confirmed_ppe_items=confirmed_ppe_items,
                     occupied_zone_regions=occupied_zone_regions,
+                    ppe_items=experimental_ppe_profile(
+                        settings.realtime_experimental_model_profile
+                    ).present_items,
+                    model_objects=(
+                        unified_object_preview(batch, envelope)
+                        if settings.realtime_experimental_model_profile == "unified-ppe-15"
+                        else None
+                    ),
                 )
             )
             if backend is not None and event is not None:
-                delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-                if delivery_event is not None:
+                for delivery_event in events_for_delivery(event, confirmed_candidates):
                     with suppress(Exception):
                         await backend.post_event(delivery_event)
             await asyncio.sleep(0)

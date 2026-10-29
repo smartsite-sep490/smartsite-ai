@@ -83,6 +83,30 @@ def test_zone_pipeline_rejects_camera_change_without_consuming_confirmation() ->
     assert entries[0].track_id == 1
 
 
+def test_duplicate_track_frame_cannot_advance_zone_confirmation() -> None:
+    zones = RestrictedZonePipeline(entry_confirmation_frames=3)
+    observed = person((0.45, 0.20, 0.55, 0.60))
+    tracked = TrackedPerson(track_id=1, detection=observed)
+
+    def frame(sequence: int) -> TrackedFrame:
+        return TrackedFrame(batch=batch(sequence, observed), persons=(tracked,))
+
+    assert zones.process(frame(1), configuration()) == ()
+    with pytest.raises(ValueError, match="track IDs must be unique within a frame"):
+        zones.process(
+            TrackedFrame(batch=batch(2, observed), persons=(tracked, tracked)),
+            configuration(),
+        )
+
+    # The malformed adapter output is rejected before it can double-count a frame.
+    assert zones.process(frame(2), configuration()) == ()
+    entries = zones.process(frame(3), configuration())
+    assert len(entries) == 1
+    assert entries[0].track_id == 1
+    assert entries[0].region_id == REGION_ID
+    assert zones.process(frame(4), configuration()) == ()
+
+
 def test_zone_pipeline_emits_after_confirmed_outside_to_inside_transition() -> None:
     tracker = IoUPersonTracker()
     zones = RestrictedZonePipeline()

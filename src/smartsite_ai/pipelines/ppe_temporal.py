@@ -1,11 +1,13 @@
 """Deterministic temporal confirmation, clearing, and cooldown for PPE candidates."""
 
+import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from smartsite_ai.domain.observations import PpeObservation, TechnicalObservationEvent
+from smartsite_ai.domain.observations import Observation, PpeObservation, TechnicalObservationEvent
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe import PPE_ITEMS, PpeItem
 
 
@@ -17,6 +19,8 @@ class ConfirmedPpeCandidate:
     session_id: UUID
     track_id: int
     ppe_item: PpeItem
+    region_id: str
+    geometry_version: int
     first_seen_at: datetime
     confirmed_at: datetime
 
@@ -56,8 +60,8 @@ class TemporalPpeCandidateGate:
         self._track_expiry = track_expiry
 
         self._last_observed_at: dict[tuple[str, UUID], datetime] = {}
-        self._states: dict[tuple[str, UUID, int, PpeItem], _TrackItemState] = {}
-        self._cooldowns: dict[tuple[str, UUID, int, PpeItem], datetime] = {}
+        self._states: dict[tuple[str, UUID, int, PpeItem, str, int], _TrackItemState] = {}
+        self._cooldowns: dict[tuple[str, UUID, int, PpeItem, str, int], datetime] = {}
 
     def update(
         self,
@@ -79,6 +83,11 @@ class TemporalPpeCandidateGate:
             )
         self._last_observed_at[stream_key] = observed_at
 
+        # Other sessions have independent clocks; expire only this session's cooldowns.
+        for key, confirmed_at in tuple(self._cooldowns.items()):
+            if key[:2] == stream_key and observed_at - confirmed_at >= self._cooldown:
+                del self._cooldowns[key]
+
         # Deduplicate active tracks preserving order
         unique_active_track_ids = tuple(dict.fromkeys(active_track_ids))
         active_track_set = set(unique_active_track_ids)
@@ -97,15 +106,40 @@ class TemporalPpeCandidateGate:
                             state.consecutive_missing = 0
                             state.first_seen_at = None
 
-        obs_by_track_item: dict[tuple[int, PpeItem], PpeObservation] = {
-            (obs.track_id, obs.ppe_item): obs for obs in observations if obs.type == "PPE"
-        }
+        obs_by_track_item: dict[tuple[int, PpeItem, str, int], PpeObservation] = {}
+        conflicting_items: set[tuple[int, PpeItem, str, int]] = set()
+        for obs in observations:
+            if obs.type != "PPE":
+                continue
+            key = (obs.track_id, obs.ppe_item, obs.region_id.casefold(), obs.geometry_version)
+            if key in conflicting_items:
+                continue
+            previous = obs_by_track_item.get(key)
+            if previous is not None and previous.status != obs.status:
+                # Ambiguous same-frame evidence is UNKNOWN regardless of ordering.
+                # A later duplicate cannot restore a contradicted item. Consistent
+                # duplicates count once because temporal evidence is per frame.
+                conflicting_items.add(key)
+                obs_by_track_item.pop(key)
+            else:
+                obs_by_track_item[key] = obs
 
+        # Missing evidence and cooldown belong to one immutable region geometry.
+        bindings = (
+            set(obs_by_track_item)
+            | conflicting_items
+            | {key[2:] for key in self._states if key[:2] == stream_key}
+        )
         confirmed_candidates: list[ConfirmedPpeCandidate] = []
         for track_id in unique_active_track_ids:
-            for item in PPE_ITEMS:
-                state_key = (stream_id, session_id, track_id, item)
-                obs = obs_by_track_item.get((track_id, item))
+            track_bindings = sorted(
+                (key for key in bindings if key[0] == track_id),
+                key=lambda key: (PPE_ITEMS.index(key[1]), key[2], key[3]),
+            )
+            for binding in track_bindings:
+                _, item, region_id, geometry_version = binding
+                state_key = (stream_id, session_id, *binding)
+                obs = obs_by_track_item.get(binding)
                 state = self._states.get(state_key)
 
                 # Reappearance expiry: if active track reappears after > track_expiry
@@ -138,6 +172,8 @@ class TemporalPpeCandidateGate:
                                 session_id=session_id,
                                 track_id=track_id,
                                 ppe_item=item,
+                                region_id=region_id,
+                                geometry_version=geometry_version,
                                 first_seen_at=state.first_seen_at,
                                 confirmed_at=observed_at,
                             )
@@ -182,7 +218,7 @@ class TemporalPpeCandidateGate:
         active = set(active_track_ids)
         return frozenset(
             (track_id, item)
-            for (state_stream, state_session, track_id, item), state in self._states.items()
+            for (state_stream, state_session, track_id, item, _, _), state in self._states.items()
             if state_stream == stream_id
             and state_session == session_id
             and track_id in active
@@ -190,27 +226,63 @@ class TemporalPpeCandidateGate:
         )
 
 
-def filter_event_for_delivery(
-    event: TechnicalObservationEvent,
+def _event_capture_time(value: str) -> datetime | None:
+    """Parse an event instant without rounding sub-microsecond evidence into a match."""
+
+    fraction = re.search(r"\.([0-9]+)", value)
+    if fraction is not None and any(digit != "0" for digit in fraction.group(1)[6:]):
+        return None
+    try:
+        captured_at = datetime.fromisoformat(value.replace("t", "T").replace("z", "Z"))
+        if captured_at.utcoffset() is None:
+            return None
+        return captured_at.astimezone(UTC)
+    except (ValueError, OverflowError):
+        # Canonical RFC3339 can represent leap seconds; datetime cannot. Abstain
+        # from PPE confirmation without discarding unrelated Zone observations.
+        return None
+
+
+def _delivery_observations(
+    event: TechnicalObservationEvent | ObservationFrame,
     confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
     | Iterable[ConfirmedPpeCandidate] = (),
-) -> TechnicalObservationEvent | None:
-    """Filter an event for Backend delivery and timeline recording.
+) -> list[Observation] | None:
+    """Select full-frame observations for Backend delivery and timeline recording.
 
-    Returns an event containing:
+    Returns observations containing:
     - PERSON, ZONE_ENTRY, and other non-PPE observations unchanged.
     - PPE observations with status PRESENT unchanged.
-    - PPE observations with status MISSING only when (track_id, ppe_item) matches
-      a confirmed candidate belonging to this event's stream session.
+    - PPE observations with status MISSING only when track, item and region geometry match
+      a confirmed candidate belonging to this event's stream session and capture instant.
     - Returns None if no deliverable trigger (ZONE_ENTRY or confirmed PPE/MISSING) remains.
     """
 
-    event_session_str = event.stream_session_id
-    confirmed_keys = {
-        (candidate.track_id, candidate.ppe_item)
-        for candidate in confirmed_ppe_candidates
-        if str(candidate.session_id) == event_session_str
-    }
+    event_session_id = UUID(event.stream_session_id)
+    captured_at = _event_capture_time(event.captured_at)
+    confirmed_keys: set[tuple[int, PpeItem, str, int]] = set()
+    if captured_at is not None:
+        for candidate in confirmed_ppe_candidates:
+            if (
+                candidate.session_id != event_session_id
+                or candidate.confirmed_at.utcoffset() is None
+                or candidate.first_seen_at.utcoffset() is None
+            ):
+                continue
+            try:
+                confirmed_at = candidate.confirmed_at.astimezone(UTC)
+                first_seen_at = candidate.first_seen_at.astimezone(UTC)
+            except (ValueError, OverflowError):
+                continue
+            if confirmed_at == captured_at and first_seen_at <= confirmed_at:
+                confirmed_keys.add(
+                    (
+                        candidate.track_id,
+                        candidate.ppe_item,
+                        candidate.region_id.casefold(),
+                        candidate.geometry_version,
+                    )
+                )
 
     filtered_observations = []
     has_deliverable_trigger = False
@@ -222,7 +294,11 @@ def filter_event_for_delivery(
         elif obs.type == "PPE":
             if obs.status == "PRESENT":
                 filtered_observations.append(obs)
-            elif obs.status == "MISSING" and (obs.track_id, obs.ppe_item) in confirmed_keys:
+            elif (
+                obs.status == "MISSING"
+                and (obs.track_id, obs.ppe_item, obs.region_id.casefold(), obs.geometry_version)
+                in confirmed_keys
+            ):
                 filtered_observations.append(obs)
                 has_deliverable_trigger = True
         else:
@@ -231,16 +307,54 @@ def filter_event_for_delivery(
     if not has_deliverable_trigger or not filtered_observations:
         return None
 
+    return filtered_observations
+
+
+def filter_event_for_delivery(
+    event: TechnicalObservationEvent,
+    confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
+    | Iterable[ConfirmedPpeCandidate] = (),
+) -> TechnicalObservationEvent | None:
+    """Retain the single-event API for already bounded transport events."""
+    observations = _delivery_observations(event, confirmed_ppe_candidates)
+    if observations is None:
+        return None
     return TechnicalObservationEvent.create(
         event_id=event.event_id,
         camera_external_id=event.camera_external_id,
         stream_session_id=event.stream_session_id,
         captured_at=event.captured_at,
         frame_dimensions=event.frame_dimensions,
-        observations=filtered_observations,
+        observations=observations,
         evidence=event.evidence,
         schema_version=event.schema_version,
+        frame_partition=event.frame_partition,
     )
+
+
+def events_for_delivery(
+    frame: ObservationFrame | TechnicalObservationEvent,
+    confirmed_ppe_candidates: Sequence[ConfirmedPpeCandidate]
+    | Iterable[ConfirmedPpeCandidate] = (),
+    *,
+    partition_sequence_number: int | None = None,
+) -> tuple[TechnicalObservationEvent, ...]:
+    """Confirm/filter the full frame once, then validate bounded transport parts."""
+    if isinstance(frame, TechnicalObservationEvent):
+        if partition_sequence_number is not None:
+            raise ValueError("Partitioned delivery requires the full ObservationFrame")
+        event = filter_event_for_delivery(frame, confirmed_ppe_candidates)
+        return () if event is None else (event,)
+    observations = _delivery_observations(frame, confirmed_ppe_candidates)
+    if observations is None:
+        return ()
+    selected = replace(frame, observations=tuple(observations))
+    if partition_sequence_number is not None:
+        return selected.to_partitioned_events(sequence_number=partition_sequence_number)
+    events = selected.to_events()
+    if len(events) > 1:
+        raise ValueError("Multipart delivery requires explicit v1.4 frame metadata")
+    return events
 
 
 def should_post_event(
@@ -257,5 +371,6 @@ __all__ = [
     "ConfirmedPpeCandidate",
     "TemporalPpeCandidateGate",
     "filter_event_for_delivery",
+    "events_for_delivery",
     "should_post_event",
 ]

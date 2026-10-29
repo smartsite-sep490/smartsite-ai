@@ -13,17 +13,19 @@ import pytest
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
-from smartsite_ai.inference.models import DetectionBatch
+from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.ingestion.queue import QueueClosedError
-from smartsite_ai.ingestion.status import StreamState
+from smartsite_ai.ingestion.queue import BoundedFrameQueue, QueueClosedError
+from smartsite_ai.ingestion.status import StreamMetrics, StreamState
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.pipelines import Mf05Mf06Pipeline, PpePipeline, RestrictedZonePipeline
 from smartsite_ai.processing_worker import (
     HeadlessCameraProcessingWorker,
     ProcessingWorkerSourceError,
 )
+from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 SESSION_ID = UUID("11111111-1111-4111-8111-111111111111")
 REGION_ID = "22222222-2222-4222-8222-222222222222"
@@ -77,6 +79,7 @@ class FakeStream:
         self.started = False
         self.stopped = False
         self.terminal_state = terminal_state
+        self.frame_count = len(frames)
 
     async def start(self) -> None:
         self.started = True
@@ -91,7 +94,13 @@ class FakeStream:
         self.stopped = True
 
     def snapshot(self) -> SimpleNamespace:
-        return SimpleNamespace(state=self.terminal_state)
+        return SimpleNamespace(
+            state=self.terminal_state,
+            metrics=StreamMetrics(
+                frames_enqueued=self.frame_count,
+                frames_dequeued=self.frame_count - len(self.frames),
+            ),
+        )
 
 
 class FakeDetector:
@@ -106,11 +115,17 @@ class FakeDetector:
 
 
 class RecordingPipeline:
+    def checkpoint_temporal_state(self) -> None:
+        return None
+
+    def restore_temporal_state(self, state: object) -> None:
+        assert state is None
+
     def __init__(self) -> None:
         self.configuration_versions: list[int] = []
         self.event_ids: list[str] = []
 
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,
@@ -184,6 +199,70 @@ async def test_worker_runs_without_browser_and_delivers_deterministic_events(
 
 
 @pytest.mark.anyio
+async def test_worker_reports_sampling_separately_from_actual_queue_drops(tmp_path: Path) -> None:
+    class OverloadedStream(FakeStream):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.queue = BoundedFrameQueue(maxsize=2)
+
+        async def start(self) -> None:
+            self.started = True
+            for sequence in range(5):
+                self.queue.put(_frame(sequence))
+            self.queue.close()
+
+        async def get_frame(self) -> FrameEnvelope:
+            return await self.queue.get()
+
+        def snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                state=StreamState.STOPPED,
+                metrics=StreamMetrics(
+                    frames_enqueued=self.queue.enqueued_count,
+                    frames_dequeued=self.queue.dequeued_count,
+                    frames_dropped=self.queue.dropped_count,
+                    sampled_out_frames=4,
+                    last_error="rtsp://operator:secret@camera",
+                ),
+            )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            202,
+            json={
+                "eventId": json.loads(request.content)["eventId"],
+                "status": "PROCESSED",
+                "alertIds": [],
+            },
+        )
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    stream = OverloadedStream()
+    outbox = SqliteEventOutbox((tmp_path / "overload.sqlite3").resolve())
+    async with BackendClient(
+        "http://backend:3000", "token", transport=httpx.MockTransport(handler)
+    ) as backend:
+        result = await HeadlessCameraProcessingWorker(
+            stream=stream,  # type: ignore[arg-type]
+            detector=FakeDetector(),
+            pipeline=RecordingPipeline(),
+            ppe_region_id=REGION_ID,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=OutboxDispatcher(outbox, backend),
+        ).run()
+    assert result.frames_processed == 2
+    assert result.frame_flow == {
+        "framesEnqueued": 5,
+        "framesDequeued": 2,
+        "framesDropped": 3,
+        "sampledOutFrames": 4,
+    }
+    assert "secret" not in json.dumps(result.frame_flow)
+
+
+@pytest.mark.anyio
 async def test_worker_replays_crash_surviving_event_before_new_source_session(
     tmp_path: Path,
 ) -> None:
@@ -197,7 +276,7 @@ async def test_worker_replays_crash_surviving_event_before_new_source_session(
             json={"eventId": event_id, "status": "PROCESSED", "alertIds": []},
         )
 
-    old_event = RecordingPipeline().process(
+    old_event = RecordingPipeline().observe(
         DetectionBatch.from_frame(
             _frame(99),
             model_artifact_id="ppe-model",
@@ -330,6 +409,68 @@ async def test_worker_stops_source_when_processing_fails(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
+async def test_worker_rejects_duplicate_track_output_without_delivering_a_false_event(
+    tmp_path: Path,
+) -> None:
+    observed = NormalizedDetection(
+        class_id=0,
+        class_name="Person",
+        confidence=0.9,
+        bounding_box=NormalizedBoundingBox(
+            x1=0.1, y1=0.1, x2=0.4, y2=0.8, coordinate_space="NORMALIZED_0_1"
+        ),
+    )
+
+    class PersonDetector(FakeDetector):
+        async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+            return (await super().detect(frame)).model_copy(update={"detections": (observed,)})
+
+    class MalformedTracker:
+        def update(self, detector_batch: DetectionBatch) -> TrackedFrame:
+            tracked = TrackedPerson(track_id=7, detection=detector_batch.detections[0])
+            return TrackedFrame(batch=detector_batch, persons=(tracked, tracked))
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    stream = FakeStream([_frame(0)])
+    outbox = SqliteEventOutbox((tmp_path / "outbox.sqlite3").resolve())
+    pipeline = Mf05Mf06Pipeline(
+        tracker=MalformedTracker(),
+        ppe=PpePipeline(),
+        zones=RestrictedZonePipeline(),
+        ppe_region_id=REGION_ID,
+    )
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(handler),
+        max_retries=0,
+    ) as backend:
+        worker = HeadlessCameraProcessingWorker(
+            stream=stream,  # type: ignore[arg-type]
+            detector=PersonDetector(),
+            pipeline=pipeline,
+            ppe_region_id=REGION_ID,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=OutboxDispatcher(outbox, backend),
+        )
+        with pytest.raises(ValueError, match="track IDs must be unique within a frame"):
+            await worker.run()
+
+    assert stream.stopped is True
+    assert requests == []
+    counts = await outbox.counts()
+    assert (counts.pending, counts.delivered, counts.terminal) == (0, 0, 0)
+
+
+@pytest.mark.anyio
 async def test_worker_reports_source_failure_instead_of_false_success(tmp_path: Path) -> None:
     store = RegionConfigurationStore()
     await store.apply(_configuration())
@@ -454,7 +595,7 @@ async def test_ppe_confirmation_resets_when_region_geometry_changes(tmp_path: Pa
             return await super().detect(frame)
 
     class MissingPpePipeline:
-        def process(
+        def observe(
             self,
             batch: DetectionBatch,
             *,
@@ -523,3 +664,98 @@ async def test_ppe_confirmation_resets_when_region_geometry_changes(tmp_path: Pa
     assert result.frames_processed == 5
     assert result.events_enqueued == 1
     assert result.outbox.delivered == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("expires_during", ["inference", "evidence"])
+async def test_worker_rechecks_configuration_before_pipeline_and_durable_enqueue(expires_during):
+    from unittest.mock import AsyncMock
+
+    from smartsite_ai.integrations.configuration_poller import ConfigurationStaleError
+
+    fresh = True
+
+    def guard():
+        if not fresh:
+            raise ConfigurationStaleError("configuration expired during processing")
+
+    class ExpiringDetector(FakeDetector):
+        async def detect(self, frame):
+            nonlocal fresh
+            result = await super().detect(frame)
+            if expires_during == "inference":
+                fresh = False
+            return result
+
+    class ExpiringPublisher:
+        async def publish(self, *, frame, event):
+            nonlocal fresh
+            fresh = False
+            return event
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration())
+    pipeline = RecordingPipeline()
+    enqueue = AsyncMock()
+    worker = HeadlessCameraProcessingWorker(
+        stream=FakeStream([]),
+        detector=ExpiringDetector(),
+        pipeline=pipeline,
+        ppe_region_id=REGION_ID,
+        configurations=store,
+        outbox=SimpleNamespace(enqueue=enqueue),
+        dispatcher=SimpleNamespace(),
+        configuration_guard=guard,
+        evidence_publisher=ExpiringPublisher(),
+    )
+    with pytest.raises(ConfigurationStaleError):
+        await worker._process_frame(_frame(1))
+    enqueue.assert_not_awaited()
+    if expires_during == "inference":
+        assert pipeline.configuration_versions == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("changes_during", ["inference", "evidence"])
+async def test_worker_discards_inflight_old_configuration_and_processes_next(changes_during):
+    from unittest.mock import AsyncMock
+
+    store = RegionConfigurationStore()
+    await store.apply(_configuration(1))
+
+    class UpdatingDetector(FakeDetector):
+        async def detect(self, frame):
+            result = await super().detect(frame)
+            if frame.sequence_number == 1 and changes_during == "inference":
+                await store.apply(_configuration(2))
+            return result
+
+    class UpdatingPublisher:
+        async def publish(self, *, frame, event):
+            if frame.sequence_number == 1 and changes_during == "evidence":
+                await store.apply(_configuration(2))
+            return event
+
+    pipeline = RecordingPipeline()
+    enqueue = AsyncMock()
+    stream = FakeStream([])
+    stream.config = stream.config.model_copy(update={"is_live": True})
+    worker = HeadlessCameraProcessingWorker(
+        stream=stream,
+        detector=UpdatingDetector(),
+        pipeline=pipeline,
+        ppe_region_id=REGION_ID,
+        configurations=store,
+        outbox=SimpleNamespace(enqueue=enqueue),
+        dispatcher=SimpleNamespace(),
+        evidence_publisher=UpdatingPublisher(),
+    )
+    await worker._process_frame(_frame(1))
+    enqueue.assert_not_awaited()
+    assert not worker._last_frame_enqueued
+    if changes_during == "inference":
+        assert pipeline.configuration_versions == []
+    await worker._process_frame(_frame(2))
+    enqueue.assert_awaited_once()
+    assert pipeline.configuration_versions[-1] == 2
+    assert worker._last_frame_enqueued

@@ -8,5 +8,10 @@
     "schemaVersion": "1.0.0",
     "schemaSha256": "36e165aa755cc66be45ef06486ecaf0635b5d1db7ad492f3665ac6f5f8c69fd2",
     "goldenVectorsSha256": "7b16024bd8c85e754567f1a39c9a1e578fa80af1963a853ca9f68dbf0cc435f5"
+  },
+  "expandedObservationEvent": {
+    "schemaSha256": "c860d8df10afad96a529595f6d9253688ad83c5b10c6492d7ac1ebeef83ccc73",
+    "schemaVersion": "1.1.0",
+    "sourceCommitSha": "12afa18817590bd90de088c4c53f6fba7d6c4128"
   }
 }

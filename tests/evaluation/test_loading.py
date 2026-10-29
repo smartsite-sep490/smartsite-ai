@@ -1,8 +1,10 @@
+import asyncio
 import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 import pytest
@@ -15,7 +17,7 @@ from smartsite_ai.inference.loading import (
     load_detector_artifact,
     load_yolo11_detector,
 )
-from smartsite_ai.inference.yolo import RawYoloDetection
+from smartsite_ai.inference.yolo import DetectorUnavailableError, RawYoloDetection
 
 
 def artifact_document(artifact_path: Path, **overrides: object) -> dict[str, object]:
@@ -77,6 +79,79 @@ def valid_metadata(**overrides: object) -> dict[str, object]:
         "classMap": {str(key): value for key, value in CANONICAL_PPE_CLASS_MAP},
         **overrides,
     }
+
+
+@pytest.mark.anyio
+async def test_worker_loader_warms_once_without_using_a_camera_frame(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    frames = []
+
+    class RecordingRunner(FakeRunner):
+        def predict(self, frame):
+            frames.append(frame)
+            return ()
+
+    runner = RecordingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    _, returned, _, _ = await load_warmed_yolo11_detector(spec, runner_factory=lambda: runner)
+    assert returned is runner
+    assert not runner.closed
+    assert len(frames) == 1
+    assert frames[0].stream_id == "model-warmup"
+    assert frames[0].camera_external_id == "MODEL-WARMUP"
+    assert frames[0].payload == bytes(64 * 64 * 3)
+    assert frames[0].sequence_number == 0
+
+
+@pytest.mark.anyio
+async def test_worker_warmup_failure_closes_runner_before_returning(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    class FailingRunner(FakeRunner):
+        def predict(self, _frame):
+            raise RuntimeError("prediction unavailable")
+
+    runner = FailingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    with pytest.raises(DetectorUnavailableError, match="prediction failed"):
+        await load_warmed_yolo11_detector(spec, runner_factory=lambda: runner)
+    assert runner.closed
+
+
+@pytest.mark.anyio
+async def test_cancelled_warmup_waits_for_native_inference_before_close(tmp_path: Path) -> None:
+    from smartsite_ai.inference.loading import load_warmed_yolo11_detector
+
+    started, release, finished = Event(), Event(), Event()
+
+    class BlockingRunner(FakeRunner):
+        def predict(self, _frame):
+            started.set()
+            assert release.wait(3)
+            finished.set()
+            return ()
+
+        def close(self):
+            assert finished.is_set(), "Must not dispose an in-flight native prediction"
+            super().close()
+
+    runner = BlockingRunner(valid_metadata())
+    spec, _ = write_spec(tmp_path)
+    task = asyncio.create_task(load_warmed_yolo11_detector(spec, runner_factory=lambda: runner))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not runner.closed
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert runner.closed
 
 
 def test_import_has_no_provider_or_hardware_side_effects() -> None:
@@ -164,6 +239,32 @@ def test_load_artifact_spec_rejects_invalid_or_secret_bearing_json(
 
     with pytest.raises(ArtifactValidationError, match=match):
         load_artifact_spec(spec_path)
+
+
+def test_worker_loader_rejects_native_candidate_map_before_constructing_runner(
+    tmp_path: Path,
+) -> None:
+    native_map = {"0": "helmet", "1": "no-helmet", "2": "no-vest", "3": "person", "4": "vest"}
+    spec_path, _ = write_spec(tmp_path, classMap=native_map)
+    runner_constructed = False
+
+    def make_runner() -> FakeRunner:
+        nonlocal runner_constructed
+        runner_constructed = True
+        return FakeRunner(valid_metadata(classMap=native_map))
+
+    with pytest.raises(ArtifactValidationError, match="exactly the five canonical PPE classes"):
+        load_yolo11_detector(spec_path, runner_factory=make_runner)
+    assert runner_constructed is False
+
+
+def test_worker_loader_cannot_disguise_native_candidate_with_canonical_spec(tmp_path: Path) -> None:
+    spec_path, _ = write_spec(tmp_path)
+    native_map = {"0": "helmet", "1": "no-helmet", "2": "no-vest", "3": "person", "4": "vest"}
+    runner = FakeRunner(valid_metadata(classMap=native_map))
+    with pytest.raises(ArtifactValidationError, match="class map contradicts artifact spec"):
+        load_yolo11_detector(spec_path, runner_factory=lambda: runner)
+    assert runner.closed is True
 
 
 @pytest.mark.parametrize("content", ["[]", "null", "{", "\ufeff{}"])

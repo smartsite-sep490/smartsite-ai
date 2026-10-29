@@ -5,13 +5,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 from smartsite_ai.config import Settings
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
-from smartsite_ai.inference.loading import load_yolo11_detector
+from smartsite_ai.inference.loading import load_warmed_yolo11_detector
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
@@ -20,6 +22,10 @@ from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.worker_generation import (
+    GenerationBoundSource,
+    load_worker_generation,
+)
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
@@ -47,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppe-region-id", type=UUID, required=True)
     parser.add_argument("--model-spec", type=Path, required=True)
     parser.add_argument("--outbox", type=Path, required=True)
+    parser.add_argument("--generation-credential-file", type=Path)
     parser.add_argument("--target-fps", type=float)
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--stale-after", type=float, default=60.0)
@@ -108,9 +115,11 @@ async def _require_ppe_region(
     camera_external_id: str,
     ppe_region_id: UUID,
 ) -> None:
-    configuration = await store.get(camera_external_id)
+    configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraWorkerRunError("Backend returned no active camera region configuration")
+    if isinstance(configuration, CameraConfigurationBundle):
+        return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):
         raise CameraWorkerRunError(
@@ -179,15 +188,32 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
         poller.ensure_fresh()
         await _require_ppe_region(store, args.camera_external_id, args.ppe_region_id)
 
-        detector, loaded_runner, _artifact, _class_map = load_yolo11_detector(
+        outbox = SqliteEventOutbox(outbox_path)
+        generation = None
+        generation_file = getattr(args, "generation_credential_file", None)
+        if generation_file is not None:
+            generation = load_worker_generation(
+                generation_file, args.camera_id, now=datetime.now(UTC)
+            )
+            await outbox.claim_worker_session(
+                args.camera_id,
+                UUID(generation.worker_generation_id),
+                UUID(generation.stream_session_id),
+            )
+            source_config = source_config.model_copy(update={"max_consecutive_failures": 1})
+
+        detector, loaded_runner, _artifact, _class_map = await load_warmed_yolo11_detector(
             model_spec_path,
             runner_factory=UltralyticsYoloRunner,
         )
         runner = loaded_runner
         try:
             frame_source = OpenCvFrameSource(source_config)
+            if generation is not None:
+                generation.ensure_current(datetime.now(UTC))
+                frame_source = GenerationBoundSource(frame_source, generation)
+                poller.enable_generation_ack(frame_source)
             stream = StreamWorker(config=source_config, source=frame_source)
-            outbox = SqliteEventOutbox(outbox_path)
             pipeline = Mf05Mf06Pipeline(
                 tracker=IoUPersonTracker(),
                 ppe=PpePipeline(),
@@ -223,6 +249,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             {
                 "framesProcessed": result.frames_processed,
                 "eventsEnqueued": result.events_enqueued,
+                **({"frameFlow": result.frame_flow} if result.frame_flow is not None else {}),
                 "outbox": {
                     "pending": result.outbox.pending,
                     "delivered": result.outbox.delivered,

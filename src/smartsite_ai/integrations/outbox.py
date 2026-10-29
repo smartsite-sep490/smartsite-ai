@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 
@@ -109,6 +110,14 @@ class SqliteEventOutbox:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute(
+                """CREATE TABLE IF NOT EXISTS worker_session_claim (
+                    generation_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE,
+                    camera_id TEXT NOT NULL,
+                    claimed_at REAL NOT NULL
+                ) STRICT"""
+            )
+            connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS observation_outbox (
                     event_id TEXT PRIMARY KEY,
@@ -130,6 +139,35 @@ class SqliteEventOutbox:
                 ON observation_outbox(state, next_attempt_at, created_at)
                 """
             )
+
+    async def claim_worker_session(
+        self, camera_id: UUID, generation_id: UUID, session_id: UUID
+    ) -> None:
+        """Consume once before opening a source; even a failed launch may not reuse it."""
+        if not all(isinstance(value, UUID) for value in (camera_id, generation_id, session_id)):
+            raise ValueError("Worker session claim requires UUID identities")
+        await self.initialize()
+        now = _require_aware_utc(self._clock()).timestamp()
+        async with self._lock:
+            await asyncio.to_thread(
+                self._claim_worker_session_sync,
+                str(camera_id),
+                str(generation_id),
+                str(session_id),
+                now,
+            )
+
+    def _claim_worker_session_sync(
+        self, camera_id: str, generation_id: str, session_id: str, now: float
+    ) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO worker_session_claim VALUES (?, ?, ?, ?)",
+                    (generation_id, session_id, camera_id, now),
+                )
+        except sqlite3.IntegrityError:
+            raise RuntimeError("Worker generation or session is already consumed") from None
 
     async def enqueue(self, event: TechnicalObservationEvent) -> OutboxEnqueueOutcome:
         await self.initialize()
@@ -158,28 +196,56 @@ class SqliteEventOutbox:
         payload_hash: str,
         now: float,
     ) -> OutboxEnqueueOutcome:
+        return self._enqueue_many_sync(((event_id, payload_json, payload_hash),), now)[0]
+
+    async def enqueue_many(
+        self, events: tuple[TechnicalObservationEvent, ...]
+    ) -> tuple[OutboxEnqueueOutcome, ...]:
+        """Durably commit every part of a frame, or none of its new parts."""
+        await self.initialize()
+        rows = tuple(
+            (
+                event.event_id,
+                json.dumps(
+                    event.to_wire_dict(), ensure_ascii=False, allow_nan=False, separators=(",", ":")
+                ),
+                event.compute_payload_hash(),
+            )
+            for event in events
+        )
+        now = _require_aware_utc(self._clock()).timestamp()
+        async with self._lock:
+            return await asyncio.to_thread(self._enqueue_many_sync, rows, now)
+
+    def _enqueue_many_sync(
+        self, rows: tuple[tuple[str, str, str], ...], now: float
+    ) -> tuple[OutboxEnqueueOutcome, ...]:
+        outcomes: list[OutboxEnqueueOutcome] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT payload_hash FROM observation_outbox WHERE event_id = ?",
-                (event_id,),
-            ).fetchone()
-            if existing is not None:
-                if existing["payload_hash"] != payload_hash:
-                    raise OutboxConflict(
-                        "outbox event ID already exists with different canonical content"
-                    )
-                return OutboxEnqueueOutcome.IDEMPOTENT
-            connection.execute(
-                """
-                INSERT INTO observation_outbox (
-                    event_id, payload_json, payload_hash, state,
-                    attempt_count, next_attempt_at, created_at, updated_at
-                ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?)
-                """,
-                (event_id, payload_json, payload_hash, now, now, now),
-            )
-        return OutboxEnqueueOutcome.ENQUEUED
+            for event_id, payload_json, payload_hash in rows:
+                existing = connection.execute(
+                    "SELECT payload_hash FROM observation_outbox WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if existing is not None:
+                    if existing["payload_hash"] != payload_hash:
+                        raise OutboxConflict(
+                            "outbox event ID already exists with different canonical content"
+                        )
+                    outcomes.append(OutboxEnqueueOutcome.IDEMPOTENT)
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO observation_outbox (
+                        event_id, payload_json, payload_hash, state,
+                        attempt_count, next_attempt_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?)
+                    """,
+                    (event_id, payload_json, payload_hash, now, now, now),
+                )
+                outcomes.append(OutboxEnqueueOutcome.ENQUEUED)
+        return tuple(outcomes)
 
     async def ready(self, *, limit: int = 32) -> tuple[PendingOutboxEvent, ...]:
         if limit < 1 or limit > 1024:

@@ -5,10 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
+from smartsite_ai.inference.ppe_profiles import (
+    ExperimentalPpeProfile,
+    experimental_ppe_profile,
+)
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.worker import StreamWorker
@@ -16,6 +24,11 @@ from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.worker_generation import (
+    GenerationBoundSource,
+    WorkerGenerationCredential,
+    load_worker_generation,
+)
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
@@ -40,6 +53,7 @@ class CameraPlan:
     store: RegionConfigurationStore
     poller: CameraConfigurationPoller
     configuration_client: BackendConfigurationClient
+    generation: WorkerGenerationCredential | None = None
 
 
 async def preflight_manifest(
@@ -69,6 +83,18 @@ async def preflight_manifest(
                 await _require_ppe_region(
                     store, camera.camera_external_id, camera.entry.ppe_region_id
                 )
+                generation = None
+                if camera.entry.generation_credential_file is not None:
+                    generation = load_worker_generation(
+                        Path(camera.entry.generation_credential_file),
+                        camera.entry.camera_id,
+                        now=datetime.now(UTC),
+                    )
+                    await SqliteEventOutbox(camera.outbox).claim_worker_session(
+                        camera.entry.camera_id,
+                        UUID(generation.worker_generation_id),
+                        UUID(generation.stream_session_id),
+                    )
             except BaseException:
                 async with _hold_cancellation():
                     await client.aclose()
@@ -79,6 +105,7 @@ async def preflight_manifest(
                     store=store,
                     poller=poller,
                     configuration_client=client,
+                    generation=generation,
                 )
             )
     except asyncio.CancelledError:
@@ -102,11 +129,20 @@ def assemble_sessions(
     source_factory: SourceFactory,
     evidence_max_bytes: int,
     delivery_interval_seconds: float,
+    experimental_model_profile: ExperimentalPpeProfile | None = None,
+    observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
 ) -> tuple[CameraSession, ...]:
     """Create isolated tracker, poller, outbox, and evidence state per camera."""
 
     if not 1 <= len(plans) <= 3:
         raise CameraRuntimeError("runtime requires 1 to 3 cameras")
+    if experimental_model_profile not in (None, "native-ppe-10", "unified-ppe-15"):
+        raise CameraRuntimeError("unsupported experimental PPE profile")
+    if observation_schema_version not in ("1.0.0", "1.1.0"):
+        raise CameraRuntimeError("unsupported observation schema version")
+    if experimental_model_profile is not None and observation_schema_version != "1.1.0":
+        raise CameraRuntimeError("expanded PPE requires a configured v1.1.0 consumer")
+    profile = experimental_ppe_profile(experimental_model_profile)
     sessions: list[CameraSession] = []
     for plan in plans:
         camera = plan.bound
@@ -115,17 +151,26 @@ def assemble_sessions(
             evidence_publisher = LocalEvidencePublisher(
                 root_dir=camera.evidence_dir,
                 max_jpeg_bytes=evidence_max_bytes,
+                bind_content_hash=True,
             )
         pipeline = Mf05Mf06Pipeline(
             tracker=IoUPersonTracker(),
-            ppe=PpePipeline(),
+            ppe=PpePipeline.for_model_profile(profile),
             zones=RestrictedZonePipeline(),
             ppe_region_id=str(camera.entry.ppe_region_id),
+            schema_version=observation_schema_version,
         )
         outbox = SqliteEventOutbox(camera.outbox)
-        source = source_factory(camera.source_config)
+        source_config = camera.source_config
+        if plan.generation is not None:
+            plan.generation.ensure_current(datetime.now(UTC))
+            source_config = source_config.model_copy(update={"max_consecutive_failures": 1})
+        source = source_factory(source_config)
+        if plan.generation is not None:
+            source = GenerationBoundSource(source, plan.generation)
+            plan.poller.enable_generation_ack(source)
         worker = HeadlessCameraProcessingWorker(
-            stream=StreamWorker(config=camera.source_config, source=source),
+            stream=StreamWorker(config=source_config, source=source),
             detector=detector,
             pipeline=pipeline,
             ppe_region_id=str(camera.entry.ppe_region_id),
@@ -161,9 +206,11 @@ async def _require_ppe_region(
     camera_external_id: str,
     ppe_region_id: UUID,
 ) -> None:
-    configuration = await store.get(camera_external_id)
+    configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraRuntimeError("Backend returned no active camera region configuration")
+    if isinstance(configuration, CameraConfigurationBundle):
+        return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):
         raise CameraRuntimeError(

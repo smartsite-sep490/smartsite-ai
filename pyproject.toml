@@ -46,6 +46,7 @@ smartsite-ai-install-demo-model = "smartsite_ai.tools.install_demo_face_model:ru
 smartsite-ai-camera-worker = "smartsite_ai.tools.run_camera_worker:main"
 smartsite-ai-camera-runtime = "smartsite_ai.tools.run_camera_runtime:main"
 smartsite-ai-source-probe = "smartsite_ai.tools.probe_source:main"
+smartsite-ai-configuration-capture = "smartsite_ai.tools.run_configuration_capture:main"
 smartsite-ai-detect-video = "smartsite_ai.tools.detect_video:main"
 smartsite-ai-evaluate = "smartsite_ai.tools.evaluate:main"
 smartsite-ai-build-evaluation-dataset = "smartsite_ai.tools.build_evaluation_dataset:main"

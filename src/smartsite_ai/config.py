@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, IPvAnyAddress, SecretStr
+from pydantic import Field, IPvAnyAddress, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,7 +34,13 @@ class Settings(BaseSettings):
     # Local realtime demo settings. Keep these opt-in so the API foundation
     # remains safe when no model/runtime is installed.
     realtime_model_path: str | None = None
+    realtime_artifact_spec_path: Path | None = None
     realtime_source: str | None = None
+    realtime_snapshot_enabled: bool = False
+    realtime_live_latest_frame: bool = False
+    realtime_live_reconnect_attempts: int = Field(default=0, ge=0, le=3)
+    realtime_live_media_enabled: bool = False
+    realtime_recorded_media_enabled: bool = False
     realtime_device: str = Field(
         default="auto",
         pattern=r"^(?:auto|cpu|cuda(?::[0-9]+)?)$",
@@ -44,6 +50,7 @@ class Settings(BaseSettings):
     realtime_camera_external_id: str = "ppe-demo"
     realtime_class_map_path: str | None = None
     realtime_region_configuration_path: str | None = None
+    realtime_region_configuration_reload: bool = False
     realtime_ppe_region_id: str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
     realtime_model_artifact_id: str = "ansarimajid-construction-ppe-yolov8-reference"
     realtime_model_version: str = "8139436e91aecb109362e13cacfea44a16e08358"
@@ -54,3 +61,22 @@ class Settings(BaseSettings):
         "8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt"
     )
     realtime_model_license: str = "MIT (repository declaration; checkpoint terms unverified)"
+    realtime_experimental_model_profile: Literal["native-ppe-10", "unified-ppe-15"] | None = None
+    realtime_observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0"
+
+    @model_validator(mode="after")
+    def validate_expanded_consumer(self) -> "Settings":
+        if self.realtime_live_media_enabled and not self.realtime_live_latest_frame:
+            raise ValueError("raw LIVE media requires latest-frame capture")
+        if self.realtime_artifact_spec_path is not None and (
+            self.realtime_model_path is not None or self.realtime_class_map_path is not None
+        ):
+            raise ValueError(
+                "realtime artifact spec cannot be combined with raw model/class map paths"
+            )
+        if (
+            self.realtime_experimental_model_profile is not None
+            and self.realtime_observation_schema_version != "1.1.0"
+        ):
+            raise ValueError("expanded PPE requires a configured v1.1.0 consumer")
+        return self

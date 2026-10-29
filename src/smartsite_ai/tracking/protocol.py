@@ -11,7 +11,7 @@ class TrackerProtocol(Protocol):
     """Associate person detections across ordered frames of one stream session."""
 
     def update(self, batch: DetectionBatch) -> TrackedFrame:
-        """Return current-frame person tracks without making an identity decision."""
+        """Return each track at most once per frame, without an identity decision."""
         ...
 
 

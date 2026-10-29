@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -17,6 +19,7 @@ from pydantic import (
     Field,
     PlainSerializer,
     ValidationError,
+    ValidationInfo,
     field_validator,
 )
 
@@ -27,16 +30,16 @@ from smartsite_ai.inference.artifacts import (
     VerifiedModelArtifact,
     verify_model_artifact,
 )
+from smartsite_ai.inference.ppe_profiles import (
+    LEGACY_PPE_5_PROFILE,
+    NATIVE_PPE_10_PROFILE,
+    UNIFIED_PPE_15_PROFILE,
+    ExperimentalPpeProfile,
+)
 from smartsite_ai.inference.yolo import RawYoloDetection, Yolo11Detector
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
-CANONICAL_PPE_CLASS_MAP: tuple[tuple[int, str], ...] = (
-    (0, "Person"),
-    (1, "Hardhat"),
-    (2, "NO-Hardhat"),
-    (3, "Safety Vest"),
-    (4, "NO-Safety Vest"),
-)
+CANONICAL_PPE_CLASS_MAP: tuple[tuple[int, str], ...] = LEGACY_PPE_5_PROFILE.class_map
 
 _CANONICAL_PPE_JSON_CLASS_MAP = {
     str(class_id): class_name for class_id, class_name in CANONICAL_PPE_CLASS_MAP
@@ -135,9 +138,23 @@ class _ArtifactSpecDocument(_StrictFrozenModel):
 
     @field_validator("class_map")
     @classmethod
-    def validate_canonical_class_map(cls, value: dict[str, str]) -> dict[str, str]:
-        if value != _CANONICAL_PPE_JSON_CLASS_MAP:
-            raise ValueError("classMap must contain exactly the five canonical PPE classes")
+    def validate_canonical_class_map(
+        cls, value: dict[str, str], info: ValidationInfo
+    ) -> dict[str, str]:
+        profile = (info.context or {}).get("experimental_profile")
+        if profile is None:
+            if value != _CANONICAL_PPE_JSON_CLASS_MAP:
+                raise ValueError("classMap must contain exactly the five canonical PPE classes")
+        elif profile == "native-ppe-10":
+            expected = {str(key): name for key, name in NATIVE_PPE_10_PROFILE.class_map}
+            if value != expected:
+                raise ValueError("classMap must match the exact native-ppe-10 taxonomy")
+        elif profile == "unified-ppe-15":
+            expected = {str(key): name for key, name in UNIFIED_PPE_15_PROFILE.class_map}
+            if value != expected:
+                raise ValueError("classMap must match the exact unified-ppe-15 taxonomy")
+        else:
+            raise ValueError("unsupported experimental PPE profile")
         return value
 
 
@@ -190,8 +207,17 @@ LoadedDetectorStack = tuple[
 ]
 
 
-def load_artifact_spec(path: Path) -> ModelArtifactSpec:
-    """Load one bounded, strict camelCase JSON artifact contract without provider I/O."""
+def load_artifact_spec(
+    path: Path, *, experimental_profile: ExperimentalPpeProfile | None = None
+) -> ModelArtifactSpec:
+    """Read a strict artifact, optionally opting into a known experimental taxonomy.
+
+    The default remains the five-class serving contract. Opt-in only declares
+    detector labels; it grants no model acceptance or expanded wire capability.
+    """
+
+    if experimental_profile not in (None, "native-ppe-10", "unified-ppe-15"):
+        raise ArtifactValidationError("unsupported experimental PPE profile")
 
     raw = _read_bounded_json(path)
     _reject_secret_fields(raw)
@@ -199,7 +225,9 @@ def load_artifact_spec(path: Path) -> ModelArtifactSpec:
         raise ArtifactValidationError("artifact spec must be a JSON object")
 
     try:
-        document = _ArtifactSpecDocument.model_validate(raw)
+        document = _ArtifactSpecDocument.model_validate(
+            raw, context={"experimental_profile": experimental_profile}
+        )
         return ModelArtifactSpec.model_validate(
             {
                 "artifact_id": document.artifact_id,
@@ -209,7 +237,9 @@ def load_artifact_spec(path: Path) -> ModelArtifactSpec:
                 "sha256": document.sha256,
                 "source_url": document.source_url,
                 "license": document.license,
-                "class_map": CANONICAL_PPE_CLASS_MAP,
+                "class_map": tuple(
+                    sorted((int(key), name) for key, name in document.class_map.items())
+                ),
                 "confidence_threshold": document.confidence_threshold,
                 "iou_threshold": document.iou_threshold,
                 "image_size": tuple(document.image_size),
@@ -220,15 +250,56 @@ def load_artifact_spec(path: Path) -> ModelArtifactSpec:
         raise ArtifactValidationError(f"invalid artifact spec: {error}") from error
 
 
-def load_yolo11_detector(path: Path, *, runner_factory: RunnerFactory) -> LoadedDetectorStack:
+def load_yolo11_detector(
+    path: Path,
+    *,
+    runner_factory: RunnerFactory,
+    experimental_profile: ExperimentalPpeProfile | None = None,
+) -> LoadedDetectorStack:
     """Verify and load a YOLO11 detector through an injected explicit provider boundary."""
 
-    spec = load_artifact_spec(path)
+    spec = load_artifact_spec(path, experimental_profile=experimental_profile)
     return load_detector_artifact(
         spec,
         runner_factory=runner_factory,
         require_yolo11_metadata=True,
     )
+
+
+async def load_warmed_yolo11_detector(
+    path: Path,
+    *,
+    runner_factory: RunnerFactory,
+    experimental_profile: ExperimentalPpeProfile | None = None,
+) -> LoadedDetectorStack:
+    """Prepare an explicit worker before camera ingestion starts.
+
+    A bounded synthetic BGR frame initializes the provider's first-prediction
+    state using the verified artifact settings. Its result is discarded here;
+    it never reaches tracking, evidence, an outbox, or a business observation.
+    The detector owns native inference through cancellation before cleanup.
+    """
+    stack = load_yolo11_detector(
+        path, runner_factory=runner_factory, experimental_profile=experimental_profile
+    )
+    detector, runner, _artifact, _class_map = stack
+    try:
+        await detector.detect(
+            FrameEnvelope(
+                stream_id="model-warmup",
+                session_id=uuid4(),
+                camera_external_id="MODEL-WARMUP",
+                captured_at=datetime.now(UTC),
+                width=64,
+                height=64,
+                sequence_number=0,
+                payload=bytes(64 * 64 * 3),
+            )
+        )
+    except BaseException:
+        _close_safely(runner)
+        raise
+    return stack
 
 
 def load_detector_artifact(

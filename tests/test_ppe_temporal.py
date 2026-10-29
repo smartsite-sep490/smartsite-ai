@@ -40,6 +40,107 @@ def ppe_obs(
     )
 
 
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize(
+    "statuses",
+    [("PRESENT", "MISSING"), ("MISSING", "PRESENT"), ("MISSING", "PRESENT", "MISSING")],
+)
+def test_conflicting_frame_breaks_confirmation_regardless_of_observation_order(
+    item: str, statuses: tuple[str, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+
+    def update(frame: int, observations: tuple[PpeObservation, ...]):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1,),
+            observations=observations,
+        )
+
+    assert update(0, (ppe_obs(1, item),)) == ()
+    assert update(1, tuple(ppe_obs(1, item, status) for status in statuses)) == ()
+    assert (
+        gate.confirmed_track_items(
+            stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+        )
+        == frozenset()
+    )
+    # Contradictory evidence is UNKNOWN, so two fresh missing frames are required.
+    assert update(2, (ppe_obs(1, item),)) == ()
+    candidates = update(3, (ppe_obs(1, item),))
+    assert len(candidates) == 1
+    assert candidates[0].first_seen_at == t0 + timedelta(milliseconds=200)
+
+
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+@pytest.mark.parametrize("statuses", [("PRESENT", "MISSING"), ("MISSING", "PRESENT")])
+def test_conflicting_frame_cannot_clear_history_or_poison_other_subjects(
+    item: str, statuses: tuple[str, ...]
+) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=1, clear_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+    other_item = "SAFETY_VEST" if item == "HARD_HAT" else "HARD_HAT"
+
+    def update(frame: int, observations: tuple[PpeObservation, ...]):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1, 2),
+            observations=observations,
+        )
+
+    assert len(update(0, (ppe_obs(1, item),))) == 1
+    update(1, (ppe_obs(1, item, "PRESENT"),))
+    candidates = update(
+        2,
+        (*tuple(ppe_obs(1, item, status) for status in statuses), ppe_obs(2, other_item)),
+    )
+    assert [(candidate.track_id, candidate.ppe_item) for candidate in candidates] == [
+        (2, other_item)
+    ]
+    update(3, (ppe_obs(1, item, "PRESENT"),))
+    assert (1, item) in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+    update(4, (ppe_obs(1, item, "PRESENT"),))
+    assert (1, item) not in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+
+
+@pytest.mark.parametrize("item", ["HARD_HAT", "SAFETY_VEST"])
+def test_consistent_duplicate_observations_count_as_one_frame(item: str) -> None:
+    gate = TemporalPpeCandidateGate(confirmation_frames=2, clear_frames=2)
+    t0 = datetime(2026, 10, 2, tzinfo=UTC)
+
+    def update(frame: int, status: str):
+        return gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(milliseconds=100 * frame),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, item, status),) * 3,
+        )
+
+    assert update(0, "MISSING") == ()
+    assert len(update(1, "MISSING")) == 1
+    update(2, "PRESENT")
+    assert (1, item) in gate.confirmed_track_items(
+        stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+    )
+    update(3, "PRESENT")
+    assert (
+        gate.confirmed_track_items(
+            stream_id=STREAM_ID, session_id=SESSION_ID, active_track_ids=(1,)
+        )
+        == frozenset()
+    )
+
+
 def test_confirmation_at_third_consecutive_missing_observation() -> None:
     gate = TemporalPpeCandidateGate()
     t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
@@ -79,6 +180,8 @@ def test_confirmation_at_third_consecutive_missing_observation() -> None:
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=t0,
         confirmed_at=t_confirm,
     )
@@ -877,8 +980,10 @@ def test_filter_event_for_delivery_mixed_event_without_leaking_raw_missing() -> 
         session_id=SESSION_ID,
         track_id=1,
         ppe_item="HARD_HAT",
-        first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
-        confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+        region_id=REGION_ID,
+        geometry_version=1,
+        first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC) - timedelta(milliseconds=400),
+        confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
     delivered_confirmed = filter_event_for_delivery(mixed_event, (candidate,))
     assert delivered_confirmed is not None
@@ -1113,13 +1218,157 @@ def test_delivery_filtering_rejects_candidate_from_different_session() -> None:
         session_id=session_b,
         track_id=1,
         ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
         first_seen_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
-        confirmed_at=datetime(2026, 9, 21, 12, 0, 1, tzinfo=UTC),
+        confirmed_at=datetime(2026, 9, 21, 12, tzinfo=UTC),
     )
 
     # Must NOT deliver missing PPE authorized by foreign session
     assert filter_event_for_delivery(event_session_a, (candidate_session_b,)) is None
     assert not should_post_event(event_session_a, (candidate_session_b,))
+
+
+@pytest.mark.parametrize("delta", [timedelta(microseconds=-1), timedelta(microseconds=1)])
+def test_delivery_filter_rejects_ppe_confirmation_from_a_different_frame(delta: timedelta) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    event = _make_event(ppe_obs(1))
+    original = event.to_wire_dict()
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
+        first_seen_at=t0 - timedelta(seconds=1),
+        confirmed_at=t0 + delta,
+    )
+
+    assert filter_event_for_delivery(event, (candidate,)) is None
+    assert not should_post_event(event, (candidate,))
+    assert event.to_wire_dict() == original
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    [
+        "2026-09-21T12:00:00Z",
+        "2026-09-21t12:00:00z",
+        "2026-09-21T19:00:00+07:00",
+        "2026-09-21T12:00:00.000000000+00:00",
+    ],
+)
+def test_delivery_filter_matches_the_exact_instant_not_timestamp_spelling(captured_at: str) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    event = TechnicalObservationEvent.model_validate(
+        {**_make_event(ppe_obs(1)).to_wire_dict(), "capturedAt": captured_at}
+    )
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
+        first_seen_at=t0 - timedelta(milliseconds=400),
+        confirmed_at=t0,
+    )
+
+    delivered = filter_event_for_delivery(event, (candidate,))
+    assert delivered is not None
+    assert delivered.to_wire_dict() == event.to_wire_dict()
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    ["2026-09-21T12:00:00.000000001Z", "2016-12-31T23:59:60Z"],
+)
+def test_unrepresentable_event_time_cannot_reuse_confirmation_but_keeps_zone(
+    captured_at: str,
+) -> None:
+    zone = ZoneEntryObservation.model_validate(
+        {"type": "ZONE_ENTRY", "trackId": 1, "regionId": REGION_ID, "geometryVersion": 1}
+    )
+    event = TechnicalObservationEvent.model_validate(
+        {**_make_event(zone, ppe_obs(1)).to_wire_dict(), "capturedAt": captured_at}
+    )
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
+        first_seen_at=t0,
+        confirmed_at=t0,
+    )
+
+    delivered = filter_event_for_delivery(event, (candidate,))
+    assert delivered is not None
+    assert delivered.observations == [zone]
+    assert delivered.captured_at == captured_at
+    assert event.observations == [zone, ppe_obs(1)]
+
+
+def test_stale_ppe_confirmation_does_not_poison_current_item_or_zone_evidence() -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    zone = ZoneEntryObservation.model_validate(
+        {"type": "ZONE_ENTRY", "trackId": 1, "regionId": REGION_ID, "geometryVersion": 1}
+    )
+    vest = ppe_obs(1, "SAFETY_VEST")
+    event = _make_event(zone, ppe_obs(1), vest)
+    candidates = (
+        ConfirmedPpeCandidate(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            track_id=1,
+            ppe_item="HARD_HAT",
+            region_id=REGION_ID,
+            geometry_version=1,
+            first_seen_at=t0 - timedelta(seconds=1),
+            confirmed_at=t0 - timedelta(microseconds=1),
+        ),
+        ConfirmedPpeCandidate(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            track_id=1,
+            ppe_item="SAFETY_VEST",
+            region_id=REGION_ID,
+            geometry_version=1,
+            first_seen_at=t0 - timedelta(milliseconds=400),
+            confirmed_at=t0,
+        ),
+    )
+
+    for ordered in [candidates, tuple(reversed(candidates))]:
+        delivered = filter_event_for_delivery(event, iter(ordered))
+        assert delivered is not None
+        assert delivered.observations == [zone, vest]
+        assert should_post_event(event, ordered)
+
+
+@pytest.mark.parametrize("invalid_time", ["naive_confirmed", "naive_first_seen", "reversed"])
+def test_invalid_candidate_time_cannot_confirm_ppe(invalid_time: str) -> None:
+    t0 = datetime(2026, 9, 21, 12, tzinfo=UTC)
+    first_seen_at = t0
+    if invalid_time == "naive_first_seen":
+        first_seen_at = t0.replace(tzinfo=None)
+    elif invalid_time == "reversed":
+        first_seen_at = t0 + timedelta(microseconds=1)
+    candidate = ConfirmedPpeCandidate(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        track_id=1,
+        ppe_item="HARD_HAT",
+        region_id=REGION_ID,
+        geometry_version=1,
+        first_seen_at=first_seen_at,
+        confirmed_at=t0.replace(tzinfo=None) if invalid_time == "naive_confirmed" else t0,
+    )
+
+    assert filter_event_for_delivery(_make_event(ppe_obs(1)), (candidate,)) is None
 
 
 def test_cooldown_blocked_new_episode_emits_at_cooldown_expiry_if_missing_persists() -> None:
@@ -1209,3 +1458,145 @@ def test_cooldown_blocked_new_episode_emits_at_cooldown_expiry_if_missing_persis
         observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
     )
     assert res_after == ()
+
+
+def test_expired_same_session_cooldowns_and_states_are_pruned_across_new_track_ids() -> None:
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=1,
+        cooldown=timedelta(seconds=10),
+        track_expiry=timedelta(seconds=1),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+
+    for index, track_id in enumerate((1, 2, 3)):
+        observed_at = t0 + timedelta(seconds=11 * index)
+        candidates = gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=observed_at,
+            active_track_ids=(track_id,),
+            observations=(ppe_obs(track_id, "HARD_HAT", "MISSING"),),
+        )
+        assert [candidate.track_id for candidate in candidates] == [track_id]
+        assert set(gate._cooldowns) == {(STREAM_ID, SESSION_ID, track_id, "HARD_HAT", REGION_ID, 1)}
+
+    assert (
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(seconds=33),
+            active_track_ids=(),
+            observations=(),
+        )
+        == ()
+    )
+    assert gate._cooldowns == {}
+    assert gate._states == {}
+
+
+def test_cooldown_expiry_preserves_other_session_clock() -> None:
+    gate = TemporalPpeCandidateGate(
+        confirmation_frames=1,
+        clear_frames=1,
+        cooldown=timedelta(seconds=10),
+        track_expiry=timedelta(seconds=1),
+    )
+    t0 = datetime(2026, 9, 21, 12, 0, 0, tzinfo=UTC)
+    other_stream = "stream-02"
+    other_session = UUID("00000000-0000-4000-8000-000000000002")
+    primary_key = (STREAM_ID, SESSION_ID, 1, "HARD_HAT", REGION_ID, 1)
+    other_key = (other_stream, other_session, 1, "HARD_HAT", REGION_ID, 1)
+
+    assert (
+        len(
+            gate.update(
+                stream_id=STREAM_ID,
+                session_id=SESSION_ID,
+                observed_at=t0,
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            gate.update(
+                stream_id=other_stream,
+                session_id=other_session,
+                observed_at=t0,
+                active_track_ids=(1,),
+                observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+            )
+        )
+        == 1
+    )
+
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=2),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    assert gate._cooldowns[primary_key] == t0
+
+    assert (
+        gate.update(
+            stream_id=STREAM_ID,
+            session_id=SESSION_ID,
+            observed_at=t0 + timedelta(seconds=9, milliseconds=999),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        == ()
+    )
+    assert gate._cooldowns[primary_key] == t0
+
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=9, milliseconds=999, microseconds=500),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+
+    t_expiry = t0 + timedelta(seconds=10)
+    reconfirmed = gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t_expiry,
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+    )
+    assert len(reconfirmed) == 1
+    assert reconfirmed[0].confirmed_at == t_expiry
+    assert gate._cooldowns[primary_key] == t_expiry
+
+    # Expiring the primary cooldown must not prune the other session.
+    gate.update(
+        stream_id=STREAM_ID,
+        session_id=SESSION_ID,
+        observed_at=t0 + timedelta(seconds=25),
+        active_track_ids=(),
+        observations=(),
+    )
+    assert gate._cooldowns == {other_key: t0}
+
+    gate.update(
+        stream_id=other_stream,
+        session_id=other_session,
+        observed_at=t0 + timedelta(seconds=1),
+        active_track_ids=(1,),
+        observations=(ppe_obs(1, "HARD_HAT", "PRESENT"),),
+    )
+    assert (
+        gate.update(
+            stream_id=other_stream,
+            session_id=other_session,
+            observed_at=t0 + timedelta(seconds=5),
+            active_track_ids=(1,),
+            observations=(ppe_obs(1, "HARD_HAT", "MISSING"),),
+        )
+        == ()
+    )

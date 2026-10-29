@@ -10,6 +10,7 @@ from PIL import Image
 
 from smartsite_ai import realtime
 from smartsite_ai.config import Settings
+from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.ingestion.envelope import FrameEnvelope
@@ -48,12 +49,15 @@ def test_preview_binds_even_an_empty_detection_frame_to_its_source_pixels() -> N
 def test_preview_bounds_image_dimensions_without_changing_normalized_geometry() -> None:
     builder = getattr(realtime, "build_realtime_preview", None)
     assert callable(builder), "realtime must bound preview image size"
-    box = {"x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9}
-    event = MagicMock()
-    event.to_wire_dict.return_value = {
-        "cameraExternalId": "CAM-01",
-        "observations": [{"type": "PERSON", "trackId": 1, "confidence": 0.8, "boundingBox": box}],
-    }
+    box = {"x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9, "coordinateSpace": "NORMALIZED_0_1"}
+    event = TechnicalObservationEvent.create(
+        event_id="00000000-0000-4000-8000-000000000002",
+        camera_external_id="CAM-01",
+        stream_session_id=str(frame().session_id),
+        captured_at=frame().captured_at.isoformat(),
+        frame_dimensions={"width": 2000, "height": 1000},
+        observations=[{"type": "PERSON", "trackId": 1, "confidence": 0.8, "boundingBox": box}],
+    )
     payload = builder(event, frame(2000, 1000))
     image = Image.open(io.BytesIO(base64.b64decode(payload["imageDataUrl"].split(",")[1])))
     assert image.size == (1280, 640)

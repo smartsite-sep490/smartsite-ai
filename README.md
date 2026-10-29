@@ -126,6 +126,18 @@ Implemented:
 - authenticated Backend ingestion client with bounded retries and strict response validation;
 - authenticated, bounded camera-configuration polling with strong ETag/304 support and stale-snapshot fail-closed behavior;
 - an explicit one-camera headless worker that connects ingestion, verified YOLO11 inference, tracking, MF05/MF06 pipelines, and Backend delivery without a browser session;
+- both explicit camera worker commands prepare the verified detector with one bounded
+  synthetic frame before opening camera ingestion. The warm-up result is discarded,
+  never emitted as an observation or evidence. Failure stops startup and releases the
+  runner; cancellation waits for native inference before releasing it. This does not
+  initialize a model at API boot or guarantee zero drops under runtime overload;
+- terminal worker reports include measured `frameFlow` counts: `sampledOutFrames` are
+  deliberately excluded by the configured sampling cadence; `framesDropped` are evicted
+  from the bounded queue under backpressure. `framesEnqueued` and `framesDequeued` describe
+  that queue, while `framesProcessed` counts completed processing calls, including frames
+  that produce no event. These are per-run frame counts, not unique people, accuracy, or
+  throughput measurements. Unmeasured counts are omitted; `outbox.delivered` remains a
+  cumulative count for the retained outbox database, not new events in the current run;
 - a crash-tolerant SQLite observation outbox with canonical payload conflict detection, retry scheduling, terminal 4xx classification, and Backend idempotency compatibility;
 - camera ingestion worker foundation (typed `FrameEnvelope`, `FrameSource` protocol boundary, `BoundedFrameQueue` with drop-stale backpressure, bounded exponential backoff with jitter and cancellation, `FakeFrameSource` for deterministic testing, and URL credential sanitization);
 - optional OpenCV video source for local video files, camera indexes, and RTSP URLs, plus a worker smoke-test command;
@@ -843,8 +855,14 @@ not decide an authorized/unauthorized result. The output paths below are ignored
 ```powershell
 uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\morteza_ppe_test_video.mp4 --camera-external-id ppe-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\ppe-ui.annotated.mp4 --metadata-output runs\ppe-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\ppe-ai.timeline.json --region-configuration examples\ppe-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
 
-uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\hazard_restricted_zone_test.mp4 --camera-external-id zone-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\zone-ui.annotated.mp4 --metadata-output runs\zone-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\zone-ai.timeline.json --region-configuration examples\zone-ui-region-configuration.example.json --ppe-region-id f81d4fae-7dec-11d0-a765-00a0c91e6bf6 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
+uv run --frozen --extra vision smartsite-ai-detect-video --input ..\smartsite\apps\web\public\assets\hazard_restricted_zone_test.mp4 --camera-external-id zone-demo --model models\ppe-yolov8-reference.pt --model-artifact-id ansarimajid-construction-ppe-yolov8-reference --model-version 8139436e91aecb109362e13cacfea44a16e08358 --model-family yolov8 --model-sha256 5c981fd81432236cd6c88fa336697370f110383a62cc967f7759debf3c2b147e --class-map .cache\ppe-yolov8-reference.class-map.json --output runs\zone-ui.annotated.mp4 --metadata-output runs\zone-ui.run.json --ui-timeline-output ..\smartsite\apps\web\public\assets\zone-ai.timeline.json --region-configuration examples\zone-ui-region-configuration.example.json --ppe-region-id 00000000-0000-4000-8000-000000000002 --model-source-url https://raw.githubusercontent.com/Ansarimajid/Construction-PPE-Detection/8139436e91aecb109362e13cacfea44a16e08358/Model/ppe.pt --model-license 'MIT (repository declaration; checkpoint terms unverified)' --device cpu
 ```
+
+The Zone example uses two distinct regions: `00000000-0000-4000-8000-000000000002` is the
+full-frame PPE observation region; `f81d4fae-7dec-11d0-a765-00a0c91e6bf6` is the restricted
+polygon. The pipeline excludes the selected PPE region from Zone-entry checks. Selecting the
+restricted region as `--ppe-region-id` would therefore disable its Zone observations. These
+sample polygons are for local diagnostics; real cameras need their own reviewed geometry.
 
 ## Testing
 

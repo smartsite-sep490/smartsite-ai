@@ -75,6 +75,96 @@ def make_pipeline() -> Mf05Mf06Pipeline:
     )
 
 
+def test_disjoint_person_cannot_inherit_another_person_zone_confirmation_at_zero_threshold():
+    pipeline = Mf05Mf06Pipeline(
+        tracker=IoUPersonTracker(iou_threshold=0),
+        ppe=PpePipeline(),
+        zones=RestrictedZonePipeline(entry_confirmation_frames=2),
+        ppe_region_id=PPE_REGION_ID,
+    )
+    events = []
+    for sequence, bounds in enumerate(
+        [(0.41, 0.10, 0.48, 0.60), (0.68, 0.10, 0.75, 0.60), (0.68, 0.10, 0.75, 0.60)], 1
+    ):
+        event = pipeline.process(
+            batch(sequence, detection("person", bounds)),
+            region_configuration=configuration(),
+            event_id=f"00000000-0000-4000-8000-{sequence:012d}",
+        )
+        assert event is not None
+        events.append(event)
+    assert not any(o.type == "ZONE_ENTRY" for o in events[1].observations)
+    people = [[o.track_id for o in event.observations if o.type == "PERSON"] for event in events]
+    assert people[0] != people[1] == people[2]
+    assert [o.track_id for o in events[2].observations if o.type == "ZONE_ENTRY"] == people[2]
+
+
+def test_ten_person_scene_keeps_three_missing_ppe_subjects_and_polygon_entries_separate():
+    from smartsite_ai.pipelines.ppe_temporal import (
+        TemporalPpeCandidateGate,
+        filter_event_for_delivery,
+    )
+
+    detections = []
+    for index in range(10):
+        x, y = 0.04 + (index % 5) * 0.18, 0.05 + (index // 5) * 0.45
+        detections.extend(
+            [
+                detection("person", (x, y, x + 0.12, y + 0.35)),
+                detection(
+                    "no-hardhat" if index < 3 else "hardhat",
+                    (x + 0.04, y + 0.02, x + 0.08, y + 0.06),
+                ),
+                detection(
+                    "no-safety vest" if index < 3 else "safety vest",
+                    (x + 0.02, y + 0.11, x + 0.10, y + 0.24),
+                ),
+            ]
+        )
+    content = configuration().model_dump(mode="python", by_alias=True)
+    content["regions"][1]["polygon"]["coordinates"] = (
+        (0.0, 0.0),
+        (0.57, 0.0),
+        (0.57, 0.42),
+        (0.0, 0.42),
+    )
+    config = CameraRegionConfiguration.model_validate(content)
+    pipeline, gate = make_pipeline(), TemporalPpeCandidateGate()
+    delivered = []
+    for sequence in range(1, 5):
+        current = batch(sequence, *detections)
+        event = pipeline.process(
+            current,
+            region_configuration=config,
+            event_id=f"00000000-0000-4000-8000-{sequence:012d}",
+        )
+        assert event is not None
+        persons = [o.track_id for o in event.observations if o.type == "PERSON"]
+        assert len(persons) == len(set(persons)) == 10
+        candidates = gate.update(
+            stream_id=current.stream_id,
+            session_id=current.session_id,
+            observed_at=current.captured_at,
+            active_track_ids=persons,
+            observations=[o for o in event.observations if o.type == "PPE"],
+        )
+        delivery = filter_event_for_delivery(event, candidates)
+        if delivery is not None:
+            delivered.append(delivery)
+    assert len(delivered) == 1
+    missing = [o for o in delivered[0].observations if o.type == "PPE" and o.status == "MISSING"]
+    assert {(o.track_id, o.ppe_item) for o in missing} == {
+        # Detector batches sort by x then y; the first row's first three are 1/3/5.
+        (track, item)
+        for track in (1, 3, 5)
+        for item in ("HARD_HAT", "SAFETY_VEST")
+    }
+    entries = [o for o in delivered[0].observations if o.type == "ZONE_ENTRY"]
+    assert {o.track_id for o in entries} == {1, 3, 5}
+    assert all(o.region_id == REGION_ID and o.geometry_version == 7 for o in entries)
+    assert len([o for o in delivered[0].observations if o.type == "PERSON"]) == 10
+
+
 def test_pipeline_builds_technical_observations_without_authorization_decisions() -> None:
     pipeline = make_pipeline()
     first = pipeline.process(

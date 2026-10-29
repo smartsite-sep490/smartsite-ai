@@ -207,7 +207,7 @@ class _Detector:
 
 
 class _Pipeline:
-    def process(
+    def observe(
         self,
         batch: DetectionBatch,
         *,
@@ -272,6 +272,8 @@ class _Gate:
                 session_id=session_id,
                 track_id=active_track_ids[0],
                 ppe_item="HARD_HAT",
+                region_id=REGION_ID,
+                geometry_version=1,
                 first_seen_at=observed_at,
                 confirmed_at=observed_at,
             ),
@@ -687,8 +689,8 @@ def _run_subject_sequence(
     )
 
     class SequencePipeline(_Pipeline):
-        def process(self, batch, **kwargs):
-            event = super().process(batch, **kwargs)
+        def observe(self, batch, **kwargs):
+            event = super().observe(batch, **kwargs)
             active_tracks = (7,) if tracks is None else tracks[batch.sequence_number]
             observations = tuple(
                 item.model_copy(update={"track_id": track_id})
@@ -968,7 +970,7 @@ def test_video_frame_without_event_still_advances_temporal_gate(tmp_path: Path) 
     calls: list[tuple[tuple[int, ...], tuple[object, ...]]] = []
 
     class NoEventPipeline:
-        def process(self, *args: object, **kwargs: object) -> None:
+        def observe(self, *args: object, **kwargs: object) -> None:
             return None
 
     class RecordingGate:

@@ -289,3 +289,178 @@ def test_ambiguous_association_breaks_pending_temporal_confirmation() -> None:
             observations=pipeline.process(frame, region()),
         )
         assert candidates == ()
+
+
+def test_empty_present_map_ignores_positive_while_negatives_work() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.35, 0.80), 0.9),
+            detection("Hardhat", (0.14, 0.12, 0.24, 0.25), 0.95),
+            detection("NO-Safety Vest", (0.15, 0.35, 0.30, 0.70), 0.90),
+        )
+    )
+    pipeline = PpePipeline(class_names_by_item={})
+    observations = pipeline.process(tracked, region())
+    assert [(item.ppe_item, item.status) for item in observations] == [
+        ("SAFETY_VEST", "MISSING"),
+    ]
+
+
+def test_empty_negative_map_ignores_negative_while_positives_work() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.35, 0.80), 0.9),
+            detection("Hardhat", (0.14, 0.12, 0.24, 0.25), 0.95),
+            detection("NO-Safety Vest", (0.15, 0.35, 0.30, 0.70), 0.90),
+        )
+    )
+    pipeline = PpePipeline(missing_class_names_by_item={})
+    observations = pipeline.process(tracked, region())
+    assert [(item.ppe_item, item.status) for item in observations] == [
+        ("HARD_HAT", "PRESENT"),
+    ]
+
+
+def test_both_empty_maps_emit_zero_observations_even_with_detections_and_emit_missing() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.35, 0.80), 0.9),
+            detection("Hardhat", (0.14, 0.12, 0.24, 0.25), 0.95),
+            detection("NO-Safety Vest", (0.15, 0.35, 0.30, 0.70), 0.90),
+        )
+    )
+    pipeline = PpePipeline(
+        class_names_by_item={},
+        missing_class_names_by_item={},
+        emit_missing=True,
+    )
+    observations = pipeline.process(tracked, region())
+    assert observations == ()
+
+
+def test_none_mappings_preserve_default_behavior() -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("Person", (0.10, 0.10, 0.35, 0.80), 0.9),
+            detection("Hardhat", (0.14, 0.12, 0.24, 0.25), 0.95),
+            detection("NO-Safety Vest", (0.15, 0.35, 0.30, 0.70), 0.90),
+        )
+    )
+    pipeline = PpePipeline(class_names_by_item=None, missing_class_names_by_item=None)
+    observations = pipeline.process(tracked, region())
+    assert [(item.ppe_item, item.status) for item in observations] == [
+        ("HARD_HAT", "PRESENT"),
+        ("SAFETY_VEST", "MISSING"),
+    ]
+
+
+def test_custom_mapping_preserves_unsupported_item_and_collision_rejections() -> None:
+    with pytest.raises(ValueError, match="unsupported PPE item"):
+        PpePipeline(class_names_by_item={"UNSUPPORTED": ["hat"]})  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="maps to multiple observations"):
+        PpePipeline(
+            class_names_by_item={"HARD_HAT": ["collision_hat"]},
+            missing_class_names_by_item={"HARD_HAT": ["collision_hat"]},
+        )
+
+
+@pytest.mark.parametrize(
+    ("negative_name", "item", "bounds"),
+    [
+        ("no-helmet", "HARD_HAT", (0.15, 0.12, 0.25, 0.25)),
+        ("no-vest", "SAFETY_VEST", (0.15, 0.35, 0.30, 0.65)),
+    ],
+)
+def test_native_negative_labels_reach_default_ppe_pipeline(
+    negative_name: str, item: str, bounds: tuple[float, float, float, float]
+) -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("person", (0.10, 0.10, 0.35, 0.80)).model_copy(update={"class_id": 3}),
+            detection(negative_name, bounds).model_copy(
+                update={"class_id": 1 if item == "HARD_HAT" else 2}
+            ),
+        )
+    )
+    observations = PpePipeline().process(tracked, region())
+    assert [(obs.track_id, obs.ppe_item, obs.status) for obs in observations] == [
+        (1, item, "MISSING")
+    ]
+    assert {(det.class_id, det.class_name) for det in tracked.batch.detections} == {
+        (3, "person"),
+        (1 if item == "HARD_HAT" else 2, negative_name),
+    }
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative", "bounds"),
+    [
+        ("helmet", "no-helmet", (0.15, 0.12, 0.25, 0.25)),
+        ("vest", "no-vest", (0.15, 0.35, 0.30, 0.65)),
+        ("Hardhat", "no-helmet", (0.15, 0.12, 0.25, 0.25)),
+        ("helmet", "NO-Hardhat", (0.15, 0.12, 0.25, 0.25)),
+        ("Safety Vest", "no-vest", (0.15, 0.35, 0.30, 0.65)),
+        ("vest", "NO-Safety Vest", (0.15, 0.35, 0.30, 0.65)),
+    ],
+)
+def test_native_contradictory_labels_remain_unknown(
+    positive: str, negative: str, bounds: tuple[float, float, float, float]
+) -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("person", (0.10, 0.10, 0.35, 0.80)),
+            detection(positive, bounds),
+            detection(negative, bounds),
+        )
+    )
+    assert PpePipeline().process(tracked, region()) == ()
+
+
+@pytest.mark.parametrize(
+    ("negative", "item", "bounds"),
+    [
+        ("no-helmet", "HARD_HAT", (0.15, 0.12, 0.25, 0.25)),
+        ("no-vest", "SAFETY_VEST", (0.15, 0.35, 0.30, 0.65)),
+    ],
+)
+def test_native_duplicate_boxes_confirm_once_after_three_frames(
+    negative: str, item: str, bounds: tuple[float, float, float, float]
+) -> None:
+    pipeline = PpePipeline()
+    gate = TemporalPpeCandidateGate(confirmation_frames=3)
+    tracker = IoUPersonTracker()
+    t0 = datetime(2026, 10, 5, 12, tzinfo=UTC)
+    candidates = []
+    for index in range(4):
+        current = batch(
+            detection("person", (0.10, 0.10, 0.35, 0.80)),
+            detection(negative, bounds),
+            detection(negative, bounds, confidence=0.8),
+        ).model_copy(update={"sequence_number": index + 1})
+        tracked = tracker.update(current)
+        emitted = gate.update(
+            stream_id=current.stream_id,
+            session_id=current.session_id,
+            observed_at=t0 + timedelta(milliseconds=100 * index),
+            active_track_ids=tuple(person.track_id for person in tracked.persons),
+            observations=pipeline.process(tracked, region()),
+        )
+        assert len(emitted) == (1 if index == 2 else 0)
+        candidates.extend(emitted)
+    assert len(candidates) == 1
+    assert candidates[0].ppe_item == item
+    assert candidates[0].first_seen_at == t0
+
+
+@pytest.mark.parametrize("unsupported", ["no-gloves", "no-boots", "no-harness", "NO-PPE"])
+def test_unsupported_negative_labels_are_not_coerced_into_helmet_or_vest(
+    unsupported: str,
+) -> None:
+    tracked = IoUPersonTracker().update(
+        batch(
+            detection("person", (0.10, 0.10, 0.35, 0.80)),
+            detection(unsupported, (0.15, 0.35, 0.30, 0.65)),
+        )
+    )
+    assert PpePipeline().process(tracked, region()) == ()

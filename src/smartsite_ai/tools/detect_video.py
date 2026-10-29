@@ -44,7 +44,7 @@ from smartsite_ai.pipelines import (
     PpePipeline,
     RestrictedZonePipeline,
     TemporalPpeCandidateGate,
-    filter_event_for_delivery,
+    events_for_delivery,
 )
 from smartsite_ai.tracking import IoUPersonTracker
 
@@ -84,7 +84,7 @@ class _UiTimelineCollector:
         self.temporal_gate = TemporalPpeCandidateGate()
 
     def observe(self, batch: DetectionBatch, video_time_seconds: float) -> None:
-        event = self.pipeline.process(
+        event = self.pipeline.observe(
             batch,
             region_configuration=self.configuration,
             event_id=str(
@@ -113,16 +113,13 @@ class _UiTimelineCollector:
         if event is None:
             return
 
-        delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-        if delivery_event is None:
-            return
-
-        self.entries.append(
-            {
-                "videoTimeSeconds": round(video_time_seconds, 3),
-                "event": delivery_event.to_wire_dict(),
-            }
-        )
+        for delivery_event in events_for_delivery(event, confirmed_candidates):
+            self.entries.append(
+                {
+                    "videoTimeSeconds": round(video_time_seconds, 3),
+                    "event": delivery_event.to_wire_dict(),
+                }
+            )
 
     def write(self, path: Path) -> None:
         if path.suffix.lower() != ".json":

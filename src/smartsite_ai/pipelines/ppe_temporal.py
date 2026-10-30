@@ -1,12 +1,13 @@
 """Deterministic temporal confirmation, clearing, and cooldown for PPE candidates."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from smartsite_ai.domain.observations import PpeObservation, TechnicalObservationEvent
-from smartsite_ai.pipelines.ppe import PPE_ITEMS, PpeItem
+from smartsite_ai.domain.configuration_bundle import PPE_ITEMS, PpeItem
+from smartsite_ai.domain.observations import Observation, PpeObservation, TechnicalObservationEvent
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +20,8 @@ class ConfirmedPpeCandidate:
     ppe_item: PpeItem
     first_seen_at: datetime
     confirmed_at: datetime
+    region_id: str | None = None
+    geometry_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -205,9 +208,29 @@ def filter_event_for_delivery(
     - Returns None if no deliverable trigger (ZONE_ENTRY or confirmed PPE/MISSING) remains.
     """
 
+    observations = _delivery_observations(event, confirmed_ppe_candidates)
+    if observations is None:
+        return None
+    return TechnicalObservationEvent.create(
+        event_id=event.event_id,
+        camera_external_id=event.camera_external_id,
+        stream_session_id=event.stream_session_id,
+        captured_at=event.captured_at,
+        frame_dimensions=event.frame_dimensions,
+        observations=observations,
+        evidence=event.evidence,
+        schema_version=event.schema_version,
+        frame_partition=event.frame_partition,
+    )
+
+
+def _delivery_observations(
+    event: ObservationFrame | TechnicalObservationEvent,
+    confirmed_ppe_candidates: Iterable[ConfirmedPpeCandidate],
+) -> list[Observation] | None:
     event_session_str = event.stream_session_id
     confirmed_keys = {
-        (candidate.track_id, candidate.ppe_item)
+        (candidate.track_id, candidate.ppe_item, candidate.region_id, candidate.geometry_version)
         for candidate in confirmed_ppe_candidates
         if str(candidate.session_id) == event_session_str
     }
@@ -222,7 +245,10 @@ def filter_event_for_delivery(
         elif obs.type == "PPE":
             if obs.status == "PRESENT":
                 filtered_observations.append(obs)
-            elif obs.status == "MISSING" and (obs.track_id, obs.ppe_item) in confirmed_keys:
+            elif obs.status == "MISSING" and (
+                (obs.track_id, obs.ppe_item, obs.region_id, obs.geometry_version) in confirmed_keys
+                or (obs.track_id, obs.ppe_item, None, None) in confirmed_keys
+            ):
                 filtered_observations.append(obs)
                 has_deliverable_trigger = True
         else:
@@ -231,16 +257,30 @@ def filter_event_for_delivery(
     if not has_deliverable_trigger or not filtered_observations:
         return None
 
-    return TechnicalObservationEvent.create(
-        event_id=event.event_id,
-        camera_external_id=event.camera_external_id,
-        stream_session_id=event.stream_session_id,
-        captured_at=event.captured_at,
-        frame_dimensions=event.frame_dimensions,
-        observations=filtered_observations,
-        evidence=event.evidence,
-        schema_version=event.schema_version,
-    )
+    return filtered_observations
+
+
+def events_for_delivery(
+    frame: ObservationFrame | TechnicalObservationEvent,
+    confirmed_ppe_candidates: Iterable[ConfirmedPpeCandidate] = (),
+    *,
+    partition_sequence_number: int | None = None,
+) -> tuple[TechnicalObservationEvent, ...]:
+    if isinstance(frame, TechnicalObservationEvent):
+        if partition_sequence_number is not None:
+            raise ValueError("Partitioned delivery requires the full ObservationFrame")
+        event = filter_event_for_delivery(frame, confirmed_ppe_candidates)
+        return () if event is None else (event,)
+    observations = _delivery_observations(frame, confirmed_ppe_candidates)
+    if observations is None:
+        return ()
+    selected = replace(frame, observations=tuple(observations))
+    if partition_sequence_number is not None:
+        return selected.to_partitioned_events(sequence_number=partition_sequence_number)
+    events = selected.to_events()
+    if len(events) > 1:
+        raise ValueError("Multipart delivery requires explicit v1.4 frame metadata")
+    return events
 
 
 def should_post_event(

@@ -8,5 +8,39 @@
     "schemaVersion": "1.0.0",
     "schemaSha256": "36e165aa755cc66be45ef06486ecaf0635b5d1db7ad492f3665ac6f5f8c69fd2",
     "goldenVectorsSha256": "7b16024bd8c85e754567f1a39c9a1e578fa80af1963a853ca9f68dbf0cc435f5"
-  }
+  },
+  "technicalObservationVersions": [
+    {
+      "schemaVersion": "1.1.0",
+      "path": "contracts/schemas/v1.1/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "dd71e4c923b496eb1ebe4b06189ff71c1a428f68",
+      "sourcePath": "contracts/schemas/v1.1/technical-observation-event.json",
+      "schemaSha256": "c860d8df10afad96a529595f6d9253688ad83c5b10c6492d7ac1ebeef83ccc73"
+    },
+    {
+      "schemaVersion": "1.2.0",
+      "path": "contracts/schemas/v1.2/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "dd71e4c923b496eb1ebe4b06189ff71c1a428f68",
+      "sourcePath": "contracts/schemas/v1.2/technical-observation-event.json",
+      "schemaSha256": "af9fdcd9e5945cf6f4cdbf2ef733b71b2a02f70f0030846df4f495c08ff5c7c9"
+    },
+    {
+      "schemaVersion": "1.3.0",
+      "path": "contracts/schemas/v1.3/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "dd71e4c923b496eb1ebe4b06189ff71c1a428f68",
+      "sourcePath": "contracts/schemas/v1.3/technical-observation-event.json",
+      "schemaSha256": "aeaca84f01d7b1af9c496864ce68facd7dc77a210c66770a33728420fe590f84"
+    },
+    {
+      "schemaVersion": "1.4.0",
+      "path": "contracts/schemas/v1.4/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "dd71e4c923b496eb1ebe4b06189ff71c1a428f68",
+      "sourcePath": "contracts/schemas/v1.4/technical-observation-event.json",
+      "schemaSha256": "fa15581034c6e7d4366f7e264079541fcaecb00db12439dcc33c67b84bf41c66"
+    }
+  ]
 }

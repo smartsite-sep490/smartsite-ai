@@ -189,6 +189,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             camera_external_id=args.camera_external_id,
             poll_interval_seconds=args.poll_interval,
             stale_after_seconds=args.stale_after,
+            require_bundle=generation is not None,
         )
         # Validate authoritative regions before opening a camera or loading GPU state.
         await poller.refresh()
@@ -204,6 +205,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             frame_source = OpenCvFrameSource(source_config)
             if generation is not None:
                 frame_source = GenerationBoundSource(frame_source, generation)
+                poller.enable_generation_ack(frame_source)
             stream = StreamWorker(config=source_config, source=frame_source)
             pipeline = Mf05Mf06Pipeline(
                 tracker=IoUPersonTracker(),

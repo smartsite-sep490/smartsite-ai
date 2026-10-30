@@ -83,6 +83,7 @@ async def preflight_manifest(
                     camera_external_id=camera.camera_external_id,
                     poll_interval_seconds=bound.manifest.poll_interval_seconds,
                     stale_after_seconds=bound.manifest.stale_after_seconds,
+                    require_bundle=generation is not None,
                 )
                 await poller.refresh()
                 poller.ensure_fresh()
@@ -146,7 +147,9 @@ def assemble_sessions(
         outbox = SqliteEventOutbox(camera.outbox)
         source = source_factory(camera.source_config)
         if plan.generation is not None:
+            plan.generation.ensure_current(datetime.now(UTC))
             source = GenerationBoundSource(source, plan.generation)
+            plan.poller.enable_generation_ack(source)
         worker = HeadlessCameraProcessingWorker(
             stream=StreamWorker(config=camera.source_config, source=source),
             detector=detector,

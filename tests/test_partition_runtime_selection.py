@@ -21,7 +21,10 @@ from smartsite_ai.tools import run_camera_worker as cli
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_manifest_selection_reaches_real_worker_and_hash_publisher(tmp_path: Path, enabled):
+@pytest.mark.parametrize("bound_enabled", [False, True])
+def test_manifest_selection_reaches_real_worker_and_hash_publisher(
+    tmp_path: Path, enabled, bound_enabled
+):
     async def scenario():
         credential, _ = credential_file(tmp_path)
         model, video = tmp_path / "model.json", tmp_path / "synthetic.mp4"
@@ -39,10 +42,13 @@ def test_manifest_selection_reaches_real_worker_and_hash_publisher(tmp_path: Pat
         }
         if enabled:
             entry["partitionedFrameDelivery"] = True
+        if bound_enabled:
+            entry["generationBoundEventDelivery"] = True
         manifest = parse_manifest(
             {"schemaVersion": "1", "modelSpec": str(model), "cameras": [entry]}
         )
         assert manifest.cameras[0].partitioned_frame_delivery is enabled
+        assert manifest.cameras[0].generation_bound_event_delivery is bound_enabled
         for value in ["true", 1, None]:
             with pytest.raises(CameraRuntimeError):
                 parse_manifest(
@@ -68,6 +74,8 @@ def test_manifest_selection_reaches_real_worker_and_hash_publisher(tmp_path: Pat
             )
             worker = sessions[0].worker
             assert worker._partitioned_frame_delivery is enabled
+            assert (worker._delivery_context_provider is not None) is bound_enabled
+            assert (worker._dispatcher._generation_credential is not None) is bound_enabled
             assert worker._evidence_publisher._bind_content_hash is enabled
             assert not source.is_connected
         finally:
@@ -77,8 +85,9 @@ def test_manifest_selection_reaches_real_worker_and_hash_publisher(tmp_path: Pat
 
 
 @pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("bound_enabled", [False, True])
 def test_single_cli_optin_keeps_default_off_and_reaches_worker_before_any_source_open(
-    tmp_path, monkeypatch, enabled
+    tmp_path, monkeypatch, enabled, bound_enabled
 ):
     async def scenario():
         credential, _ = credential_file(tmp_path)
@@ -106,8 +115,11 @@ def test_single_cli_optin_keeps_default_off_and_reaches_worker_before_any_source
         ]
         if enabled:
             args.append("--partitioned-frame-delivery")
+        if bound_enabled:
+            args.append("--generation-bound-event-delivery")
         parsed = cli.build_parser().parse_args(args)
         assert parsed.partitioned_frame_delivery is enabled
+        assert parsed.generation_bound_event_delivery is bound_enabled
         monkeypatch.setattr(
             cli.BackendConfigurationClient, "from_settings", lambda settings: ConfigurationClient()
         )
@@ -123,6 +135,8 @@ def test_single_cli_optin_keeps_default_off_and_reaches_worker_before_any_source
 
         async def inspect(worker, poller):
             assert worker._partitioned_frame_delivery is enabled
+            assert (worker._delivery_context_provider is not None) is bound_enabled
+            assert (worker._dispatcher._generation_credential is not None) is bound_enabled
             assert worker._evidence_publisher._bind_content_hash is enabled
             assert not source.is_connected
             assert poller._bound_source is worker._stream.source
@@ -170,3 +184,28 @@ def test_fullbundle_entry_preflight_does_not_require_arbitrary_legacy_anchor():
             await cli._require_ppe_region(legacy, "CAM", uuid4())
 
     asyncio.run(scenario())
+
+
+def test_bound_manifest_requires_real_boolean_and_original_credential(tmp_path):
+    entry = {
+        "streamId": "synthetic",
+        "cameraId": str(CAMERA),
+        "cameraExternalId": "CAM",
+        "ppeRegionId": str(REGION),
+        "source": {"kind": "path", "path": str(tmp_path / "video.mp4")},
+        "outbox": str(tmp_path / "outbox.sqlite3"),
+    }
+    for value in [True, "true", 1, None]:
+        with pytest.raises(CameraRuntimeError):
+            parse_manifest(
+                {
+                    "schemaVersion": "1",
+                    "modelSpec": str(tmp_path / "model.json"),
+                    "cameras": [{**entry, "generationBoundEventDelivery": value}],
+                }
+            )
+
+
+def test_bound_cli_refuses_missing_credential_before_resolving_resources():
+    with pytest.raises(cli.CameraWorkerRunError, match="credential"):
+        asyncio.run(cli.run_worker(SimpleNamespace(generation_bound_event_delivery=True)))

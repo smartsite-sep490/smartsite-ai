@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--outbox", type=Path, required=True)
     parser.add_argument("--generation-credential-file", type=Path)
     parser.add_argument("--partitioned-frame-delivery", action="store_true")
+    parser.add_argument("--generation-bound-event-delivery", action="store_true")
     parser.add_argument("--target-fps", type=float)
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--stale-after", type=float, default=60.0)
@@ -156,6 +157,13 @@ async def _coordinate(
 
 
 async def run_worker(args: argparse.Namespace, *, settings: Settings | None = None) -> int:
+    if (
+        getattr(args, "generation_bound_event_delivery", False)
+        and getattr(args, "generation_credential_file", None) is None
+    ):
+        raise CameraWorkerRunError(
+            "Bound event delivery requires an original generation credential"
+        )
     runtime_settings = settings or Settings()
     model_spec_path = _absolute_existing_file(args.model_spec, "model spec")
     outbox_path = _absolute_outbox_path(args.outbox)
@@ -234,7 +242,16 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
                 ppe_region_id=str(args.ppe_region_id),
                 configurations=store,
                 outbox=outbox,
-                dispatcher=OutboxDispatcher(outbox, backend_client),
+                dispatcher=OutboxDispatcher(
+                    outbox,
+                    backend_client,
+                    generation_credential=generation
+                    if getattr(args, "generation_bound_event_delivery", False)
+                    else None,
+                ),
+                delivery_context_provider=poller.snapshot_delivery_context
+                if getattr(args, "generation_bound_event_delivery", False)
+                else None,
                 configuration_guard=poller.ensure_fresh,
                 delivery_interval_seconds=args.delivery_interval,
                 evidence_publisher=evidence_publisher,

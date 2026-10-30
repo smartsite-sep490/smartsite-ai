@@ -114,6 +114,8 @@ class GenerationBoundSource:
         self._clock = clock
         self._opened = False
         self._underlying_session: UUID | None = None
+        self._normal_eof = False
+        self._last_frame: FrameEnvelope | None = None
 
     @property
     def source_id(self) -> str:
@@ -135,6 +137,23 @@ class GenerationBoundSource:
         self.ensure_current()
         return self.is_connected and self._underlying_session is not None
 
+    def can_drain_replay_frame(self, frame: FrameEnvelope) -> bool:
+        """Owned finite queue may drain after normal EOF; no new connection/lease.
+
+        This is an internal queue boundary, not public proof of capture or pixels.
+        Manual close and exceptional reads do not establish a finite EOF.
+        """
+        self.ensure_current()
+        last = self._last_frame
+        return (
+            self._normal_eof
+            and last is not None
+            and frame.session_id == last.session_id
+            and frame.stream_id == last.stream_id
+            and frame.camera_external_id == last.camera_external_id
+            and 0 <= frame.sequence_number <= last.sequence_number
+        )
+
     async def connect(self) -> None:
         self.ensure_current()
         if self._opened:
@@ -147,6 +166,7 @@ class GenerationBoundSource:
         frame = await self._source.read_frame()
         self.ensure_current()
         if frame is None:
+            self._normal_eof = True
             return None
         if self._underlying_session is None:
             if frame.sequence_number != 0:
@@ -154,7 +174,9 @@ class GenerationBoundSource:
             self._underlying_session = frame.session_id
         elif frame.session_id != self._underlying_session:
             raise RuntimeError("Worker generation source session changed")
-        return frame.model_copy(update={"session_id": UUID(self._binding.stream_session_id)})
+        bound_frame = frame.model_copy(update={"session_id": UUID(self._binding.stream_session_id)})
+        self._last_frame = bound_frame
+        return bound_frame
 
     async def close(self) -> None:
         await self._source.close()

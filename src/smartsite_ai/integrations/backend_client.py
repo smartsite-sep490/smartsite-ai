@@ -7,12 +7,19 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from smartsite_ai.config import Settings
+from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
+from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_FACTOR = 0.5
 INGESTION_ENDPOINT_PATH = "/api/v1/integrations/ai/events"
+BOUND_INGESTION_ENDPOINT_PATH = "/api/v1/integrations/ai/worker-events"
+
+
+class BoundDeliveryCredentialUnavailable(RuntimeError):
+    """The original event credential is unavailable; never substitute a newer one."""
 
 
 class BackendIngestionResponse(BaseModel):
@@ -217,9 +224,49 @@ class BackendClient:
                 f"event must be TechnicalObservationEvent or dict, got {type(event).__name__}"
             )
         payload = validated_event.to_wire_dict()
+        return await self._post_payload(
+            validated_event.event_id, payload, self._resolve_url(), self._get_headers()
+        )
 
-        url = self._resolve_url()
+    async def post_bound_event(
+        self,
+        event: TechnicalObservationEvent,
+        context: EventDeliveryContext,
+        credential: WorkerGenerationCredential,
+    ) -> dict[str, Any]:
+        """Deliver the original claim; Backend decides expiry/admission, not this sender.
+
+        The credential may authenticate an old pending claim. It grants no right
+        to open a new source or reuse an expired generation for processing.
+        """
+        context = EventDeliveryContext.model_validate_json(context.model_dump_json(by_alias=True))
+        if (
+            not isinstance(credential, WorkerGenerationCredential)
+            or credential.camera_id != context.camera_id
+            or credential.worker_generation_id != context.worker_generation_id
+            or credential.stream_session_id != context.stream_session_id
+            or event.stream_session_id != context.stream_session_id
+        ):
+            raise BoundDeliveryCredentialUnavailable(
+                "Original generation credential is unavailable"
+            )
+        origin = self._base_url.removesuffix(INGESTION_ENDPOINT_PATH)
         headers = self._get_headers()
+        headers["x-worker-generation-secret"] = credential.secret.get_secret_value()
+        return await self._post_payload(
+            event.event_id,
+            {
+                "schemaVersion": "1.0.0",
+                "context": context.model_dump(mode="json", by_alias=True),
+                "event": event.to_wire_dict(),
+            },
+            f"{origin}{BOUND_INGESTION_ENDPOINT_PATH}",
+            headers,
+        )
+
+    async def _post_payload(
+        self, event_id: str, payload: dict[str, Any], url: str, headers: dict[str, str]
+    ) -> dict[str, Any]:
         client = await self._get_client()
 
         total_attempts = self._max_retries + 1
@@ -242,7 +289,7 @@ class BackendClient:
             # 1. Successful response (2xx) -> return decoded JSON
             if 200 <= status < 300:
                 accepted = BackendIngestionResponse.model_validate(response.json())
-                if accepted.event_id != validated_event.event_id:
+                if accepted.event_id != event_id:
                     raise ValueError(
                         "Backend ingestion response eventId does not match the submitted event"
                     )

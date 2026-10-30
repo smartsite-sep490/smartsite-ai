@@ -6,6 +6,7 @@ import asyncio
 import math
 from collections.abc import Callable
 from time import monotonic
+from typing import Literal
 from uuid import UUID, uuid4
 
 from smartsite_ai.core.region_configuration_store import (
@@ -14,6 +15,9 @@ from smartsite_ai.core.region_configuration_store import (
     RegionConfigurationStore,
 )
 from smartsite_ai.domain.configuration_ack import CameraConfigurationAcknowledgement
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
+from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
+from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.integrations.backend_configuration_client import (
     BackendConfigurationClient,
     BackendConfigurationError,
@@ -87,6 +91,75 @@ class CameraConfigurationPoller:
                 self._invalidate()
                 raise
 
+    def _ready_for_context(self, replay_frame: FrameEnvelope | None = None) -> bool:
+        source = self._bound_source
+        return source is not None and (
+            source.is_ready_for_ack
+            or (replay_frame is not None and source.can_drain_replay_frame(replay_frame))
+        )
+
+    async def snapshot_delivery_context(
+        self,
+        bundle: CameraConfigurationBundle,
+        frame: FrameEnvelope,
+        source_kind: Literal["LIVE", "REPLAY"],
+    ) -> EventDeliveryContext | None:
+        """Freeze a definitive ACK claim, never the command of an uncertain retry."""
+        # A short replay can end before the background poller's next wake. Obtain
+        # its first definitive ACK at the frame boundary, outside the ACK lock.
+        confirmed = self._confirmed_ack
+        if self._ready_for_context(frame if source_kind == "REPLAY" else None) and (
+            confirmed is None
+            or confirmed.configuration_version != bundle.configuration_version
+            or confirmed.bundle_sha256 != bundle.bundle_sha256
+            or confirmed.view_revision != bundle.view_revision
+        ):
+            if source_kind == "REPLAY":
+                async with self._ack_lock:
+                    try:
+                        await self._acknowledge_loaded_once(replay_frame=frame)
+                    except (BackendConfigurationError, RuntimeError):
+                        self._invalidate()
+                        raise
+            else:
+                await self.acknowledge_loaded()
+        async with self._ack_lock:
+            source = self._bound_source
+            ack = self._confirmed_ack
+            if (
+                source is None
+                or not self._ready_for_context(frame if source_kind == "REPLAY" else None)
+                or ack is None
+            ):
+                return None
+            self.ensure_fresh()
+            if (
+                self._acknowledged_at is None
+                or self._read_clock() - self._acknowledged_at >= 60
+                or not isinstance(bundle, CameraConfigurationBundle)
+                or await self._store.get_bundle(self._camera_external_id) is not bundle
+                or bundle.camera_id != str(self._camera_id)
+                or frame.camera_external_id != self._camera_external_id
+                or str(frame.session_id) != source.binding.stream_session_id
+                or ack.worker_generation_id != source.binding.worker_generation_id
+                or ack.stream_session_id != str(frame.session_id)
+                or ack.configuration_version != bundle.configuration_version
+                or ack.bundle_sha256 != bundle.bundle_sha256
+                or ack.view_revision != bundle.view_revision
+            ):
+                return None
+            return EventDeliveryContext(
+                schemaVersion="1.0.0",
+                cameraId=str(self._camera_id),
+                workerGenerationId=ack.worker_generation_id,
+                streamSessionId=ack.stream_session_id,
+                configurationVersion=ack.configuration_version,
+                bundleSha256=ack.bundle_sha256,
+                viewRevision=ack.view_revision,
+                receiptCommandId=ack.command_id,
+                sourceKind=source_kind,
+            )
+
     def _invalidate(self) -> None:
         self._etag = None
         self._last_success = None
@@ -94,9 +167,9 @@ class CameraConfigurationPoller:
         self._confirmed_ack = None
         self._acknowledged_at = None
 
-    async def _acknowledge_loaded_once(self) -> None:
+    async def _acknowledge_loaded_once(self, *, replay_frame: FrameEnvelope | None = None) -> None:
         source = self._bound_source
-        if source is None or not source.is_ready_for_ack:
+        if source is None or not self._ready_for_context(replay_frame):
             return
         self.ensure_fresh()
         bundle = await self._store.get_bundle(self._camera_external_id)
@@ -137,7 +210,7 @@ class CameraConfigurationPoller:
             return
         self.ensure_fresh()
         if (
-            not source.is_ready_for_ack
+            not self._ready_for_context(replay_frame)
             or await self._store.get_bundle(self._camera_external_id) is not bundle
             or sent.configuration_version != bundle.configuration_version
             or sent.bundle_sha256 != bundle.bundle_sha256

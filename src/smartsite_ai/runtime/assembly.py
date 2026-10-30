@@ -160,7 +160,16 @@ def assemble_sessions(
             ppe_region_id=str(camera.entry.ppe_region_id),
             configurations=plan.store,
             outbox=outbox,
-            dispatcher=OutboxDispatcher(outbox, backend_client_factory()),
+            dispatcher=OutboxDispatcher(
+                outbox,
+                backend_client_factory(),
+                generation_credential=plan.generation
+                if camera.entry.generation_bound_event_delivery
+                else None,
+            ),
+            delivery_context_provider=plan.poller.snapshot_delivery_context
+            if camera.entry.generation_bound_event_delivery
+            else None,
             configuration_guard=plan.poller.ensure_fresh,
             delivery_interval_seconds=delivery_interval_seconds,
             evidence_publisher=evidence_publisher,

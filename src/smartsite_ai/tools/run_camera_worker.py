@@ -11,6 +11,7 @@ from uuid import UUID
 
 from smartsite_ai.config import Settings
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.loading import load_yolo11_detector
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
@@ -53,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-spec", type=Path, required=True)
     parser.add_argument("--outbox", type=Path, required=True)
     parser.add_argument("--generation-credential-file", type=Path)
+    parser.add_argument("--partitioned-frame-delivery", action="store_true")
     parser.add_argument("--target-fps", type=float)
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--stale-after", type=float, default=60.0)
@@ -114,9 +116,11 @@ async def _require_ppe_region(
     camera_external_id: str,
     ppe_region_id: UUID,
 ) -> None:
-    configuration = await store.get(camera_external_id)
+    configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraWorkerRunError("Backend returned no active camera region configuration")
+    if isinstance(configuration, CameraConfigurationBundle):
+        return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):
         raise CameraWorkerRunError(
@@ -189,7 +193,8 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
             camera_external_id=args.camera_external_id,
             poll_interval_seconds=args.poll_interval,
             stale_after_seconds=args.stale_after,
-            require_bundle=generation is not None,
+            require_bundle=generation is not None
+            or getattr(args, "partitioned_frame_delivery", False),
         )
         # Validate authoritative regions before opening a camera or loading GPU state.
         await poller.refresh()
@@ -219,6 +224,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
                 evidence_publisher = LocalEvidencePublisher(
                     root_dir=evidence_dir,
                     max_jpeg_bytes=args.evidence_max_bytes,
+                    bind_content_hash=getattr(args, "partitioned_frame_delivery", False),
                 )
 
             worker = HeadlessCameraProcessingWorker(
@@ -232,6 +238,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
                 configuration_guard=poller.ensure_fresh,
                 delivery_interval_seconds=args.delivery_interval,
                 evidence_publisher=evidence_publisher,
+                partitioned_frame_delivery=getattr(args, "partitioned_frame_delivery", False),
             )
             result = await _coordinate(worker, poller)
         finally:

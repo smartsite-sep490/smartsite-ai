@@ -1,11 +1,25 @@
 """MF06 restricted-region entry detection without authorization decisions."""
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from smartsite_ai.domain.observations import ZoneEntryObservation
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.pipelines._geometry import bottom_center, point_in_polygon
 from smartsite_ai.tracking.models import TrackedFrame
+
+
+@dataclass(frozen=True, slots=True)
+class ZoneTemporalState:
+    source_key: tuple[str, UUID] | None
+    camera_external_id: str | None
+    last_sequence: int | None
+    inside: dict[tuple[int, str], bool]
+    inside_streaks: dict[tuple[int, str], int]
+    outside_streaks: dict[tuple[int, str], int]
+    absent_frames: dict[int, int]
+    region_versions: dict[str, int]
+    region_ids: dict[str, str]
 
 
 class RestrictedZonePipeline:
@@ -37,6 +51,31 @@ class RestrictedZonePipeline:
         self._absent_frames: dict[int, int] = {}
         self._region_versions: dict[str, int] = {}
         self._region_ids: dict[str, str] = {}
+
+    def checkpoint_temporal_state(self) -> ZoneTemporalState:
+        """Copy confirmation state before a frame can be rejected during evidence I/O."""
+        return ZoneTemporalState(
+            self._source_key,
+            self._camera_external_id,
+            self._last_sequence,
+            self._inside.copy(),
+            self._inside_streaks.copy(),
+            self._outside_streaks.copy(),
+            self._absent_frames.copy(),
+            self._region_versions.copy(),
+            self._region_ids.copy(),
+        )
+
+    def restore_temporal_state(self, state: ZoneTemporalState) -> None:
+        self._source_key = state.source_key
+        self._camera_external_id = state.camera_external_id
+        self._last_sequence = state.last_sequence
+        self._inside = state.inside.copy()
+        self._inside_streaks = state.inside_streaks.copy()
+        self._outside_streaks = state.outside_streaks.copy()
+        self._absent_frames = state.absent_frames.copy()
+        self._region_versions = state.region_versions.copy()
+        self._region_ids = state.region_ids.copy()
 
     def process(
         self,

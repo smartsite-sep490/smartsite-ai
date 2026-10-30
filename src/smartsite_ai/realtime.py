@@ -59,7 +59,16 @@ def _ui_frame(
             "detections": [],
             "zoneDetections": [],
         }
-    payload = event.to_wire_dict()
+    from smartsite_ai.pipelines.observation_frame import ObservationFrame
+
+    payload = (
+        {
+            "cameraExternalId": event.camera_external_id,
+            "observations": [o.to_wire_dict() for o in event.observations],
+        }
+        if isinstance(event, ObservationFrame)
+        else event.to_wire_dict()
+    )
     people: dict[int, dict[str, Any]] = {}
     ppe_status: dict[int, dict[str, str]] = {}
     entered_zone_regions: set[tuple[int, str]] = set()

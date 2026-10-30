@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import os
 import re
@@ -47,6 +48,7 @@ class LocalEvidencePublisher:
         max_jpeg_bytes: int = 1_048_576,
         jpeg_quality: int = 85,
         cv2_module: object | None = None,
+        bind_content_hash: bool = False,
     ) -> None:
         if max_jpeg_bytes <= 0:
             raise ValueError("max_jpeg_bytes must be positive")
@@ -68,6 +70,7 @@ class LocalEvidencePublisher:
         self._max_jpeg_bytes = max_jpeg_bytes
         self._jpeg_quality = jpeg_quality
         self._cv2_module = cv2_module
+        self._bind_content_hash = bind_content_hash
 
     def _resolve_evidence_path(
         self,
@@ -144,6 +147,12 @@ class LocalEvidencePublisher:
         event: TechnicalObservationEvent,
     ) -> TechnicalObservationEvent:
         # 1. Exact-frame binding checks
+        if event.frame_partition is not None and not self._bind_content_hash:
+            raise EvidenceBindingError("partitioned frame evidence requires content hashing")
+        if event.frame_partition is not None and event.frame_partition.sequence_number != str(
+            frame.sequence_number
+        ):
+            raise EvidenceBindingError("frame partition sequence does not match source frame")
         if str(frame.session_id) != event.stream_session_id:
             raise EvidenceBindingError(
                 f"frame session_id {frame.session_id} does not match "
@@ -239,9 +248,18 @@ class LocalEvidencePublisher:
         evidence_item = EvidenceItem(
             kind="FRAME",
             uri=uri,
+            **(
+                {"sha256": hashlib.sha256(jpeg_bytes).hexdigest()}
+                if self._bind_content_hash
+                else {}
+            ),
         )
         if any(item.uri == uri for item in event.evidence):
             combined_evidence = list(event.evidence)
+            if self._bind_content_hash:
+                combined_evidence = [
+                    evidence_item if item.uri == uri else item for item in combined_evidence
+                ]
         else:
             combined_evidence = [*event.evidence, evidence_item]
 
@@ -253,7 +271,16 @@ class LocalEvidencePublisher:
             frame_dimensions=event.frame_dimensions,
             observations=event.observations,
             evidence=combined_evidence,
-            schema_version=event.schema_version,
+            frame_partition=event.frame_partition,
+            schema_version=(
+                event.schema_version
+                if event.schema_version == "1.4.0"
+                else "1.2.0"
+                if event.schema_version in ("1.0.0", "1.2.0")
+                else "1.3.0"
+            )
+            if self._bind_content_hash
+            else event.schema_version,
         )
 
     async def publish(

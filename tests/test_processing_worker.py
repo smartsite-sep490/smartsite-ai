@@ -426,7 +426,9 @@ async def test_worker_rejects_duplicate_track_output_without_delivering_a_false_
             return (await super().detect(frame)).model_copy(update={"detections": (observed,)})
 
     class MalformedTracker:
-        def update(self, detector_batch: DetectionBatch) -> TrackedFrame:
+        def update(
+            self, detector_batch: DetectionBatch, *, view_revision: int | None = None
+        ) -> TrackedFrame:
             tracked = TrackedPerson(track_id=7, detection=detector_batch.detections[0])
             return TrackedFrame(batch=detector_batch, persons=(tracked, tracked))
 

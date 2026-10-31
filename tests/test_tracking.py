@@ -86,6 +86,27 @@ def test_tracked_frame_accepts_no_current_person_tracks() -> None:
     assert frame.persons == ()
 
 
+@pytest.mark.parametrize("invalid", [True, 0, -1, 1.5, "2", 9_007_199_254_740_992])
+def test_invalid_view_revision_cannot_mutate_existing_tracker(invalid) -> None:
+    tracker = IoUPersonTracker()
+    observed = detection("person", (0.10, 0.10, 0.40, 0.80))
+    assert tracker.update(batch(1, observed), view_revision=1).persons[0].track_id == 1
+    with pytest.raises(ValueError, match="view_revision"):
+        tracker.update(batch(2, observed), view_revision=invalid)
+    assert tracker.update(batch(2, observed), view_revision=1).persons[0].track_id == 1
+
+
+def test_rejected_frame_cannot_change_view_and_legacy_transition_ends_association() -> None:
+    tracker = IoUPersonTracker()
+    observed = detection("person", (0.10, 0.10, 0.40, 0.80))
+    tracker.update(batch(1, observed), view_revision=1)
+    with pytest.raises(ValueError, match="sequence order"):
+        tracker.update(batch(1, observed), view_revision=2)
+    assert tracker.update(batch(2, observed), view_revision=1).persons[0].track_id == 1
+    assert tracker.update(batch(3, observed)).persons[0].track_id == 2
+    assert tracker.update(batch(4, observed), view_revision=1).persons[0].track_id == 3
+
+
 @pytest.mark.parametrize("next_bounds", [(0.60, 0.10, 0.90, 0.80), (0.40, 0.10, 0.70, 0.80)])
 def test_zero_threshold_does_not_link_disjoint_or_edge_touching_people(next_bounds) -> None:
     tracker = IoUPersonTracker(iou_threshold=0)

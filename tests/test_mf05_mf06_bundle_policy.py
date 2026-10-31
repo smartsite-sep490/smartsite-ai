@@ -193,6 +193,50 @@ def test_rejected_new_view_frame_restores_view_with_zone_confirmation_checkpoint
         )
 
 
+def test_view_revision_change_cannot_reuse_old_track_even_at_identical_pixels() -> None:
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    ids = []
+    for sequence, configuration in ((1, bundle), (2, revised_bundle(bundle, view_revision=2))):
+        frame = pipeline.observe(
+            scene_batch(sequence),
+            region_configuration=configuration,
+            event_id=str(UUID(int=sequence)),
+        )
+        assert frame is not None
+        ids.append(
+            [
+                observation.track_id
+                for observation in frame.observations
+                if observation.type == "PERSON"
+            ]
+        )
+    assert ids == [[1], [2]]
+
+
+def test_same_view_bundle_refresh_retains_track_and_repeated_view_changes_never_resurrect_ids() -> (
+    None
+):
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    ids = []
+    for sequence, revision in enumerate((1, 1, 2, 3, 3), start=1):
+        frame = pipeline.observe(
+            scene_batch(sequence),
+            region_configuration=revised_bundle(bundle, view_revision=revision),
+            event_id=str(UUID(int=sequence)),
+        )
+        assert frame is not None
+        ids.append(
+            [
+                observation.track_id
+                for observation in frame.observations
+                if observation.type == "PERSON"
+            ]
+        )
+    assert ids == [[1], [1], [2], [3], [3]]
+
+
 def ppe_tuples(event: TechnicalObservationEvent | None) -> set[tuple[str, int, str, str]]:
     assert event is not None
     return {

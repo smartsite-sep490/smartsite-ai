@@ -11,6 +11,7 @@ from smartsite_ai.inference.models import (
     NormalizedDetection,
 )
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
+from smartsite_ai.tracking.segment_lifecycle import SegmentLifecycle
 
 _DEFAULT_PERSON_CLASS_NAMES: Final[frozenset[str]] = frozenset({"person"})
 
@@ -64,12 +65,18 @@ class IoUPersonTracker:
         self._source_key: tuple[str, UUID] | None = None
         self._camera_external_id: str | None = None
         self._last_sequence: int | None = None
+        self._view_revision: int | None = None
         self._next_track_id = 1
         self._tracks: dict[int, _MutableTrack] = {}
+        self._segments = SegmentLifecycle()
 
-    def update(self, batch: DetectionBatch) -> TrackedFrame:
+    def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Associate the person detections in ``batch`` with existing tracks."""
 
+        if view_revision is not None and (
+            type(view_revision) is not int or not 1 <= view_revision <= 9_007_199_254_740_991
+        ):
+            raise ValueError("view_revision must be a positive safe integer or None")
         source_key = (batch.stream_id, batch.session_id)
         if self._source_key != source_key:
             self._reset_for_source(source_key)
@@ -80,6 +87,11 @@ class IoUPersonTracker:
             raise ValueError(
                 "Detection batches must be supplied in strictly increasing sequence order"
             )
+
+        if self._view_revision != view_revision:
+            # Keep the allocation counter: old IDs must not resurrect in this session.
+            self._tracks.clear()
+        self._view_revision = view_revision
 
         person_detections = tuple(
             detection
@@ -117,7 +129,11 @@ class IoUPersonTracker:
             TrackedPerson(track_id=track_id, detection=self._tracks[track_id].detection)
             for track_id in sorted(current_track_ids)
         )
-        return TrackedFrame(batch=batch, persons=current_persons)
+        return self._segments.observe(
+            TrackedFrame(batch=batch, persons=current_persons),
+            view_revision=view_revision,
+            ambiguous_track_ids=retired_track_ids,
+        )
 
     def _match(
         self, detections: tuple[NormalizedDetection, ...]

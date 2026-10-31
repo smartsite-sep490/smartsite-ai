@@ -89,7 +89,14 @@ class Mf05Mf06Pipeline:
                 f"PPE observation region {self._ppe_region_id!r} is not in the configuration"
             )
 
-        tracked_frame = self._tracker.update(batch)
+        tracked_frame = self._tracker.update(
+            batch,
+            view_revision=(
+                region_configuration.view_revision
+                if isinstance(region_configuration, CameraConfigurationBundle)
+                else None
+            ),
+        )
         person_observations = tuple(
             PersonObservation.model_validate(
                 {

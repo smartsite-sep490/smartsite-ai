@@ -20,6 +20,7 @@ class ZoneTemporalState:
     absent_frames: dict[int, int]
     region_versions: dict[str, int]
     region_ids: dict[str, str]
+    view_revision: int | None
 
 
 class RestrictedZonePipeline:
@@ -51,6 +52,7 @@ class RestrictedZonePipeline:
         self._absent_frames: dict[int, int] = {}
         self._region_versions: dict[str, int] = {}
         self._region_ids: dict[str, str] = {}
+        self._view_revision: int | None = None
 
     def checkpoint_temporal_state(self) -> ZoneTemporalState:
         """Copy confirmation state before a frame can be rejected during evidence I/O."""
@@ -64,6 +66,7 @@ class RestrictedZonePipeline:
             self._absent_frames.copy(),
             self._region_versions.copy(),
             self._region_ids.copy(),
+            self._view_revision,
         )
 
     def restore_temporal_state(self, state: ZoneTemporalState) -> None:
@@ -76,11 +79,14 @@ class RestrictedZonePipeline:
         self._absent_frames = state.absent_frames.copy()
         self._region_versions = state.region_versions.copy()
         self._region_ids = state.region_ids.copy()
+        self._view_revision = state.view_revision
 
     def process(
         self,
         tracked_frame: TrackedFrame,
         configuration: CameraRegionConfiguration,
+        *,
+        view_revision: int | None = None,
     ) -> tuple[ZoneEntryObservation, ...]:
         """Return entries after consecutive inside evidence for current tracks.
 
@@ -112,6 +118,17 @@ class RestrictedZonePipeline:
             raise ValueError(
                 "Tracked frames must be supplied in strictly increasing sequence order"
             )
+
+        # Geometry versions alone do not identify the camera view. Never carry
+        # pending/confirmed occupancy into a different view (or a legacy context).
+        if self._view_revision != view_revision:
+            self._inside.clear()
+            self._inside_streaks.clear()
+            self._outside_streaks.clear()
+            self._absent_frames.clear()
+            self._region_versions.clear()
+            self._region_ids.clear()
+        self._view_revision = view_revision
 
         current_regions = {region.region_id.casefold(): region for region in configuration.regions}
         for region_key, previous_version in tuple(self._region_versions.items()):

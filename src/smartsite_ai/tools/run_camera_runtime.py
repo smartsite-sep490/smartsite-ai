@@ -33,7 +33,7 @@ from smartsite_ai.runtime.manifest import (
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
-    _hold_cancellation,
+    _finish_cleanup,
     execute_runtime,
     exit_code,
     report_payload,
@@ -129,6 +129,11 @@ async def run_manifest(
             observation_schema_version=bound.manifest.observation_schema_version,
         )
 
+    async def close_clients() -> None:
+        for client in backend_clients:
+            await client.aclose()
+        await close_configuration_clients(plans)
+
     try:
         report = await execute_runtime(
             RuntimePlan(
@@ -139,10 +144,7 @@ async def run_manifest(
             )
         )
     finally:
-        async with _hold_cancellation():
-            for client in backend_clients:
-                await client.aclose()
-            await close_configuration_clients(plans)
+        await _finish_cleanup(close_clients())
 
     print(json.dumps(report_payload(report), separators=(",", ":")))
     return exit_code(report)

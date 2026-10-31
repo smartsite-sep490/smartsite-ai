@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -113,7 +112,7 @@ async def run_camera_session(session: CameraSession) -> ProcessingWorkerResult:
         if poller_task in done:
             if not worker_task.done():
                 worker_task.cancel()
-            await asyncio.gather(worker_task, return_exceptions=True)
+            await _finish_cleanup(asyncio.gather(worker_task, return_exceptions=True))
             poller_task.result()
             raise RuntimeError("configuration poller stopped unexpectedly")
         result = worker_task.result()
@@ -125,8 +124,7 @@ async def run_camera_session(session: CameraSession) -> ProcessingWorkerResult:
         for task in (worker_task, poller_task):
             if not task.done():
                 task.cancel()
-        async with _hold_cancellation():
-            await asyncio.gather(worker_task, poller_task, return_exceptions=True)
+        await _finish_cleanup(asyncio.gather(worker_task, poller_task, return_exceptions=True))
 
 
 async def supervise_sessions(sessions: Sequence[CameraSession]) -> tuple[CameraOutcome, ...]:
@@ -141,11 +139,10 @@ async def supervise_sessions(sessions: Sequence[CameraSession]) -> tuple[CameraO
     try:
         results = await asyncio.gather(*tasks, return_exceptions=True)
     except asyncio.CancelledError:
-        async with _hold_cancellation():
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await _finish_cleanup(asyncio.gather(*tasks, return_exceptions=True))
         raise
     return tuple(
         _outcome_from_result(session, result)
@@ -168,9 +165,8 @@ async def execute_runtime(plan: RuntimePlan) -> RuntimeReport:
         return report
     finally:
         if report.model_loaded and not report.model_closed:
-            async with _hold_cancellation():
-                await plan.close_model()
-                report.model_closed = True
+            await _finish_cleanup(plan.close_model())
+            report.model_closed = True
 
 
 def exit_code(report: RuntimeReport) -> int:
@@ -217,26 +213,21 @@ def report_payload(report: RuntimeReport) -> dict[str, object]:
     }
 
 
-@asynccontextmanager
-async def _hold_cancellation() -> AsyncIterator[None]:
-    """Finish cleanup awaits after this task has already been cancelled.
-
-    Python 3.11 injects ``CancelledError`` at the next await while the task is
-    cancelling. Suspend that count only for the cleanup await, then restore it.
-    """
-
-    task = asyncio.current_task()
-    suspended = 0
-    if task is not None:
-        while task.cancelling():
-            task.uncancel()
-            suspended += 1
-    try:
-        yield
-    finally:
-        if task is not None:
-            for _ in range(suspended):
-                task.cancel()
+async def _finish_cleanup[T](work: Awaitable[T]) -> T:
+    """Drain owned cleanup despite repeated cancellation, then propagate cancellation."""
+    cleanup = asyncio.ensure_future(work)
+    interrupted = False
+    while True:
+        try:
+            result = await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError:
+            if cleanup.cancelled():
+                raise
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    return result
 
 
 def _outcome_from_result(session: CameraSession, result: object) -> CameraOutcome:

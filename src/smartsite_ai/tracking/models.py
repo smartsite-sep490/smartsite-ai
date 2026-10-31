@@ -1,6 +1,8 @@
 """Immutable values exchanged between the tracker and technical pipelines."""
 
 from dataclasses import dataclass
+from typing import Literal
+from uuid import UUID
 
 from smartsite_ai.inference.models import (
     DetectionBatch,
@@ -22,6 +24,31 @@ class TrackedPerson:
 
 
 @dataclass(frozen=True, slots=True)
+class SubjectSegment:
+    """Internal association claim, never a qualified identity or event predecessor."""
+
+    track_id: int
+    segment_id: UUID
+    previous_sequence_number: int | None
+    reason: (
+        Literal["INITIAL", "RECONNECT", "VIEW_CHANGE", "FRAME_DISCONTINUITY", "PROFILE_CHANGE"]
+        | None
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RetiredSegment:
+    segment_id: UUID
+    reason: Literal[
+        "LOST_TRACK",
+        "AMBIGUOUS_ASSOCIATION",
+        "VIEW_CHANGE",
+        "FRAME_DISCONTINUITY",
+        "PROFILE_CHANGE",
+    ]
+
+
+@dataclass(frozen=True, slots=True)
 class TrackedFrame:
     """Current-frame tracks, unique by track ID, with their immutable detector batch.
 
@@ -32,6 +59,8 @@ class TrackedFrame:
 
     batch: DetectionBatch
     persons: tuple[TrackedPerson, ...]
+    subject_segments: tuple[SubjectSegment, ...] = ()
+    retired_segments: tuple[RetiredSegment, ...] = ()
 
     def __post_init__(self) -> None:
         if len({person.track_id for person in self.persons}) != len(self.persons):

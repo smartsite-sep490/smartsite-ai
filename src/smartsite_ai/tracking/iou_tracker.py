@@ -64,12 +64,17 @@ class IoUPersonTracker:
         self._source_key: tuple[str, UUID] | None = None
         self._camera_external_id: str | None = None
         self._last_sequence: int | None = None
+        self._view_revision: int | None = None
         self._next_track_id = 1
         self._tracks: dict[int, _MutableTrack] = {}
 
-    def update(self, batch: DetectionBatch) -> TrackedFrame:
+    def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Associate the person detections in ``batch`` with existing tracks."""
 
+        if view_revision is not None and (
+            type(view_revision) is not int or not 1 <= view_revision <= 9_007_199_254_740_991
+        ):
+            raise ValueError("view_revision must be a positive safe integer or None")
         source_key = (batch.stream_id, batch.session_id)
         if self._source_key != source_key:
             self._reset_for_source(source_key)
@@ -80,6 +85,11 @@ class IoUPersonTracker:
             raise ValueError(
                 "Detection batches must be supplied in strictly increasing sequence order"
             )
+
+        if self._view_revision != view_revision:
+            # Keep the allocation counter: old IDs must not resurrect in this session.
+            self._tracks.clear()
+        self._view_revision = view_revision
 
         person_detections = tuple(
             detection

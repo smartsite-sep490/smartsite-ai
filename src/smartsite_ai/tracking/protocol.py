@@ -10,7 +10,7 @@ from smartsite_ai.tracking.models import TrackedFrame
 class TrackerProtocol(Protocol):
     """Associate person detections across ordered frames of one stream session."""
 
-    def update(self, batch: DetectionBatch) -> TrackedFrame:
+    def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Return each track at most once per frame, without an identity decision."""
         ...
 

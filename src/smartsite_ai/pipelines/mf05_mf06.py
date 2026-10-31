@@ -122,7 +122,15 @@ class Mf05Mf06Pipeline:
                     )
                 }
             )
-        zone_observations = self._zones.process(tracked_frame, restricted_zone_configuration)
+        zone_observations = self._zones.process(
+            tracked_frame,
+            restricted_zone_configuration,
+            view_revision=(
+                region_configuration.view_revision
+                if isinstance(region_configuration, CameraConfigurationBundle)
+                else None
+            ),
+        )
         observations = [*person_observations, *ppe_observations, *zone_observations]
         if not observations:
             return None

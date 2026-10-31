@@ -107,6 +107,92 @@ def make_pipeline() -> Mf05Mf06Pipeline:
     )
 
 
+def revised_bundle(
+    bundle: CameraConfigurationBundle, *, view_revision: int
+) -> CameraConfigurationBundle:
+    content = bundle.model_dump(mode="json", by_alias=True)
+    content.pop("bundleSha256")
+    content["configurationVersion"] += 1
+    content["viewRevision"] = view_revision
+    return CameraConfigurationBundle.from_wire_bytes(
+        json.dumps({**content, "bundleSha256": compute_canonical_payload_hash(content)}).encode()
+    )
+
+
+def test_new_view_cannot_complete_old_view_pending_zone_confirmation() -> None:
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    for sequence in (1, 2):
+        pipeline.observe(
+            scene_batch(sequence), region_configuration=bundle, event_id=str(UUID(int=sequence))
+        )
+    new_view = revised_bundle(bundle, view_revision=2)
+    for sequence in (3, 4, 5):
+        frame = pipeline.observe(
+            scene_batch(sequence), region_configuration=new_view, event_id=str(UUID(int=sequence))
+        )
+        assert frame is not None
+        entries = [obs for obs in frame.observations if obs.type == "ZONE_ENTRY"]
+        assert len(entries) == (1 if sequence == 5 else 0)
+
+
+def test_new_view_invalidates_confirmed_zone_occupancy() -> None:
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    for sequence in (1, 2, 3):
+        pipeline.observe(
+            scene_batch(sequence), region_configuration=bundle, event_id=str(UUID(int=sequence))
+        )
+    assert pipeline.occupied_zone_track_regions(
+        stream_id="stream-01", session_id=SESSION, active_track_ids=(1,)
+    )
+    pipeline.observe(
+        scene_batch(4),
+        region_configuration=revised_bundle(bundle, view_revision=2),
+        event_id=str(UUID(int=4)),
+    )
+    assert not pipeline.occupied_zone_track_regions(
+        stream_id="stream-01", session_id=SESSION, active_track_ids=(1,)
+    )
+
+
+def test_same_view_bundle_refresh_preserves_pending_zone_confirmation() -> None:
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    for sequence in (1, 2):
+        pipeline.observe(
+            scene_batch(sequence), region_configuration=bundle, event_id=str(UUID(int=sequence))
+        )
+    frame = pipeline.observe(
+        scene_batch(3),
+        region_configuration=revised_bundle(bundle, view_revision=1),
+        event_id=str(UUID(int=3)),
+    )
+    assert frame is not None
+    assert len([obs for obs in frame.observations if obs.type == "ZONE_ENTRY"]) == 1
+
+
+def test_rejected_new_view_frame_restores_view_with_zone_confirmation_checkpoint() -> None:
+    pipeline = make_pipeline()
+    bundle = make_bundle(bundle_region(SECOND_REGION_ID, 1, ZONE_ID_2, []))
+    for sequence in (1, 2):
+        pipeline.observe(
+            scene_batch(sequence), region_configuration=bundle, event_id=str(UUID(int=sequence))
+        )
+    checkpoint = pipeline.checkpoint_temporal_state()
+    new_view = revised_bundle(bundle, view_revision=2)
+    pipeline.observe(scene_batch(3), region_configuration=new_view, event_id=str(UUID(int=3)))
+    pipeline.restore_temporal_state(checkpoint)
+    for sequence in (4, 5, 6):
+        frame = pipeline.observe(
+            scene_batch(sequence), region_configuration=new_view, event_id=str(UUID(int=sequence))
+        )
+        assert frame is not None
+        assert len([obs for obs in frame.observations if obs.type == "ZONE_ENTRY"]) == (
+            1 if sequence == 6 else 0
+        )
+
+
 def ppe_tuples(event: TechnicalObservationEvent | None) -> set[tuple[str, int, str, str]]:
     assert event is not None
     return {

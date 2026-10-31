@@ -94,6 +94,43 @@ async def test_invalid_clock_revokes_previously_confirmed_freshness(value, refre
         poller.ensure_fresh()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("refresh", [False, True])
+async def test_clock_rollback_above_last_refresh_revokes_until_a_fresh_fetch(refresh):
+    clock = FakeClock()
+    client = FakeClient(
+        [
+            ConfigurationBundleResult(_configuration(1), '"v1"'),
+            *([ConfigurationNotModifiedResult('"v1"')] if refresh else []),
+            ConfigurationBundleResult(_configuration(1), '"v1"'),
+        ]
+    )
+    poller = CameraConfigurationPoller(
+        client=client,
+        store=RegionConfigurationStore(),
+        camera_id=CAMERA_ID,
+        camera_external_id="CAM-GATE-01",
+        monotonic_clock=clock,
+        stale_after_seconds=120,
+    )
+    await poller.refresh()
+    clock.value = 150.0
+    poller.ensure_fresh()
+    clock.value = 140.0
+    with pytest.raises(ConfigurationStaleError, match="moved backwards"):
+        if refresh:
+            await poller.refresh()
+        else:
+            poller.ensure_fresh()
+    assert poller.etag is None
+    clock.value = 151.0
+    with pytest.raises(ConfigurationStaleError, match="never been confirmed"):
+        poller.ensure_fresh()
+    await poller.refresh()
+    assert client.etags[-1] is None
+    poller.ensure_fresh()
+
+
 def _configuration(version: int) -> CameraConfigurationBundle:
     content = {
         "schemaVersion": "1.0.0",

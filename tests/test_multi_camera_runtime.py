@@ -600,6 +600,71 @@ async def test_cancellation_releases_every_session_and_closes_one_model() -> Non
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["worker", "model"])
+async def test_repeated_cancellation_drains_worker_before_shared_model_close(phase: str) -> None:
+    ready = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    worker_released = False
+    model_closed = 0
+
+    class Worker:
+        async def run(self) -> ProcessingWorkerResult:
+            nonlocal worker_released
+            ready.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                if phase == "worker":
+                    cleanup_entered.set()
+                    await release_cleanup.wait()
+                worker_released = True
+            raise AssertionError("worker must be cancelled")
+
+    async def preflight() -> None:
+        return None
+
+    async def open_model() -> _Detector:
+        return _Detector()
+
+    async def close_model() -> None:
+        nonlocal model_closed
+        assert worker_released, "model closed before worker resources were released"
+        if phase == "model":
+            cleanup_entered.set()
+            await release_cleanup.wait()
+        model_closed += 1
+
+    task = asyncio.create_task(
+        execute_runtime(
+            RuntimePlan(
+                preflight=preflight,
+                open_model=open_model,
+                close_model=close_model,
+                build_sessions=lambda _detector: (
+                    CameraSession("gate", "CAM-A", Worker(), _StopPoller()),
+                ),
+            )
+        )
+    )
+    try:
+        await asyncio.wait_for(ready.wait(), 2)
+        task.cancel()
+        await asyncio.wait_for(cleanup_entered.wait(), 2)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+        assert not task.done(), "repeated cancellation abandoned resource cleanup"
+        assert model_closed == 0
+    finally:
+        release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert worker_released
+    assert model_closed == 1
+
+
+@pytest.mark.anyio
 async def test_pending_outbox_uses_the_one_camera_review_exit_code() -> None:
     async def preflight() -> None:
         return None

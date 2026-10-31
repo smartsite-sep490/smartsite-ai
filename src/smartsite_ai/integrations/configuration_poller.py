@@ -61,6 +61,7 @@ class CameraConfigurationPoller:
         self._clock = monotonic_clock
         self._etag: str | None = None
         self._last_success: float | None = None
+        self._last_clock_read: float | None = None
         self._bound_source: GenerationBoundSource | None = None
         self._pending_ack: CameraConfigurationAcknowledgement | None = None
         self._confirmed_ack: CameraConfigurationAcknowledgement | None = None
@@ -177,12 +178,15 @@ class CameraConfigurationPoller:
 
     def _read_clock(self) -> float:
         now = self._clock()
-        if not math.isfinite(now) or (self._last_success is not None and now < self._last_success):
+        if not math.isfinite(now) or (
+            self._last_clock_read is not None and now < self._last_clock_read
+        ):
             self._etag = None
             self._last_success = None
             raise ConfigurationStaleError(
                 "configuration monotonic clock is invalid or moved backwards"
             )
+        self._last_clock_read = now
         return now
 
     async def run(self, stop_event: asyncio.Event) -> None:

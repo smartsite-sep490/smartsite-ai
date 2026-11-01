@@ -1,5 +1,6 @@
 """Conservative internal continuity; no wire admission or tracker qualification."""
 
+from datetime import timedelta
 from uuid import uuid4
 
 from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment, TrackedFrame
@@ -8,7 +9,12 @@ from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment, Tracked
 class SegmentLifecycle:
     """A missing processed frame ends a segment, even if a numeric ID survives."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_segment_gap: timedelta | None = None) -> None:
+        if max_segment_gap is not None and (
+            type(max_segment_gap) is not timedelta or max_segment_gap <= timedelta(0)
+        ):
+            raise ValueError("max_segment_gap must be a positive timedelta or None")
+        self._max_segment_gap = max_segment_gap
         self._previous: TrackedFrame | None = None
         self._view_revision: int | None = None
 
@@ -41,6 +47,10 @@ class SegmentLifecycle:
             elif (
                 batch.sequence_number != prior.sequence_number + 1
                 or batch.captured_at <= prior.captured_at
+                or (
+                    self._max_segment_gap is not None
+                    and batch.captured_at - prior.captured_at > self._max_segment_gap
+                )
             ):
                 reason = "FRAME_DISCONTINUITY"
         # Never publish old source/session retirements under the new scope.

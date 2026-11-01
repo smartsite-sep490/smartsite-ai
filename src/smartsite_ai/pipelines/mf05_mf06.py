@@ -150,6 +150,9 @@ class Mf05Mf06Pipeline:
             captured_at=batch.captured_at.isoformat(),
             frame_dimensions=FrameDimensions(width=batch.frame_width, height=batch.frame_height),
             observations=tuple(observations),
+            source_sequence_number=batch.sequence_number,
+            subject_segments=tracked_frame.subject_segments,
+            retired_segments=tracked_frame.retired_segments,
         )
 
     def occupied_zone_track_regions(

@@ -260,6 +260,8 @@ class SqliteEventOutbox:
                 event = TechnicalObservationEvent.model_validate_json(row["payload_json"])
             except Exception as exc:
                 raise RuntimeError("outbox contains an invalid observation event") from exc
+            if event.event_id != row["event_id"]:
+                raise RuntimeError("outbox observation identity does not match stored event ID")
             if event.compute_payload_hash() != row["payload_hash"]:
                 raise RuntimeError("outbox observation payload hash mismatch")
             pending.append(
@@ -276,7 +278,7 @@ class SqliteEventOutbox:
             return list(
                 connection.execute(
                     """
-                    SELECT payload_json, payload_hash, attempt_count
+                    SELECT event_id, payload_json, payload_hash, attempt_count
                     FROM observation_outbox
                     WHERE state = 'PENDING' AND next_attempt_at <= ?
                     ORDER BY created_at, event_id

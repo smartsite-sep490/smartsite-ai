@@ -62,6 +62,24 @@ class Mf05Mf06Pipeline:
     ) -> ObservationFrame | None:
         """Observe all subjects before bounded wire packing; no findings are truncated."""
 
+        frame = self.observe_frame(
+            batch, region_configuration=region_configuration, event_id=event_id
+        )
+        return frame if frame.observations else None
+
+    def observe_frame(
+        self,
+        batch: DetectionBatch,
+        *,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        event_id: str,
+    ) -> ObservationFrame:
+        """Keep captured-frame lifecycle internally, including no-person observations.
+
+        Call exactly one observation path per source batch. Empty observations are
+        not a safety/Zone EXIT claim or a serializable empty legacy event. Failed
+        capture/inference has no batch here and must not be converted to emptiness.
+        """
         if batch.camera_external_id != region_configuration.camera_external_id:
             raise ValueError(
                 "camera region configuration does not match the detection batch camera"
@@ -129,9 +147,6 @@ class Mf05Mf06Pipeline:
             ),
         )
         observations = [*person_observations, *ppe_observations, *zone_observations]
-        if not observations:
-            return None
-
         return ObservationFrame(
             event_id=event_id,
             schema_version="1.0.0",

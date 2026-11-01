@@ -283,3 +283,43 @@ async def test_outbox_detects_persisted_payload_corruption(tmp_path: Path) -> No
     reopened = SqliteEventOutbox(path)
     with pytest.raises(RuntimeError, match="invalid observation event"):
         await reopened.ready()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["payload", "storage_key"])
+async def test_outbox_rejects_storage_payload_identity_mismatch_before_post(
+    tmp_path: Path, change: str
+) -> None:
+    path = (tmp_path / "identity.sqlite3").resolve()
+    original = _event()
+    replacement = _event("11111111-1111-4111-8111-111111111112")
+    outbox = SqliteEventOutbox(path)
+    await outbox.enqueue(original)
+    with sqlite3.connect(path) as connection:
+        if change == "payload":
+            # A valid, correctly hashed event still cannot replace a different row's event.
+            connection.execute(
+                "UPDATE observation_outbox SET payload_json = ?, payload_hash = ?",
+                (json.dumps(replacement.to_wire_dict()), replacement.compute_payload_hash()),
+            )
+        else:
+            connection.execute(
+                "UPDATE observation_outbox SET event_id = ?", (replacement.event_id,)
+            )
+    posted = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        posted.append(payload)
+        return httpx.Response(
+            202, json={"eventId": payload["eventId"], "status": "PROCESSED", "alertIds": []}
+        )
+
+    reopened = SqliteEventOutbox(path)
+    async with BackendClient(
+        "http://backend:3000", "test", transport=httpx.MockTransport(handle)
+    ) as client:
+        with pytest.raises(RuntimeError, match="identity"):
+            await OutboxDispatcher(reopened, client).drain_once()
+    assert posted == []
+    assert (await reopened.counts()).pending == 1

@@ -2,6 +2,7 @@
 
 from collections import Counter
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Final
 from uuid import UUID
 
@@ -50,6 +51,7 @@ class IoUPersonTracker:
         iou_threshold: float = 0.3,
         max_missed_frames: int = 2,
         person_class_names: frozenset[str] | set[str] = _DEFAULT_PERSON_CLASS_NAMES,
+        max_segment_gap: timedelta | None = None,
     ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0 and 1")
@@ -68,7 +70,7 @@ class IoUPersonTracker:
         self._view_revision: int | None = None
         self._next_track_id = 1
         self._tracks: dict[int, _MutableTrack] = {}
-        self._segments = SegmentLifecycle()
+        self._segments = SegmentLifecycle(max_segment_gap=max_segment_gap)
 
     def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Associate the person detections in ``batch`` with existing tracks."""

@@ -121,3 +121,69 @@ def test_retirement_is_not_reemitted_or_resurrected_after_multiple_empty_frames(
         assert empty.retired_segments == () and empty.subject_segments == ()
     returned = claim(tracker.update(batch(5, person())))
     assert returned.segment_id != first.segment_id
+
+
+@pytest.mark.parametrize("elapsed_us,continues", [(749999, True), (750000, True), (750001, False)])
+def test_explicit_segment_gap_uses_exact_capture_duration(elapsed_us, continues):
+    # Synthetic boundary values, not a qualified camera/profile threshold.
+    tracker = IoUPersonTracker(max_segment_gap=timedelta(microseconds=750000))
+    first_frame = tracker.update(batch(1, person()))
+    first = claim(first_frame)
+    second_batch = batch(2, person()).model_copy(
+        update={"captured_at": batch(1).captured_at + timedelta(microseconds=elapsed_us)}
+    )
+    second = tracker.update(second_batch)
+    assert second.persons[0].track_id == first_frame.persons[0].track_id
+    assert (claim(second).segment_id == first.segment_id) is continues
+    if continues:
+        assert claim(second).previous_sequence_number == 1
+        assert second.retired_segments == ()
+    else:
+        assert claim(second).previous_sequence_number is None
+        assert claim(second).reason == "FRAME_DISCONTINUITY"
+        assert [(item.segment_id, item.reason) for item in second.retired_segments] == [
+            (first.segment_id, "FRAME_DISCONTINUITY")
+        ]
+        third = tracker.update(
+            batch(3, person()).model_copy(
+                update={"captured_at": second_batch.captured_at + timedelta(microseconds=1)}
+            )
+        )
+        assert claim(third).segment_id == claim(second).segment_id
+        assert claim(third).previous_sequence_number == 2
+        assert third.retired_segments == ()
+
+
+@pytest.mark.parametrize("invalid", [True, 0.5, "1s", timedelta(0), timedelta(seconds=-1)])
+def test_invalid_segment_gap_is_rejected_at_construction(invalid):
+    with pytest.raises(ValueError, match="max_segment_gap"):
+        IoUPersonTracker(max_segment_gap=invalid)
+
+
+def test_legacy_unconfigured_gap_policy_remains_unchanged():
+    tracker = IoUPersonTracker()
+    first = claim(tracker.update(batch(1, person())))
+    later = tracker.update(
+        batch(2, person()).model_copy(
+            update={"captured_at": batch(1).captured_at + timedelta(hours=1)}
+        )
+    )
+    assert claim(later).segment_id == first.segment_id
+    assert later.retired_segments == ()
+
+
+def test_gap_to_captured_empty_retires_once_without_claiming_exit():
+    tracker = IoUPersonTracker(max_segment_gap=timedelta(seconds=1))
+    first = claim(tracker.update(batch(1, person())))
+    empty_batch = batch(2).model_copy(
+        update={"captured_at": batch(1).captured_at + timedelta(seconds=2)}
+    )
+    empty = tracker.update(empty_batch)
+    assert empty.persons == () and empty.subject_segments == ()
+    assert [(item.segment_id, item.reason) for item in empty.retired_segments] == [
+        (first.segment_id, "FRAME_DISCONTINUITY")
+    ]
+    later = tracker.update(
+        batch(3).model_copy(update={"captured_at": empty_batch.captured_at + timedelta(seconds=1)})
+    )
+    assert later.subject_segments == () and later.retired_segments == ()

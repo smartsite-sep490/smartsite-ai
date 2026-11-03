@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
+from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.evidence.models import FrameBatchBindingError
@@ -91,6 +92,11 @@ class HeadlessCameraProcessingWorker:
         delivery_interval_seconds: float = 0.25,
         evidence_publisher: EvidencePublisherProtocol | None = None,
         partitioned_frame_delivery: bool = False,
+        delivery_context_provider: Callable[
+            [CameraConfigurationBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
+            Awaitable[EventDeliveryContext | None],
+        ]
+        | None = None,
     ) -> None:
         if delivery_interval_seconds <= 0:
             raise ValueError("delivery interval must be positive")
@@ -107,6 +113,7 @@ class HeadlessCameraProcessingWorker:
         self._delivery_interval_seconds = delivery_interval_seconds
         self._evidence_publisher = evidence_publisher
         self._partitioned_frame_delivery = partitioned_frame_delivery
+        self._delivery_context_provider = delivery_context_provider
         self._last_frame_event_count = 0
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
@@ -241,6 +248,18 @@ class HeadlessCameraProcessingWorker:
         )
         if configuration is None:
             raise RuntimeError("active camera region configuration became unavailable")
+        delivery_context = None
+        if self._delivery_context_provider is not None:
+            if not isinstance(configuration, CameraConfigurationBundle):
+                raise RuntimeError("Bound delivery requires an immutable configuration bundle")
+            delivery_context = await self._delivery_context_provider(
+                configuration, frame, "LIVE" if self._stream.config.is_live else "REPLAY"
+            )
+            if delivery_context is None:
+                if not self._stream.config.is_live:
+                    raise RuntimeError("Replay frame has no confirmed delivery context")
+                self._discard_frame = True
+                return
         ppe_region = next(
             (
                 region
@@ -378,6 +397,11 @@ class HeadlessCameraProcessingWorker:
             return
 
         async def persist():
+            if delivery_context is not None:
+                await self._outbox.enqueue_many(
+                    tuple(prepared_events), delivery_context=delivery_context
+                )
+                return
             if len(prepared_events) == 1:
                 await self._outbox.enqueue(prepared_events[0])
             else:

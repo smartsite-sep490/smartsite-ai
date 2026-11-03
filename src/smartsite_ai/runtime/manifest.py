@@ -75,6 +75,9 @@ class CameraManifestEntry(_StrictModel):
     partitioned_frame_delivery: bool = Field(
         default=False, alias="partitionedFrameDelivery", strict=True
     )
+    generation_bound_event_delivery: bool = Field(
+        default=False, alias="generationBoundEventDelivery", strict=True
+    )
     target_fps: float | None = Field(default=None, alias="targetFps", gt=0, le=120)
     outbox: str = Field(min_length=1, max_length=1024)
     generation_credential_file: str | None = Field(
@@ -86,6 +89,8 @@ class CameraManifestEntry(_StrictModel):
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
+        if self.generation_bound_event_delivery and self.generation_credential_file is None:
+            raise ValueError("Bound event delivery requires an original generation credential")
         if self.generation_credential_file is not None and not _is_portable_absolute_path(
             self.generation_credential_file
         ):

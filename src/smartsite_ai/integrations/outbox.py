@@ -15,8 +15,13 @@ from uuid import UUID
 
 import httpx
 
+from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.domain.observations import TechnicalObservationEvent
-from smartsite_ai.integrations.backend_client import BackendClient
+from smartsite_ai.integrations.backend_client import (
+    BackendClient,
+    BoundDeliveryCredentialUnavailable,
+)
+from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
 
 
 class OutboxState(StrEnum):
@@ -43,6 +48,7 @@ class PendingOutboxEvent:
     event: TechnicalObservationEvent
     payload_hash: str
     attempt_count: int
+    delivery_context: EventDeliveryContext | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,6 +130,7 @@ class SqliteEventOutbox:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS worker_session_claim (
                     generation_id TEXT PRIMARY KEY,
@@ -154,6 +161,18 @@ class SqliteEventOutbox:
                 ON observation_outbox(state, next_attempt_at, created_at)
                 """
             )
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(observation_outbox)")
+            }
+            if "delivery_context_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE observation_outbox ADD COLUMN delivery_context_json TEXT"
+                )
+            if "delivery_context_hash" not in columns:
+                connection.execute(
+                    "ALTER TABLE observation_outbox ADD COLUMN delivery_context_hash TEXT "
+                    "CHECK(delivery_context_hash IS NULL OR length(delivery_context_hash)=64)"
+                )
 
     async def claim_worker_session(
         self, camera_id: UUID, generation_id: UUID, session_id: UUID
@@ -184,7 +203,13 @@ class SqliteEventOutbox:
         except sqlite3.IntegrityError:
             raise RuntimeError("Worker generation or session is already consumed") from None
 
-    async def enqueue(self, event: TechnicalObservationEvent) -> OutboxEnqueueOutcome:
+    async def enqueue(
+        self,
+        event: TechnicalObservationEvent,
+        *,
+        delivery_context: EventDeliveryContext | None = None,
+    ) -> OutboxEnqueueOutcome:
+        context_json = self._context_json((event,), delivery_context)
         await self.initialize()
         payload = event.to_wire_dict()
         payload_hash = event.compute_payload_hash()
@@ -196,6 +221,15 @@ class SqliteEventOutbox:
         )
         now = _require_aware_utc(self._clock()).timestamp()
         async with self._lock:
+            if context_json is not None:
+                return await asyncio.to_thread(
+                    self._enqueue_sync,
+                    event.event_id,
+                    payload_json,
+                    payload_hash,
+                    now,
+                    context_json,
+                )
             return await asyncio.to_thread(
                 self._enqueue_sync,
                 event.event_id,
@@ -210,13 +244,20 @@ class SqliteEventOutbox:
         payload_json: str,
         payload_hash: str,
         now: float,
+        context_json: str | None = None,
     ) -> OutboxEnqueueOutcome:
-        return self._enqueue_many_sync(((event_id, payload_json, payload_hash),), now)[0]
+        return self._enqueue_many_sync(
+            ((event_id, payload_json, payload_hash),), now, context_json
+        )[0]
 
     async def enqueue_many(
-        self, events: tuple[TechnicalObservationEvent, ...]
+        self,
+        events: tuple[TechnicalObservationEvent, ...],
+        *,
+        delivery_context: EventDeliveryContext | None = None,
     ) -> tuple[OutboxEnqueueOutcome, ...]:
         """Durably commit every part of a frame, or none of its new parts."""
+        context_json = self._context_json(events, delivery_context)
         await self.initialize()
         rows = tuple(
             (
@@ -230,21 +271,47 @@ class SqliteEventOutbox:
         )
         now = _require_aware_utc(self._clock()).timestamp()
         async with self._lock:
+            if context_json is not None:
+                return await asyncio.to_thread(self._enqueue_many_sync, rows, now, context_json)
             return await asyncio.to_thread(self._enqueue_many_sync, rows, now)
 
+    @staticmethod
+    def _context_json(
+        events: tuple[TechnicalObservationEvent, ...], context: EventDeliveryContext | None
+    ) -> str | None:
+        if context is None:
+            return None
+        # Revalidate model_construct-created instances before persisting metadata.
+        context = EventDeliveryContext.model_validate_json(context.model_dump_json(by_alias=True))
+        if any(event.stream_session_id != context.stream_session_id for event in events):
+            raise ValueError("delivery context session does not match event")
+        return context.model_dump_json(by_alias=True)
+
     def _enqueue_many_sync(
-        self, rows: tuple[tuple[str, str, str], ...], now: float
+        self, rows: tuple[tuple[str, str, str], ...], now: float, context_json: str | None = None
     ) -> tuple[OutboxEnqueueOutcome, ...]:
         outcomes: list[OutboxEnqueueOutcome] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for event_id, payload_json, payload_hash in rows:
+                context_hash = (
+                    None
+                    if context_json is None
+                    else EventDeliveryContext.model_validate_json(context_json).binding_hash(
+                        payload_hash
+                    )
+                )
                 existing = connection.execute(
-                    "SELECT payload_hash FROM observation_outbox WHERE event_id = ?",
+                    "SELECT payload_hash,delivery_context_json,delivery_context_hash "
+                    "FROM observation_outbox WHERE event_id = ?",
                     (event_id,),
                 ).fetchone()
                 if existing is not None:
-                    if existing["payload_hash"] != payload_hash:
+                    if (
+                        existing["payload_hash"] != payload_hash
+                        or existing["delivery_context_json"] != context_json
+                        or existing["delivery_context_hash"] != context_hash
+                    ):
                         raise OutboxConflict(
                             "outbox event ID already exists with different canonical content"
                         )
@@ -254,10 +321,20 @@ class SqliteEventOutbox:
                     """
                     INSERT INTO observation_outbox (
                         event_id, payload_json, payload_hash, state,
-                        attempt_count, next_attempt_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?)
+                        attempt_count, next_attempt_at, created_at, updated_at,
+                        delivery_context_json,delivery_context_hash
+                    ) VALUES (?, ?, ?, 'PENDING', 0, ?, ?, ?, ?, ?)
                     """,
-                    (event_id, payload_json, payload_hash, now, now, now),
+                    (
+                        event_id,
+                        payload_json,
+                        payload_hash,
+                        now,
+                        now,
+                        now,
+                        context_json,
+                        context_hash,
+                    ),
                 )
                 outcomes.append(OutboxEnqueueOutcome.ENQUEUED)
         return tuple(outcomes)
@@ -277,11 +354,23 @@ class SqliteEventOutbox:
                 raise RuntimeError("outbox contains an invalid observation event") from exc
             if event.compute_payload_hash() != row["payload_hash"]:
                 raise RuntimeError("outbox observation payload hash mismatch")
+            context = None
+            if row["delivery_context_json"] is not None or row["delivery_context_hash"] is not None:
+                try:
+                    context = EventDeliveryContext.model_validate_json(row["delivery_context_json"])
+                    if (
+                        context.binding_hash(row["payload_hash"]) != row["delivery_context_hash"]
+                        or context.stream_session_id != event.stream_session_id
+                    ):
+                        raise ValueError("Invalid binding")
+                except (ValueError, TypeError):
+                    raise RuntimeError("outbox delivery context is invalid or corrupted") from None
             pending.append(
                 PendingOutboxEvent(
                     event=event,
                     payload_hash=row["payload_hash"],
                     attempt_count=row["attempt_count"],
+                    delivery_context=context,
                 )
             )
         return tuple(pending)
@@ -291,7 +380,8 @@ class SqliteEventOutbox:
             return list(
                 connection.execute(
                     """
-                    SELECT payload_json, payload_hash, attempt_count
+                    SELECT payload_json, payload_hash, attempt_count,
+                      delivery_context_json, delivery_context_hash
                     FROM observation_outbox
                     WHERE state = 'PENDING' AND next_attempt_at <= ?
                     ORDER BY created_at, event_id
@@ -439,6 +529,7 @@ class OutboxDispatcher:
         *,
         retry_base: timedelta = timedelta(seconds=1),
         retry_max: timedelta = timedelta(minutes=5),
+        generation_credential: WorkerGenerationCredential | None = None,
     ) -> None:
         if retry_base <= timedelta(0):
             raise ValueError("dispatcher retry_base must be positive")
@@ -448,12 +539,28 @@ class OutboxDispatcher:
         self._backend = backend
         self._retry_base = retry_base
         self._retry_max = retry_max
+        self._generation_credential = generation_credential
 
     async def drain_once(self, *, limit: int = 32) -> int:
         processed = 0
         for pending in await self._outbox.ready(limit=limit):
+            if pending.delivery_context is not None and self._generation_credential is None:
+                await self._reschedule(pending, "BoundTransportUnavailable")
+                raise OutboxDeliveryBlocked(
+                    "Original delivery context requires authenticated bound transport"
+                )
             try:
-                await self._backend.post_event(pending.event)
+                if pending.delivery_context is None:
+                    await self._backend.post_event(pending.event)
+                else:
+                    await self._backend.post_bound_event(
+                        pending.event, pending.delivery_context, self._generation_credential
+                    )
+            except BoundDeliveryCredentialUnavailable:
+                await self._reschedule(pending, "OriginalCredentialUnavailable")
+                raise OutboxDeliveryBlocked(
+                    "Original generation credential is unavailable"
+                ) from None
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status in (400, 409, 413, 415, 422):

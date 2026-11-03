@@ -32,7 +32,7 @@ from smartsite_ai.runtime.manifest import BoundCamera, BoundManifest, CameraRunt
 from smartsite_ai.runtime.supervisor import (
     CameraOutcome,
     CameraSession,
-    _hold_cancellation,
+    _finish_cleanup,
     startup_outcomes,
 )
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
@@ -93,8 +93,7 @@ async def preflight_manifest(
                     store, camera.camera_external_id, camera.entry.ppe_region_id
                 )
             except BaseException:
-                async with _hold_cancellation():
-                    await client.aclose()
+                await _finish_cleanup(client.aclose())
                 raise
             plans.append(
                 CameraPlan(
@@ -106,11 +105,10 @@ async def preflight_manifest(
                 )
             )
     except asyncio.CancelledError:
-        async with _hold_cancellation():
-            await _close_plans(plans)
+        await _finish_cleanup(_close_plans(plans))
         raise
     except Exception as exc:
-        await _close_plans(plans)
+        await _finish_cleanup(_close_plans(plans))
         error_class = type(exc).__name__
         failed_stream = bound.cameras[len(plans)].stream_id
         failures = ((failed_stream, error_class),)

@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 from uuid import UUID
 
 import httpx
@@ -787,7 +788,10 @@ async def test_supervised_cameras_do_not_share_pipeline_or_outbox_state(tmp_path
     assert isinstance(detector, SerializingDetector)
 
 
-def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("profile", [None, "native-ppe-10", "unified-ppe-15"])
+def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
+    tmp_path: Path, profile: Literal["native-ppe-10", "unified-ppe-15"] | None
+) -> None:
     from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
     from smartsite_ai.runtime.assembly import CameraPlan
 
@@ -856,6 +860,8 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path
         source_factory=source_factory,
         evidence_max_bytes=1024,
         delivery_interval_seconds=0.25,
+        experimental_model_profile=profile,
+        observation_schema_version="1.1.0" if profile else "1.0.0",
     )
     workers = [session.worker for session in sessions]
     assert workers[0]._detector is detector  # type: ignore[attr-defined]
@@ -866,7 +872,58 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(tmp_path
     assert workers[0]._evidence_publisher is not workers[1]._evidence_publisher  # type: ignore[attr-defined]
     assert workers[0]._ppe_region_id != workers[1]._ppe_region_id  # type: ignore[attr-defined]
     assert workers[0]._temporal_gate is not workers[1]._temporal_gate  # type: ignore[attr-defined]
+    # Exercise the assembled producer, not just the individual pipeline factory.
+    from test_mf05_mf06_pipeline import detection
+
+    batch = DetectionBatch.from_frame(
+        _frame("CAM-A", 1),
+        model_artifact_id="assembled-test",
+        model_version="test",
+        model_sha256="a" * 64,
+        detections=(
+            detection("Person", (0.2, 0.1, 0.8, 0.8)),
+            detection("NO-Gloves", (0.3, 0.4, 0.4, 0.5)),
+            detection("NO-Safety Vest", (0.4, 0.3, 0.6, 0.6)),
+            detection("Mask", (0.4, 0.15, 0.6, 0.2)),
+            detection("fullbody-Harness", (0.4, 0.3, 0.6, 0.6)),
+            detection("Lanyard-Hook", (0.5, 0.4, 0.55, 0.45)),
+        ),
+    )
+    event = workers[0]._pipeline.process(  # type: ignore[attr-defined]
+        batch,
+        region_configuration=_configuration("CAM-A", REGION_A),
+        event_id="00000000-0000-4000-8000-000000000001",
+    )
+    assert event is not None
+    assert event.schema_version == ("1.1.0" if profile else "1.0.0")
+    ppe_states = {(obs.ppe_item, obs.status) for obs in event.observations if obs.type == "PPE"}
+    expected = {
+        None: {("SAFETY_VEST", "MISSING")},
+        "native-ppe-10": {("GLOVES", "MISSING")},
+        "unified-ppe-15": {("GLOVES", "MISSING"), ("SAFETY_VEST", "MISSING")},
+    }
+    assert ppe_states == expected[profile]
 
 
 def test_third_camera_id_constant_is_distinct() -> None:
     assert len({CAMERA_A, CAMERA_B, CAMERA_C}) == 3
+
+
+@pytest.mark.parametrize("profile", ["native-ppe-10", "unified-ppe-15"])
+def test_expanded_assembly_refuses_old_consumer_before_opening_resources(
+    profile: Literal["native-ppe-10", "unified-ppe-15"],
+) -> None:
+    def never_open(*_args: object) -> object:
+        raise AssertionError("profile mismatch must fail before resources are opened")
+
+    with pytest.raises(CameraRuntimeError, match="configured v1.1.0 consumer"):
+        assemble_sessions(
+            [SimpleNamespace()],  # type: ignore[list-item]
+            SimpleNamespace(),  # type: ignore[arg-type]
+            backend_client_factory=never_open,  # type: ignore[arg-type]
+            source_factory=never_open,
+            evidence_max_bytes=1024,
+            delivery_interval_seconds=0.25,
+            experimental_model_profile=profile,
+            observation_schema_version="1.0.0",
+        )

@@ -1,5 +1,6 @@
 """MF05/MF06 orchestration into the locked technical observation event."""
 
+from typing import Literal
 from uuid import UUID
 
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
@@ -27,9 +28,15 @@ class Mf05Mf06Pipeline:
         ppe: PpePipeline,
         zones: RestrictedZonePipeline,
         ppe_region_id: str,
+        schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
     ) -> None:
         if not ppe_region_id:
             raise ValueError("ppe_region_id must not be empty")
+        if schema_version not in ("1.0.0", "1.1.0"):
+            raise ValueError("unsupported observation schema version")
+        if schema_version == "1.0.0" and ppe.minimum_schema_version == "1.1.0":
+            raise ValueError("expanded PPE requires a configured v1.1.0 consumer")
+        self._schema_version = schema_version
         self._tracker = tracker
         self._ppe = ppe
         self._zones = zones
@@ -149,7 +156,7 @@ class Mf05Mf06Pipeline:
         observations = [*person_observations, *ppe_observations, *zone_observations]
         return ObservationFrame(
             event_id=event_id,
-            schema_version="1.0.0",
+            schema_version=self._schema_version,
             camera_external_id=batch.camera_external_id,
             stream_session_id=str(batch.session_id),
             captured_at=batch.captured_at.isoformat(),

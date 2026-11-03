@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
@@ -83,7 +84,8 @@ async def preflight_manifest(
                     camera_external_id=camera.camera_external_id,
                     poll_interval_seconds=bound.manifest.poll_interval_seconds,
                     stale_after_seconds=bound.manifest.stale_after_seconds,
-                    require_bundle=generation is not None,
+                    require_bundle=generation is not None
+                    or camera.entry.partitioned_frame_delivery,
                 )
                 await poller.refresh()
                 poller.ensure_fresh()
@@ -137,6 +139,7 @@ def assemble_sessions(
             evidence_publisher = LocalEvidencePublisher(
                 root_dir=camera.evidence_dir,
                 max_jpeg_bytes=evidence_max_bytes,
+                bind_content_hash=camera.entry.partitioned_frame_delivery,
             )
         pipeline = Mf05Mf06Pipeline(
             tracker=IoUPersonTracker(),
@@ -161,6 +164,7 @@ def assemble_sessions(
             configuration_guard=plan.poller.ensure_fresh,
             delivery_interval_seconds=delivery_interval_seconds,
             evidence_publisher=evidence_publisher,
+            partitioned_frame_delivery=camera.entry.partitioned_frame_delivery,
         )
         sessions.append(
             CameraSession(
@@ -187,9 +191,11 @@ async def _require_ppe_region(
     camera_external_id: str,
     ppe_region_id: UUID,
 ) -> None:
-    configuration = await store.get(camera_external_id)
+    configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraRuntimeError("Backend returned no active camera region configuration")
+    if isinstance(configuration, CameraConfigurationBundle):
+        return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):
         raise CameraRuntimeError(

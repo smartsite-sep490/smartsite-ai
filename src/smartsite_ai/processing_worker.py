@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.observations import TechnicalObservationEvent
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.evidence.models import FrameBatchBindingError
@@ -23,7 +25,7 @@ from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
-    filter_event_for_delivery,
+    events_for_delivery,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -88,6 +90,7 @@ class HeadlessCameraProcessingWorker:
         configuration_guard: Callable[[], None] | None = None,
         delivery_interval_seconds: float = 0.25,
         evidence_publisher: EvidencePublisherProtocol | None = None,
+        partitioned_frame_delivery: bool = False,
     ) -> None:
         if delivery_interval_seconds <= 0:
             raise ValueError("delivery interval must be positive")
@@ -103,10 +106,14 @@ class HeadlessCameraProcessingWorker:
         self._configuration_guard = configuration_guard
         self._delivery_interval_seconds = delivery_interval_seconds
         self._evidence_publisher = evidence_publisher
+        self._partitioned_frame_delivery = partitioned_frame_delivery
+        self._last_frame_event_count = 0
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
         self._temporal_gate = TemporalPpeCandidateGate()
+        self._region_gates: dict[tuple[str, int], TemporalPpeCandidateGate] = {}
+        self._active_snapshot: CameraRegionConfiguration | CameraConfigurationBundle | None = None
         self._started = False
 
     async def run(self) -> ProcessingWorkerResult:
@@ -158,7 +165,7 @@ class HeadlessCameraProcessingWorker:
                 await self._process_frame(frame)
                 frames_processed += 1
                 if self._last_frame_enqueued:
-                    events_enqueued += 1
+                    events_enqueued += self._last_frame_event_count
         finally:
             if frame_task is not None and not frame_task.done():
                 frame_task.cancel()
@@ -198,10 +205,40 @@ class HeadlessCameraProcessingWorker:
                 continue
 
     async def _process_frame(self, frame: FrameEnvelope) -> None:
+        checkpoint = getattr(self._pipeline, "checkpoint_temporal_state", None)
+        restore = getattr(self._pipeline, "restore_temporal_state", None)
+        zone_state = checkpoint() if checkpoint is not None and restore is not None else None
+        temporal_state = deepcopy((self._temporal_gate, self._region_gates))
+        previous = (
+            self._current_session_id,
+            self._current_ppe_geometry_version,
+            self._active_snapshot,
+        )
+        self._discard_frame = False
+        self._durably_committed = False
+        completed = False
+        try:
+            await self._process_frame_once(frame)
+            completed = not self._discard_frame
+        finally:
+            if not completed and not self._durably_committed:
+                if zone_state is not None:
+                    restore(zone_state)
+                self._temporal_gate, self._region_gates = temporal_state
+                (
+                    self._current_session_id,
+                    self._current_ppe_geometry_version,
+                    self._active_snapshot,
+                ) = previous
+
+    async def _process_frame_once(self, frame: FrameEnvelope) -> None:
         self._last_frame_enqueued = False
+        self._last_frame_event_count = 0
         if self._configuration_guard is not None:
             self._configuration_guard()
-        configuration = await self._configurations.get(frame.camera_external_id)
+        configuration = await self._configurations.get_active_configuration(
+            frame.camera_external_id
+        )
         if configuration is None:
             raise RuntimeError("active camera region configuration became unavailable")
         ppe_region = next(
@@ -212,20 +249,37 @@ class HeadlessCameraProcessingWorker:
             ),
             None,
         )
-        if ppe_region is None:
+        if ppe_region is None and not isinstance(configuration, CameraConfigurationBundle):
             raise RuntimeError("required PPE region is absent from active camera configuration")
 
         batch = await self._detector.detect(frame)
         validate_frame_batch_binding(frame, batch)
+        if self._configuration_guard is not None:
+            self._configuration_guard()
+        if (
+            self._stream.config.is_live
+            and await self._configurations.get_active_configuration(frame.camera_external_id)
+            is not configuration
+        ):
+            return
         if (
             self._current_session_id != batch.session_id
-            or self._current_ppe_geometry_version != ppe_region.geometry_version
+            or self._active_snapshot is not configuration
         ):
             self._current_session_id = batch.session_id
-            self._current_ppe_geometry_version = ppe_region.geometry_version
+            self._active_snapshot = configuration
+            self._current_ppe_geometry_version = ppe_region.geometry_version if ppe_region else None
             self._temporal_gate = TemporalPpeCandidateGate()
+            self._region_gates = {}
 
-        event = self._pipeline.process(
+        observe = getattr(
+            self._pipeline,
+            "observe",
+            self._pipeline.process if hasattr(self._pipeline, "process") else None,
+        )
+        if observe is None:
+            raise TypeError("Pipeline must provide observe or process")
+        event = observe(
             batch,
             region_configuration=configuration,
             event_id=str(
@@ -249,17 +303,49 @@ class HeadlessCameraProcessingWorker:
                 observation for observation in event.observations if observation.type == "PPE"
             )
 
-        confirmed_candidates = self._temporal_gate.update(
-            stream_id=batch.stream_id,
-            session_id=batch.session_id,
-            observed_at=batch.captured_at,
-            active_track_ids=active_track_ids,
-            observations=ppe_observations,
-        )
+        if isinstance(configuration, CameraConfigurationBundle):
+            confirmed_candidates = []
+            for region in configuration.regions:
+                key = (region.region_id, region.geometry_version)
+                gate = self._region_gates.setdefault(key, TemporalPpeCandidateGate())
+                confirmed_candidates.extend(
+                    replace(
+                        candidate,
+                        region_id=region.region_id,
+                        geometry_version=region.geometry_version,
+                    )
+                    for candidate in gate.update(
+                        stream_id=batch.stream_id,
+                        session_id=batch.session_id,
+                        observed_at=batch.captured_at,
+                        active_track_ids=active_track_ids,
+                        observations=tuple(
+                            obs
+                            for obs in ppe_observations
+                            if obs.region_id == region.region_id
+                            and obs.geometry_version == region.geometry_version
+                        ),
+                    )
+                )
+        else:
+            confirmed_candidates = self._temporal_gate.update(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                observed_at=batch.captured_at,
+                active_track_ids=active_track_ids,
+                observations=ppe_observations,
+            )
         if event is None:
             return
-        delivery_event = filter_event_for_delivery(event, confirmed_candidates)
-        if delivery_event is not None:
+        delivery_events = events_for_delivery(
+            event,
+            confirmed_candidates,
+            partition_sequence_number=frame.sequence_number
+            if self._partitioned_frame_delivery
+            else None,
+        )
+        prepared_events = []
+        for delivery_event in delivery_events:
             event_to_enqueue = delivery_event
             if self._evidence_publisher is not None:
                 try:
@@ -278,8 +364,40 @@ class HeadlessCameraProcessingWorker:
                         },
                     )
                     event_to_enqueue = delivery_event
-            await self._outbox.enqueue(event_to_enqueue)
-            self._last_frame_enqueued = True
+            prepared_events.append(event_to_enqueue)
+        if not prepared_events:
+            return
+        if self._configuration_guard is not None:
+            self._configuration_guard()
+        if (
+            self._stream.config.is_live
+            and await self._configurations.get_active_configuration(frame.camera_external_id)
+            is not configuration
+        ):
+            self._discard_frame = True
+            return
+
+        async def persist():
+            if len(prepared_events) == 1:
+                await self._outbox.enqueue(prepared_events[0])
+            else:
+                await self._outbox.enqueue_many(tuple(prepared_events))
+
+        owned = asyncio.create_task(persist(), name="persist-observation-frame")
+        cancellation = None
+        while True:
+            try:
+                await asyncio.shield(owned)
+                break
+            except asyncio.CancelledError as error:
+                if owned.cancelled():
+                    raise
+                cancellation = error
+        self._durably_committed = True
+        self._last_frame_enqueued = True
+        self._last_frame_event_count = len(prepared_events)
+        if cancellation is not None:
+            raise cancellation
 
 
 __all__ = [

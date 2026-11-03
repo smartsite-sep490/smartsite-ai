@@ -72,6 +72,9 @@ class CameraManifestEntry(_StrictModel):
     ppe_region_id: UUID = Field(alias="ppeRegionId")
     source: CameraSource
     live: bool = False
+    partitioned_frame_delivery: bool = Field(
+        default=False, alias="partitionedFrameDelivery", strict=True
+    )
     target_fps: float | None = Field(default=None, alias="targetFps", gt=0, le=120)
     outbox: str = Field(min_length=1, max_length=1024)
     generation_credential_file: str | None = Field(

@@ -2,6 +2,7 @@
 
 from uuid import UUID
 
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.observations import (
     FrameDimensions,
     PersonObservation,
@@ -10,8 +11,9 @@ from smartsite_ai.domain.observations import (
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.pipelines._geometry import to_observation_bounding_box
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe import PpePipeline
-from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.pipelines.zones import RestrictedZonePipeline, ZoneTemporalState
 from smartsite_ai.tracking.protocol import TrackerProtocol
 
 
@@ -33,14 +35,32 @@ class Mf05Mf06Pipeline:
         self._zones = zones
         self._ppe_region_id = ppe_region_id.casefold()
 
+    def checkpoint_temporal_state(self) -> ZoneTemporalState:
+        return self._zones.checkpoint_temporal_state()
+
+    def restore_temporal_state(self, state: ZoneTemporalState) -> None:
+        # Keep tracker identities monotonic; restore only uncommitted zone evidence.
+        self._zones.restore_temporal_state(state)
+
     def process(
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
         event_id: str,
     ) -> TechnicalObservationEvent | None:
         """Create one technical event, or ``None`` when no person is observable."""
+        frame = self.observe(batch, region_configuration=region_configuration, event_id=event_id)
+        return frame.to_event() if frame is not None else None
+
+    def observe(
+        self,
+        batch: DetectionBatch,
+        *,
+        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        event_id: str,
+    ) -> ObservationFrame | None:
+        """Observe all subjects before bounded wire packing; no findings are truncated."""
 
         if batch.camera_external_id != region_configuration.camera_external_id:
             raise ValueError(
@@ -54,7 +74,7 @@ class Mf05Mf06Pipeline:
             ),
             None,
         )
-        if ppe_region is None:
+        if ppe_region is None and not isinstance(region_configuration, CameraConfigurationBundle):
             raise ValueError(
                 f"PPE observation region {self._ppe_region_id!r} is not in the configuration"
             )
@@ -71,28 +91,40 @@ class Mf05Mf06Pipeline:
             )
             for person in tracked_frame.persons
         )
-        ppe_observations = self._ppe.process(tracked_frame, ppe_region)
-        restricted_zone_configuration = region_configuration.model_copy(
-            update={
-                "regions": tuple(
-                    region
-                    for region in region_configuration.regions
-                    if region.region_id.casefold() != self._ppe_region_id
-                )
-            }
-        )
+        if isinstance(region_configuration, CameraConfigurationBundle):
+            ppe_observations = tuple(
+                observation
+                for region in region_configuration.regions
+                if region.required_ppe
+                for observation in self._ppe.process(tracked_frame, region)
+                if observation.ppe_item in region.required_ppe
+            )
+            restricted_zone_configuration = region_configuration.to_region_configuration()
+        else:
+            assert ppe_region is not None
+            ppe_observations = self._ppe.process(tracked_frame, ppe_region)
+            restricted_zone_configuration = region_configuration.model_copy(
+                update={
+                    "regions": tuple(
+                        region
+                        for region in region_configuration.regions
+                        if region.region_id.casefold() != self._ppe_region_id
+                    )
+                }
+            )
         zone_observations = self._zones.process(tracked_frame, restricted_zone_configuration)
         observations = [*person_observations, *ppe_observations, *zone_observations]
         if not observations:
             return None
 
-        return TechnicalObservationEvent.create(
+        return ObservationFrame(
             event_id=event_id,
+            schema_version="1.0.0",
             camera_external_id=batch.camera_external_id,
             stream_session_id=str(batch.session_id),
             captured_at=batch.captured_at.isoformat(),
             frame_dimensions=FrameDimensions(width=batch.frame_width, height=batch.frame_height),
-            observations=observations,
+            observations=tuple(observations),
         )
 
     def occupied_zone_track_regions(

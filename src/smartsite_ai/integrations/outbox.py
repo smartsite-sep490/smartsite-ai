@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from uuid import UUID
 
 import httpx
 
@@ -105,9 +107,31 @@ class SqliteEventOutbox:
         return connection
 
     def _initialize_sync(self) -> None:
+        # Concurrent fresh processes can race while enabling WAL before busy_timeout applies.
+        for attempt in range(4):
+            try:
+                self._initialize_once_sync()
+                return
+            except sqlite3.OperationalError as error:
+                if attempt == 3 or getattr(error, "sqlite_errorcode", None) not in (
+                    sqlite3.SQLITE_BUSY,
+                    sqlite3.SQLITE_LOCKED,
+                ):
+                    raise
+                time.sleep(0.01 * 2**attempt)
+
+    def _initialize_once_sync(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS worker_session_claim (
+                    generation_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL UNIQUE,
+                    camera_id TEXT NOT NULL,
+                    claimed_at REAL NOT NULL
+                ) STRICT"""
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS observation_outbox (
@@ -130,6 +154,35 @@ class SqliteEventOutbox:
                 ON observation_outbox(state, next_attempt_at, created_at)
                 """
             )
+
+    async def claim_worker_session(
+        self, camera_id: UUID, generation_id: UUID, session_id: UUID
+    ) -> None:
+        """Consume once before source opening, including failed startup attempts."""
+        if not all(isinstance(value, UUID) for value in (camera_id, generation_id, session_id)):
+            raise ValueError("Worker session claim requires UUID identities")
+        await self.initialize()
+        now = _require_aware_utc(self._clock()).timestamp()
+        async with self._lock:
+            await asyncio.to_thread(
+                self._claim_worker_session_sync,
+                str(camera_id),
+                str(generation_id),
+                str(session_id),
+                now,
+            )
+
+    def _claim_worker_session_sync(
+        self, camera_id: str, generation_id: str, session_id: str, now: float
+    ) -> None:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT INTO worker_session_claim VALUES (?, ?, ?, ?)",
+                    (generation_id, session_id, camera_id, now),
+                )
+        except sqlite3.IntegrityError:
+            raise RuntimeError("Worker generation or session is already consumed") from None
 
     async def enqueue(self, event: TechnicalObservationEvent) -> OutboxEnqueueOutcome:
         await self.initialize()

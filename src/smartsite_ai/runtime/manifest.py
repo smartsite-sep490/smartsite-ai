@@ -74,12 +74,19 @@ class CameraManifestEntry(_StrictModel):
     live: bool = False
     target_fps: float | None = Field(default=None, alias="targetFps", gt=0, le=120)
     outbox: str = Field(min_length=1, max_length=1024)
+    generation_credential_file: str | None = Field(
+        default=None, alias="generationCredentialFile", min_length=1, max_length=1024
+    )
     evidence_dir: str | None = Field(
         default=None, alias="evidenceDir", min_length=1, max_length=1024
     )
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
+        if self.generation_credential_file is not None and not _is_portable_absolute_path(
+            self.generation_credential_file
+        ):
+            raise ValueError("camera runtime manifest is invalid")
         if not _is_portable_absolute_path(self.outbox):
             raise ValueError("camera runtime manifest is invalid")
         if self.evidence_dir is not None and not _is_portable_absolute_path(self.evidence_dir):
@@ -194,7 +201,9 @@ def bind_manifest(
                 target_fps=entry.target_fps,
                 is_live=entry.live,
                 pace_replay=not entry.live,
-                max_consecutive_failures=None if entry.live else 1,
+                max_consecutive_failures=None
+                if entry.live and entry.generation_credential_file is None
+                else 1,
             )
         except ValueError:
             raise CameraRuntimeError(f"camera {entry.stream_id} source is invalid") from None

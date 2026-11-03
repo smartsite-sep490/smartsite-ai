@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -20,6 +21,10 @@ from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.worker_generation import (
+    GenerationBoundSource,
+    load_worker_generation,
+)
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
@@ -47,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppe-region-id", type=UUID, required=True)
     parser.add_argument("--model-spec", type=Path, required=True)
     parser.add_argument("--outbox", type=Path, required=True)
+    parser.add_argument("--generation-credential-file", type=Path)
     parser.add_argument("--target-fps", type=float)
     parser.add_argument("--poll-interval", type=float, default=5.0)
     parser.add_argument("--stale-after", type=float, default=60.0)
@@ -150,6 +156,16 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
     model_spec_path = _absolute_existing_file(args.model_spec, "model spec")
     outbox_path = _absolute_outbox_path(args.outbox)
     source = _resolve_source(args.source, runtime_settings)
+    generation = None
+    outbox = SqliteEventOutbox(outbox_path)
+    credential_file = getattr(args, "generation_credential_file", None)
+    if credential_file is not None:
+        generation = load_worker_generation(credential_file, args.camera_id, now=datetime.now(UTC))
+        await outbox.claim_worker_session(
+            args.camera_id,
+            UUID(generation.worker_generation_id),
+            UUID(generation.stream_session_id),
+        )
 
     source_config = StreamConfig(
         stream_id=args.stream_id,
@@ -158,7 +174,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
         target_fps=args.target_fps,
         is_live=args.live,
         pace_replay=not args.live,
-        max_consecutive_failures=None if args.live else 1,
+        max_consecutive_failures=None if args.live and generation is None else 1,
     )
     store = RegionConfigurationStore()
     runner: UltralyticsYoloRunner | None = None
@@ -186,8 +202,9 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
         runner = loaded_runner
         try:
             frame_source = OpenCvFrameSource(source_config)
+            if generation is not None:
+                frame_source = GenerationBoundSource(frame_source, generation)
             stream = StreamWorker(config=source_config, source=frame_source)
-            outbox = SqliteEventOutbox(outbox_path)
             pipeline = Mf05Mf06Pipeline(
                 tracker=IoUPersonTracker(),
                 ppe=PpePipeline(),

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
@@ -16,6 +18,11 @@ from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.worker_generation import (
+    GenerationBoundSource,
+    WorkerGenerationCredential,
+    load_worker_generation,
+)
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
@@ -40,6 +47,7 @@ class CameraPlan:
     store: RegionConfigurationStore
     poller: CameraConfigurationPoller
     configuration_client: BackendConfigurationClient
+    generation: WorkerGenerationCredential | None = None
 
 
 async def preflight_manifest(
@@ -55,6 +63,18 @@ async def preflight_manifest(
         for camera in bound.cameras:
             client = configuration_client_factory()
             try:
+                generation = None
+                if camera.entry.generation_credential_file is not None:
+                    generation = load_worker_generation(
+                        Path(camera.entry.generation_credential_file),
+                        camera.entry.camera_id,
+                        now=datetime.now(UTC),
+                    )
+                    await SqliteEventOutbox(camera.outbox).claim_worker_session(
+                        camera.entry.camera_id,
+                        UUID(generation.worker_generation_id),
+                        UUID(generation.stream_session_id),
+                    )
                 store = RegionConfigurationStore()
                 poller = CameraConfigurationPoller(
                     client=client,
@@ -79,6 +99,7 @@ async def preflight_manifest(
                     store=store,
                     poller=poller,
                     configuration_client=client,
+                    generation=generation,
                 )
             )
     except asyncio.CancelledError:
@@ -124,6 +145,8 @@ def assemble_sessions(
         )
         outbox = SqliteEventOutbox(camera.outbox)
         source = source_factory(camera.source_config)
+        if plan.generation is not None:
+            source = GenerationBoundSource(source, plan.generation)
         worker = HeadlessCameraProcessingWorker(
             stream=StreamWorker(config=camera.source_config, source=source),
             detector=detector,

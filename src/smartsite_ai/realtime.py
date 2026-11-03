@@ -23,6 +23,7 @@ from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.inference.yolo import Yolo11Detector
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.live_latest_source import LiveLatestFrameSource
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.ingestion.source import SourceConnectionError, SourceReadError
 from smartsite_ai.integrations.backend_client import BackendClient
@@ -379,7 +380,7 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
 
     await websocket.accept()
     source = settings.realtime_source or ""
-    frame_source: OpenCvFrameSource | None = None
+    frame_source: OpenCvFrameSource | LiveLatestFrameSource | None = None
     runner: UltralyticsYoloRunner | None = None
     backend: BackendClient | None = None
     try:
@@ -404,6 +405,8 @@ async def stream_realtime(websocket: WebSocket, settings: Settings) -> None:
                 max_consecutive_failures=3,
             )
         )
+        if settings.realtime_live_latest_frame and not replay_file:
+            frame_source = LiveLatestFrameSource(frame_source)
         try:
             await frame_source.connect()
         except SourceConnectionError:

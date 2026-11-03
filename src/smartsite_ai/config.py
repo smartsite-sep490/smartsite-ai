@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # Local realtime demo settings. Keep these opt-in so the API foundation
     # remains safe when no model/runtime is installed.
     realtime_model_path: str | None = None
+    realtime_live_latest_frame: bool = False
     realtime_source: str | None = None
     realtime_device: str = Field(
         default="auto",

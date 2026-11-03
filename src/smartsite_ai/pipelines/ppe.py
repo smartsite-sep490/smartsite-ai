@@ -28,10 +28,8 @@ DEFAULT_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
     "SAFETY_VEST": frozenset({"safety_vest", "safety vest", "high visibility vest", "vest"}),
 }
 DEFAULT_MISSING_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
-    "HARD_HAT": frozenset({"no-hardhat", "no hardhat", "no_hardhat", "no helmet", "no-helmet"}),
-    "SAFETY_VEST": frozenset(
-        {"no-safety vest", "no safety vest", "no_safety_vest", "no vest", "no-vest"}
-    ),
+    "HARD_HAT": frozenset({"no-hardhat", "no hardhat", "no_hardhat", "no helmet"}),
+    "SAFETY_VEST": frozenset({"no-safety vest", "no safety vest", "no_safety_vest", "no vest"}),
 }
 
 

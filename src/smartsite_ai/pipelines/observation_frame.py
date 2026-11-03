@@ -10,6 +10,23 @@ from smartsite_ai.domain.observations import (
     ObservationFramePartition,
     TechnicalObservationEvent,
 )
+from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment
+
+
+@dataclass(frozen=True, slots=True)
+class PartSubjectReference:
+    event_id: str
+    person_observation_index: int
+    subject: SubjectSegment
+
+
+@dataclass(frozen=True, slots=True)
+class TrackedObservationPart:
+    """Internal sidecar only; the event wire still contains no continuity claim."""
+
+    event: TechnicalObservationEvent
+    subjects: tuple[PartSubjectReference, ...]
+    retired_segments: tuple[RetiredSegment, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +38,76 @@ class ObservationFrame:
     captured_at: str
     frame_dimensions: FrameDimensions
     observations: tuple[Observation, ...]
+    source_sequence_number: int | None = None
+    subject_segments: tuple[SubjectSegment, ...] = ()
+    retired_segments: tuple[RetiredSegment, ...] = ()
+
+    def pack_with_tracking(self, *, sequence_number: int) -> tuple[TrackedObservationPart, ...]:
+        """Map internal segments to exact existing part-local PERSON indices.
+
+        This neither serializes continuity nor makes an enqueued/admitted predecessor.
+        No-person lifecycle transport requires the future canonical contract, not a
+        fabricated empty v1.4 event.
+        """
+        if type(sequence_number) is not int or sequence_number != self.source_sequence_number:
+            raise ValueError("Tracking reference sequence must match observed source metadata")
+        people = [o.track_id for o in self.observations if o.type == "PERSON"]
+        subjects = self.subject_segments
+        if (
+            not subjects
+            or not all(isinstance(subject, SubjectSegment) for subject in subjects)
+            or len(set(people)) != len(people)
+            or len(subjects) != len(people)
+            or {subject.track_id for subject in subjects} != set(people)
+            or len({subject.segment_id for subject in subjects}) != len(subjects)
+        ):
+            raise ValueError("Tracking metadata must uniquely match every original PERSON")
+        for subject in subjects:
+            previous = subject.previous_sequence_number
+            if (
+                type(subject.track_id) is not int
+                or subject.track_id < 1
+                or not isinstance(subject.segment_id, UUID)
+                or not (
+                    (
+                        previous is None
+                        and subject.reason
+                        in {
+                            "INITIAL",
+                            "RECONNECT",
+                            "VIEW_CHANGE",
+                            "FRAME_DISCONTINUITY",
+                            "PROFILE_CHANGE",
+                        }
+                    )
+                    or (
+                        type(previous) is int
+                        and 0 <= previous < sequence_number
+                        and subject.reason is None
+                    )
+                )
+            ):
+                raise ValueError("Invalid internal segment lifecycle claim")
+        retired = self.retired_segments
+        if (
+            not all(isinstance(item, RetiredSegment) for item in retired)
+            or len({item.segment_id for item in retired}) != len(retired)
+            or {item.segment_id for item in retired} & {s.segment_id for s in subjects}
+        ):
+            raise ValueError("Retired segments must be distinct from active subjects")
+        by_track = {subject.track_id: subject for subject in subjects}
+        return tuple(
+            TrackedObservationPart(
+                event,
+                tuple(
+                    PartSubjectReference(event.event_id, index, by_track[observation.track_id])
+                    for index, observation in enumerate(event.observations)
+                    if observation.type == "PERSON"
+                ),
+                retired,
+            )
+            for event in self.to_partitioned_events(sequence_number=sequence_number)
+        )
 
     def _event(self, event_id: str, observations: list[Observation]) -> TechnicalObservationEvent:
         return TechnicalObservationEvent.create(

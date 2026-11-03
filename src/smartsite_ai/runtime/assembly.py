@@ -7,11 +7,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from uuid import UUID
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
+from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile, experimental_ppe_profile
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.worker import StreamWorker
@@ -124,11 +126,20 @@ def assemble_sessions(
     source_factory: SourceFactory,
     evidence_max_bytes: int,
     delivery_interval_seconds: float,
+    experimental_model_profile: ExperimentalPpeProfile | None = None,
+    observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
 ) -> tuple[CameraSession, ...]:
     """Create isolated tracker, poller, outbox, and evidence state per camera."""
 
     if not 1 <= len(plans) <= 3:
         raise CameraRuntimeError("runtime requires 1 to 3 cameras")
+    if experimental_model_profile not in (None, "native-ppe-10", "unified-ppe-15"):
+        raise CameraRuntimeError("unsupported experimental PPE profile")
+    if observation_schema_version not in ("1.0.0", "1.1.0"):
+        raise CameraRuntimeError("unsupported observation schema version")
+    if experimental_model_profile is not None and observation_schema_version != "1.1.0":
+        raise CameraRuntimeError("expanded PPE requires a configured v1.1.0 consumer")
+    profile = experimental_ppe_profile(experimental_model_profile)
     sessions: list[CameraSession] = []
     for plan in plans:
         camera = plan.bound
@@ -141,9 +152,10 @@ def assemble_sessions(
             )
         pipeline = Mf05Mf06Pipeline(
             tracker=IoUPersonTracker(),
-            ppe=PpePipeline(),
+            ppe=PpePipeline.for_model_profile(profile),
             zones=RestrictedZonePipeline(),
             ppe_region_id=str(camera.entry.ppe_region_id),
+            schema_version=observation_schema_version,
         )
         outbox = SqliteEventOutbox(camera.outbox)
         source = source_factory(camera.source_config)

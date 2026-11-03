@@ -9,8 +9,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
+from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.regions import CameraRegionConfiguration
-from smartsite_ai.integrations.backend_configuration_client import ConfigurationSnapshotResult
+from smartsite_ai.integrations.backend_configuration_client import (
+    ConfigurationBundleResult,
+    ConfigurationSnapshotResult,
+)
 from smartsite_ai.integrations.outbox import SqliteEventOutbox
 
 CAMERA = UUID("11111111-1111-4111-8111-111111111111")
@@ -65,6 +70,33 @@ class ConfigurationClient:
             ).encode()
         )
         return ConfigurationSnapshotResult(snapshot, '"v1"')
+
+    async def fetch_bundle(self, *args, **kwargs):
+        snapshot = (await self.fetch()).configuration.model_dump(mode="json", by_alias=True)
+        content = {
+            **snapshot,
+            "cameraId": str(CAMERA),
+            "viewRevision": 1,
+            "issuedAt": "2026-10-30T00:00:00.000Z",
+            "regions": [
+                {
+                    **region,
+                    "zoneId": str(REGION),
+                    "policyRevision": 1,
+                    "requiredPpe": ["HARD_HAT", "SAFETY_VEST"],
+                }
+                for region in snapshot["regions"]
+            ],
+        }
+        bundle = CameraConfigurationBundle.from_wire_bytes(
+            json.dumps(
+                {
+                    **content,
+                    "bundleSha256": compute_canonical_payload_hash(content),
+                }
+            ).encode()
+        )
+        return ConfigurationBundleResult(bundle, '"v1"')
 
 
 def test_durable_claim_is_unique_across_instances_and_restart(tmp_path: Path):
@@ -225,6 +257,8 @@ def test_multi_preflight_claims_before_source_and_duplicate_preflight_fails(tmp_
         )
         stream = sessions[0].worker._stream
         assert stream.source.binding.stream_session_id == document["streamSessionId"]
+        assert plans[0].poller._bound_source is stream.source
+        assert await plans[0].store.get_bundle("CAM") is not None
         assert stream.config.max_consecutive_failures == 1
         assert not source.is_connected
         await close_configuration_clients(plans)

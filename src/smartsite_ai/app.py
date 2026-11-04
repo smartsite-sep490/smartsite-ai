@@ -13,6 +13,7 @@ from smartsite_ai.config import Settings
 from smartsite_ai.identity_api import _EnrollmentBuffer
 from smartsite_ai.identity_api import router as identity_router
 from smartsite_ai.inference.insightface_recognizer import build_face_recognizer
+from smartsite_ai.mf06_identity_api import router as mf06_identity_router
 from smartsite_ai.realtime import parse_zone_polygon, stream_realtime
 
 
@@ -119,6 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     app.include_router(identity_router)
+    app.include_router(mf06_identity_router)
 
     def _realtime_authorized(websocket: WebSocket) -> bool:
         expected = settings.backend_service_token

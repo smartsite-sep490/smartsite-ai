@@ -1,5 +1,42 @@
 # Region configuration image: capture-only software boundary
 
+## Optional raw display on the same explicit owner
+
+The private host manifest may set `"rawPreviewEnabled": true` for a `LIVE` source.
+It defaults to false, requires a JSON boolean, and rejects REPLAY sources. The
+operator still starts the owner explicitly; app construction and HTTP requests
+never open a source, create another capture or load a model.
+
+When enabled, authenticated `GET /v1/realtime/video-stream?cameraExternalId=...`
+observes that owner's valid frames as NDJSON `media-frame` version1 payloads.
+Use the host's existing private service bearer token. Exactly one authorization
+header and one camera query parameter are required. Missing/wrong credentials,
+invalid query and another camera fail before reading pixels. A missing/stale
+buffer returns503. At most two viewers share the same latest-frame encoder;
+additional viewers receive429 with Retry-After. Streams last at most600seconds,
+and disconnecting a viewer does not stop capture.
+
+Raw display keeps one pending frame and one encoded frame, bounds input to
+16,777,216pixels, output to640pixels per dimension and JPEG to128KiB, and emits
+at most8frames/second. That is a configured ceiling, not measured camera FPS.
+Capture or buffer age of2seconds expires pixels; source failure/EOF/stop clears
+them. Optional observer failure disables display without skipping native source
+teardown. The 1280-pixel configuration image, its reference lineage and endpoint
+remain separate. Raw frames are not AI observations, identities or saved evidence.
+
+This path is model-free and belongs to this explicit configuration owner. It does
+not attach to an unrelated durable inference worker, supply snapshot analysis,
+recorded playback, R2 storage or automatic camera recovery. All cooperating owners
+still require the same physical resource binding; old non-cooperating processes
+must be excluded before activation. JPEG encoding uses a worker thread; cancellation
+cannot forcibly preempt native Pillow work. Actual shutdown/throughput qualification
+and any runtime rollout remain separate gates.
+
+The wire shape is paired with the candidate Platform preview parser, not claimed
+as a contract already released on Platform Main. No vendored schema or provenance
+changes accompany this source unit. Deployment requires the compatible Backend
+consumer and its existing user scope checks; no browser receives this service token.
+
 ## Explicit local operator command
 
 `smartsite-ai-configuration-capture --manifest /private/capture.json` hosts the

@@ -32,6 +32,7 @@ def _runtime(config: HostConfiguration) -> ConfigurationCaptureRuntime:
         resource_id=config.resource_id,
         lock_directory=config.lock_directory,
         service_token=config.token,
+        raw_preview_enabled=config.raw_preview_enabled,
     )
 
 

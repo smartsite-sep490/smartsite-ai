@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from smartsite_ai.configuration_image import SourceKind
 from smartsite_ai.configuration_image_api import configuration_image_router
+from smartsite_ai.configuration_media_api import configuration_media_router
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.configuration_capture import (
     ConfigurationCapture,
@@ -18,6 +19,7 @@ from smartsite_ai.ingestion.configuration_capture import (
 from smartsite_ai.ingestion.configuration_process_lease import ConfigurationProcessLease
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import FrameSource, SourceConnectionError
+from smartsite_ai.media_preview import MediaPreviewHub
 
 SourceFactory = Callable[[StreamConfig], FrameSource]
 
@@ -81,20 +83,33 @@ class ConfigurationCaptureRuntime:
         source_factory: SourceFactory = _opencv_source,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stop_timeout: float = 2.0,
+        raw_preview_enabled: bool = False,
     ) -> None:
+        if type(raw_preview_enabled) is not bool or (raw_preview_enabled and source_kind != "LIVE"):
+            raise ValueError("Raw preview requires an explicit LIVE capture opt-in")
         if source_kind not in ("LIVE", "REPLAY") or stream.is_live != (source_kind == "LIVE"):
             raise ValueError("Configuration source kind must match the stream")
         if source_kind == "REPLAY" and not stream.pace_replay:
             raise ValueError("Configuration replay must be explicitly paced")
         self._process_lease = ConfigurationProcessLease(lock_directory, resource_id)
         source = _DeferredSource(stream, source_factory)
+        self._media_hub = (
+            MediaPreviewHub(stream.camera_external_id, utc_clock=clock)
+            if raw_preview_enabled
+            else None
+        )
         self._capture = ConfigurationCapture(
             ConfigurationSourceLease(source, stream.camera_external_id, source_kind=source_kind),
             clock=clock,
             stop_timeout=stop_timeout,
+            frame_observer=self._media_hub,
         )
         self.app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
         self.app.include_router(configuration_image_router(self._capture, service_token))
+        if self._media_hub is not None:
+            self.app.include_router(
+                configuration_media_router(self._capture, self._media_hub, service_token)
+            )
         self._started = False
         self._stop_requested = False
 
@@ -121,7 +136,11 @@ class ConfigurationCaptureRuntime:
 
     async def stop(self) -> bool:
         self._stop_requested = True
-        released = await self._capture.stop()
+        try:
+            released = await self._capture.stop()
+        finally:
+            if self._media_hub is not None:
+                await self._media_hub.close()
         if released:
             self._process_lease.release()
         return released

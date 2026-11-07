@@ -7,7 +7,7 @@ import math
 import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from smartsite_ai.configuration_image import (
@@ -19,6 +19,12 @@ from smartsite_ai.configuration_image import (
 )
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.source import FrameSource
+
+
+class ConfigurationFrameObserver(Protocol):
+    def offer(self, frame: FrameEnvelope) -> None: ...
+
+    def clear(self) -> None: ...
 
 
 class ConfigurationSourceLease:
@@ -89,6 +95,7 @@ class ConfigurationCapture:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         encoder: Callable[[FrameEnvelope], ConfigurationJpeg] = encode_configuration_image,
         stop_timeout: float = 2.0,
+        frame_observer: ConfigurationFrameObserver | None = None,
     ) -> None:
         if not math.isfinite(stop_timeout) or not 0 < stop_timeout <= 10:
             raise ValueError("Configuration stop budget must be bounded")
@@ -96,6 +103,8 @@ class ConfigurationCapture:
         self._clock = clock
         self._encoder = encoder
         self._stop_timeout = stop_timeout
+        self._frame_observer = frame_observer
+        self._observer_failed = False
         self._state: Literal["IDLE", "RUNNING", "STOPPING", "STOPPED", "FAILED"] = "IDLE"
         self._reason: str | None = None
         self._task: asyncio.Task[None] | None = None
@@ -125,6 +134,10 @@ class ConfigurationCapture:
     def pending_frames(self) -> int:
         return int(self._pending is not None)
 
+    @property
+    def observer_available(self) -> bool:
+        return self._state == "RUNNING" and not self._observer_failed
+
     def _fresh(self, captured_at: datetime) -> bool:
         return -1 <= (self._clock() - captured_at).total_seconds() <= 2
 
@@ -150,6 +163,15 @@ class ConfigurationCapture:
     def _clear(self) -> None:
         self._generation += 1
         self._latest = self._latest_time = self._pending = None
+        self._clear_observer()
+
+    def _clear_observer(self) -> None:
+        if self._frame_observer is not None:
+            try:
+                self._frame_observer.clear()
+            except Exception:
+                # Optional display failure must not prevent native source teardown.
+                self._observer_failed = True
 
     def _fail(self, reason: str) -> None:
         self._reason = reason
@@ -217,6 +239,12 @@ class ConfigurationCapture:
                     self._fail("frame_identity_invalid")
                     break
                 if self._fresh(frame.captured_at):
+                    if self._frame_observer is not None and not self._observer_failed:
+                        try:
+                            self._frame_observer.offer(frame)
+                        except Exception:
+                            self._observer_failed = True
+                            self._clear_observer()
                     self._pending = frame
                     self._ready.set()
                 else:

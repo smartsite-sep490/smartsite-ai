@@ -48,6 +48,7 @@ class _Manifest(BaseModel):
     lock_directory: Path = Field(alias="lockDirectory")
     port: int = Field(default=0, ge=0, le=65535)
     duration_seconds: float = Field(alias="durationSeconds", gt=0, le=86400)
+    raw_preview_enabled: bool = Field(default=False, alias="rawPreviewEnabled", strict=True)
 
     @field_validator("stream_id", "camera_external_id")
     @classmethod
@@ -66,6 +67,7 @@ class HostConfiguration:
     token: SecretStr
     port: int
     duration_seconds: float
+    raw_preview_enabled: bool = False
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -90,6 +92,8 @@ def load_host_configuration(
             raise ValueError("Configuration exceeds byte budget")
         json.loads(data, object_pairs_hook=_unique_object)
         manifest = _Manifest.model_validate_json(data)
+        if manifest.raw_preview_enabled and manifest.source_kind != "LIVE":
+            raise ValueError("Raw preview requires LIVE capture")
         if manifest.duration_seconds > 3600 and controlled_stop is not True:
             raise ValueError("Long sessions require an explicit stop control")
         raw, token = environ[manifest.source_env], environ[manifest.token_env]
@@ -130,6 +134,7 @@ def load_host_configuration(
             SecretStr(token),
             manifest.port,
             manifest.duration_seconds,
+            manifest.raw_preview_enabled,
         )
     except (OSError, ValueError, KeyError, TypeError):
         raise ConfigurationHostError("CONFIGURATION_HOST_INVALID_CONFIG") from None

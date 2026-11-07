@@ -10,6 +10,25 @@ SOURCE = "rtsp://user:source-secret@example.invalid/live?key=private"
 TOKEN = "private-configuration-service-token-12345"
 
 
+def test_raw_preview_requires_explicit_strict_manifest_opt_in(tmp_path):
+    assert load(manifest(tmp_path)).raw_preview_enabled is False
+    assert load(manifest(tmp_path, rawPreviewEnabled=True)).raw_preview_enabled is True
+    for invalid in ("true", 1, None):
+        with pytest.raises(api().ConfigurationHostError):
+            load(manifest(tmp_path, rawPreviewEnabled=invalid))
+
+
+def test_raw_preview_cannot_relabel_a_replay_source_as_live(tmp_path):
+    video = tmp_path / "synthetic.mp4"
+    video.write_bytes(b"synthetic-not-decoded")
+    path = manifest(tmp_path, sourceKind="REPLAY", rawPreviewEnabled=True)
+    with pytest.raises(api().ConfigurationHostError):
+        api().load_host_configuration(
+            path,
+            {"SMARTSITE_AI_CAPTURE_SOURCE": str(video), "SMARTSITE_AI_CAPTURE_TOKEN": TOKEN},
+        )
+
+
 def api():
     name = "smartsite_ai.tools.configuration_host_config"
     assert importlib.util.find_spec(name) is not None, "Explicit host configuration is missing"

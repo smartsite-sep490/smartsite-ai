@@ -72,6 +72,12 @@ def _require_aware_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _tracked_transient(error: Exception) -> bool:
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code in (408, 429) or 500 <= error.response.status_code < 600
+    return isinstance(error, (httpx.TransportError, TimeoutError))
+
+
 class SqliteEventOutbox:
     """Persist events before delivery and retain their terminal outcome.
 
@@ -213,6 +219,14 @@ class SqliteEventOutbox:
                     "ALTER TABLE tracked_frame_pending ADD COLUMN raw_stored INTEGER"
                     " NOT NULL DEFAULT 0 CHECK(raw_stored IN (0, 1))"
                 )
+            for name, kind in (
+                ("attempt_count", "INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0)"),
+                ("next_attempt_at", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE tracked_frame_pending ADD COLUMN {name} {kind}"
+                    )
 
     async def enqueue_tracked_parts(
         self,
@@ -335,12 +349,14 @@ class SqliteEventOutbox:
             rows = connection.execute(
                 """SELECT frame_id, delivery_json FROM tracked_frame_pending
                 WHERE camera_id = ? AND generation_id = ? AND session_id = ?
-                  AND expires_at > ? AND delivery_json IS NOT NULL AND raw_stored = 0
+                  AND expires_at > ? AND next_attempt_at <= ?
+                  AND delivery_json IS NOT NULL AND raw_stored = 0
                 ORDER BY rowid LIMIT ?""",
                 (
                     credential.camera_id,
                     credential.worker_generation_id,
                     credential.stream_session_id,
+                    now,
                     now,
                     limit,
                 ),
@@ -408,9 +424,61 @@ class SqliteEventOutbox:
 
             now = _require_aware_utc(self._clock()).timestamp()
             updated = connection.execute(
-                "UPDATE tracked_frame_pending SET raw_stored = 1 " + where, (*key, now)
+                """UPDATE tracked_frame_pending SET
+                attempt_count = CASE WHEN raw_stored = 0 THEN 0 ELSE attempt_count END,
+                next_attempt_at = CASE WHEN raw_stored = 0 THEN 0 ELSE next_attempt_at END,
+                raw_stored = 1 """
+                + where,
+                (*key, now),
             )
             return updated.rowcount == 1
+
+    async def defer_tracked_frame(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        *,
+        retry_base: timedelta,
+        retry_max: timedelta,
+    ) -> None:
+        """Persist bounded retry timing without changing original bytes or deadline."""
+        if retry_base <= timedelta(0) or retry_max < retry_base:
+            raise ValueError("Invalid tracked retry policy")
+        now = _require_aware_utc(self._clock())
+        credential.ensure_current(now)
+        key = (
+            credential.camera_id,
+            credential.worker_generation_id,
+            credential.stream_session_id,
+            validate_uuid_str(frame_id, "frameId"),
+        )
+        await self.initialize()
+        async with self._lock:
+            await asyncio.to_thread(
+                self._defer_tracked_frame_sync, key, now.timestamp(), retry_base, retry_max
+            )
+
+    def _defer_tracked_frame_sync(
+        self, key: tuple[str, str, str, str], now: float, base: timedelta, cap: timedelta
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            where = """WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+                AND frame_id = ? AND expires_at > ? AND next_attempt_at <= ?"""
+            args = (*key, now, now)
+            row = connection.execute(
+                "SELECT attempt_count FROM tracked_frame_pending " + where, args
+            ).fetchone()
+            if row is None:
+                return
+            delay = min(
+                base.total_seconds() * 2 ** min(row["attempt_count"], 30), cap.total_seconds()
+            )
+            connection.execute(
+                "UPDATE tracked_frame_pending SET attempt_count = attempt_count + 1, "
+                "next_attempt_at = ? " + where,
+                (now + delay, *args),
+            )
 
     async def stage_tracked_frame(
         self,
@@ -540,13 +608,23 @@ class SqliteEventOutbox:
             )
 
     async def reconcile_tracked_frames(
-        self, client: BackendClient, credential: WorkerGenerationCredential, *, limit: int
+        self,
+        client: BackendClient,
+        credential: WorkerGenerationCredential,
+        *,
+        limit: int,
+        retry_base: timedelta | None = None,
+        retry_max: timedelta | None = None,
     ) -> int:
         """Recheck a bounded batch with the original source credentials after restart."""
         now = _require_aware_utc(self._clock())
         credential.ensure_current(now)
         if type(limit) is not int or limit < 1:
             raise ValueError("Tracked frame lookup limit must be a positive integer")
+        if (retry_base is None) != (retry_max is None) or (
+            retry_base is not None and (retry_base <= timedelta(0) or retry_max < retry_base)
+        ):
+            raise ValueError("Invalid tracked retry policy")
         source = (
             credential.camera_id,
             credential.worker_generation_id,
@@ -564,14 +642,22 @@ class SqliteEventOutbox:
             if now.timestamp() >= row["expires_at"]:
                 continue
             references = TrackedFrameReferences.model_validate_json(row["references_json"])
-            result = await client.read_tracked_frame_result(
-                credential,
-                row["frame_id"],
-                scope_sha256=references.scope_sha256,
-                sequence_number=references.sequence_number,
-                subjects=references.subject_references(),
-                retired_segment_ids=set(references.retired_segment_ids),
-            )
+            try:
+                result = await client.read_tracked_frame_result(
+                    credential,
+                    row["frame_id"],
+                    scope_sha256=references.scope_sha256,
+                    sequence_number=references.sequence_number,
+                    subjects=references.subject_references(),
+                    retired_segment_ids=set(references.retired_segment_ids),
+                )
+            except (httpx.HTTPStatusError, httpx.TransportError, TimeoutError) as error:
+                if retry_base is None or retry_max is None or not _tracked_transient(error):
+                    raise
+                await self.defer_tracked_frame(
+                    credential, row["frame_id"], retry_base=retry_base, retry_max=retry_max
+                )
+                continue
             async with self._lock:
                 resolved += await asyncio.to_thread(
                     self._finish_tracked_lookup_sync, source, row, result
@@ -585,9 +671,10 @@ class SqliteEventOutbox:
             return connection.execute(
                 """SELECT frame_id, references_json, expires_at FROM tracked_frame_pending
                 WHERE camera_id = ? AND generation_id = ? AND session_id = ? AND expires_at > ?
+                  AND next_attempt_at <= ?
                   AND (delivery_json IS NULL OR raw_stored = 1) AND references_json <> 'null'
                 ORDER BY last_checked, rowid LIMIT ?""",
-                (*source, now, limit),
+                (*source, now, now, limit),
             ).fetchall()
 
     def _finish_tracked_lookup_sync(
@@ -604,7 +691,9 @@ class SqliteEventOutbox:
                 AND frame_id = ? AND references_json = ? AND expires_at = ? AND expires_at > ?"""
             if result is None:
                 connection.execute(
-                    "UPDATE tracked_frame_pending SET last_checked = ? " + where, (now, *key)
+                    "UPDATE tracked_frame_pending SET last_checked = ?, attempt_count = 0, "
+                    "next_attempt_at = 0 " + where,
+                    (now, *key),
                 )
                 return 0
             deleted = connection.execute("DELETE FROM tracked_frame_pending " + where, key)
@@ -1086,8 +1175,18 @@ class OutboxDispatcher:
         stored = 0
         for frame_id, parts in await self._outbox.ready_tracked_parts(credential, limit=limit):
             receipts = []
-            for part in parts:
-                receipts.append(await self._backend.post_tracked_part(credential, part))
+            try:
+                for part in parts:
+                    receipts.append(await self._backend.post_tracked_part(credential, part))
+            except (httpx.HTTPStatusError, httpx.TransportError, TimeoutError) as error:
+                if _tracked_transient(error):
+                    await self._outbox.defer_tracked_frame(
+                        credential,
+                        frame_id,
+                        retry_base=self._retry_base,
+                        retry_max=self._retry_max,
+                    )
+                raise
             if await self._outbox.confirm_tracked_parts_stored(
                 credential, frame_id, tuple(receipts)
             ):
@@ -1100,7 +1199,13 @@ class OutboxDispatcher:
             raise OutboxDeliveryBlocked("Tracked delivery requires the original credential")
         try:
             # Resolve previously stored frames even if a later raw send fails.
-            await self._outbox.reconcile_tracked_frames(self._backend, credential, limit=limit)
+            await self._outbox.reconcile_tracked_frames(
+                self._backend,
+                credential,
+                limit=limit,
+                retry_base=self._retry_base,
+                retry_max=self._retry_max,
+            )
             await self.drain_tracked_once(limit=limit)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code

@@ -379,6 +379,8 @@ async def test_tracked_send_bytes_and_seal_expectation_are_staged_together(tmp_p
         dispatcher = OutboxDispatcher(drain_outbox, client, generation_credential=CREDENTIAL)
         with pytest.raises(httpx.HTTPStatusError):
             await dispatcher.drain_tracked_once(limit=1)
+        assert not await drain_outbox.ready_tracked_parts(CREDENTIAL, limit=2)
+        now += timedelta(seconds=1)
         assert await drain_outbox.ready_tracked_parts(CREDENTIAL, limit=2) == queued[:1]
         assert posted == [wire, second_wire]
 
@@ -424,6 +426,8 @@ async def test_tracked_send_bytes_and_seal_expectation_are_staged_together(tmp_p
         )
         await scheduled.drain_once()
         assert calls == ["POST"]
+        assert not await cycle_outbox.ready_tracked_parts(CREDENTIAL, limit=1)
+        now += timedelta(seconds=1)
         assert await cycle_outbox.ready_tracked_parts(CREDENTIAL, limit=1) == queued[:1]
 
         status = 401

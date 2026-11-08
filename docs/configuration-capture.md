@@ -209,7 +209,22 @@ Source close/reconnect/terminal paths clear display state. Observer exceptions d
 display while preserving source processing/cleanup. REPLAY rejects this LIVE display
 opt-in. Configuration-only capture behavior and default worker behavior are unchanged.
 
-This is a source composition boundary, not an enabled worker host. Operator/manifest
-composition, cross-process physical resource exclusion, compatible Backend/Web consumer
-rollout and device performance qualification remain separate required gates. Never run a
-configuration-only owner beside a durable owner for the same physical camera.
+The existing `smartsite-ai-camera-runtime` CLI accepts up to three repeatable
+`--preview-manifest` absolute paths, using the private host format above. Each must opt
+into raw preview, declare LIVE, and match one runtime camera's stream, external ID and
+resolved source exactly. Physical resource IDs must be unique; use the same UUID/private
+lock directory as the configuration-only owner. Without this option nothing is enabled.
+
+Loopback ports and cooperating OS leases are reserved before model/source construction.
+`RAW_PREVIEW_BOUND_NOT_READY` records report bound ports, never model/source readiness.
+Server failure, cancellation or the manifest deadline stops that selected worker and
+drains its source before releasing the lease. An unresolved release retains ownership
+and fails closed. Other camera sessions retain their existing supervisor isolation.
+The private manifest duration is bounded to one hour; this does not add an unattended
+renewal policy. Service tokens/source credentials remain environment references.
+
+This is source/CLI composition, not runtime rollout or device qualification. Physical
+alias mapping/non-cooperating owners, real server/driver/browser/performance tests and
+compatible Backend/Web consumer release remain required. Configuration-image composition
+inside the durable owner is still open; never start a configuration-only owner beside a
+durable owner for the same physical camera. No model is accepted by enabling preview.

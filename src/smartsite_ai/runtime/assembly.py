@@ -31,6 +31,7 @@ from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker
 from smartsite_ai.runtime.manifest import BoundCamera, BoundManifest, CameraRuntimeError
+from smartsite_ai.runtime.preview_host import PreviewHostGroup
 from smartsite_ai.runtime.supervisor import (
     CameraOutcome,
     CameraSession,
@@ -128,6 +129,7 @@ def assemble_sessions(
     delivery_interval_seconds: float,
     experimental_model_profile: ExperimentalPpeProfile | None = None,
     observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
+    preview_hosts: PreviewHostGroup | None = None,
 ) -> tuple[CameraSession, ...]:
     """Create isolated tracker, poller, outbox, and evidence state per camera."""
 
@@ -163,8 +165,13 @@ def assemble_sessions(
             plan.generation.ensure_current(datetime.now(UTC))
             source = GenerationBoundSource(source, plan.generation)
             plan.poller.enable_generation_ack(source)
+        stream = StreamWorker(
+            config=camera.source_config,
+            source=source,
+            frame_observer=preview_hosts.observer_for(camera.stream_id) if preview_hosts else None,
+        )
         worker = HeadlessCameraProcessingWorker(
-            stream=StreamWorker(config=camera.source_config, source=source),
+            stream=stream,
             detector=detector,
             pipeline=pipeline,
             ppe_region_id=str(camera.entry.ppe_region_id),
@@ -189,7 +196,7 @@ def assemble_sessions(
             CameraSession(
                 stream_id=camera.stream_id,
                 camera_external_id=camera.camera_external_id,
-                worker=worker,
+                worker=preview_hosts.wrap(stream, worker) if preview_hosts else worker,
                 poller=plan.poller,
             )
         )

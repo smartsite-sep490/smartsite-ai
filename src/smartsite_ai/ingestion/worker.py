@@ -119,6 +119,15 @@ class StreamWorker:
         return self.config.camera_external_id
 
     @property
+    def source_released(self) -> bool:
+        return (
+            self._has_stopped
+            and not self._source_attempt_active
+            and not self._source_release_failed
+            and (self._loop_task is None or self._loop_task.done())
+        )
+
+    @property
     def observer_available(self) -> bool:
         return (
             self.state == StreamState.STREAMING

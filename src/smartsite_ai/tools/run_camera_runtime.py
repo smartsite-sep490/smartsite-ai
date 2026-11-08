@@ -30,6 +30,7 @@ from smartsite_ai.runtime.manifest import (
     bind_manifest,
     load_manifest_bytes,
 )
+from smartsite_ai.runtime.preview_host import PreviewHostGroup
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
@@ -38,6 +39,7 @@ from smartsite_ai.runtime.supervisor import (
     exit_code,
     report_payload,
 )
+from smartsite_ai.tools.configuration_host_config import load_host_configuration
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-credential-file", type=Path)
     parser.add_argument("--expected-camera-id", type=UUID)
     parser.add_argument("--expected-outbox", type=Path)
+    parser.add_argument("--preview-manifest", type=Path, action="append", default=[])
     return parser
 
 
@@ -61,6 +64,7 @@ async def run_manifest(
     generation_credential_file: Path | None = None,
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
+    preview_manifest_paths: tuple[Path, ...] = (),
 ) -> int:
     supervised = any(
         value is not None
@@ -74,11 +78,21 @@ async def run_manifest(
         manifest, generation_credential_file, expected_camera_id, expected_outbox
     )
     bound = bind_manifest(manifest, os.environ)
+    if len(preview_manifest_paths) > 3 or any(
+        not path.is_absolute() for path in preview_manifest_paths
+    ):
+        raise CameraRuntimeError("raw preview configuration is invalid")
+    previews = PreviewHostGroup(
+        bound, tuple(load_host_configuration(path, os.environ) for path in preview_manifest_paths)
+    )
     plans: list[CameraPlan] = []
     backend_clients: list[BackendClient] = []
     runner: UltralyticsYoloRunner | None = None
 
     async def preflight() -> tuple[object, ...] | None:
+        previews.reserve()
+        for status in previews.binding_status():
+            print(json.dumps(status, separators=(",", ":")), flush=True)
         failure, prepared = await preflight_manifest(
             bound,
             configuration_client_factory=lambda: BackendConfigurationClient.from_settings(
@@ -127,6 +141,7 @@ async def run_manifest(
             delivery_interval_seconds=bound.manifest.delivery_interval_seconds,
             experimental_model_profile=bound.manifest.experimental_model_profile,
             observation_schema_version=bound.manifest.observation_schema_version,
+            preview_hosts=previews if preview_manifest_paths else None,
         )
 
     async def close_clients() -> None:
@@ -144,7 +159,10 @@ async def run_manifest(
             )
         )
     finally:
-        await _finish_cleanup(close_clients())
+        try:
+            await _finish_cleanup(close_clients())
+        finally:
+            await _finish_cleanup(previews.close())
 
     print(json.dumps(report_payload(report), separators=(",", ":")))
     return exit_code(report)
@@ -153,6 +171,16 @@ async def run_manifest(
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.preview_manifest:
+            return asyncio.run(
+                run_manifest(
+                    args.manifest,
+                    generation_credential_file=args.generation_credential_file,
+                    expected_camera_id=args.expected_camera_id,
+                    expected_outbox=args.expected_outbox,
+                    preview_manifest_paths=tuple(args.preview_manifest),
+                )
+            )
         if any(
             value is not None
             for value in (

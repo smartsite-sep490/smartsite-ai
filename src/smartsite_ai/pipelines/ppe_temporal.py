@@ -227,6 +227,8 @@ def filter_event_for_delivery(
 def _delivery_observations(
     event: ObservationFrame | TechnicalObservationEvent,
     confirmed_ppe_candidates: Iterable[ConfirmedPpeCandidate],
+    *,
+    require_trigger: bool = True,
 ) -> list[Observation] | None:
     event_session_str = event.stream_session_id
     confirmed_keys = {
@@ -254,10 +256,18 @@ def _delivery_observations(
         else:
             filtered_observations.append(obs)
 
-    if not has_deliverable_trigger or not filtered_observations:
+    if require_trigger and not has_deliverable_trigger:
         return None
 
     return filtered_observations
+
+
+def tracked_delivery_frame(
+    frame: ObservationFrame, confirmed_ppe_candidates: Iterable[ConfirmedPpeCandidate]
+) -> ObservationFrame:
+    """Retain captured frame context without emitting unconfirmed missing PPE."""
+    observations = _delivery_observations(frame, confirmed_ppe_candidates, require_trigger=False)
+    return replace(frame, observations=tuple(observations or ()))
 
 
 def events_for_delivery(

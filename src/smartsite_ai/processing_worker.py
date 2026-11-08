@@ -7,6 +7,8 @@ import logging
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -24,6 +26,9 @@ from smartsite_ai.ingestion.queue import QueueClosedError
 from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.tracked_capture import stage_tracked_capture
+from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
     events_for_delivery,
@@ -75,6 +80,29 @@ class ProcessingWorkerSourceError(RuntimeError):
     """The configured source could not sustain a processable stream."""
 
 
+@dataclass(frozen=True, slots=True)
+class TrackedCapturePolicy:
+    credential: WorkerGenerationCredential
+    site_id: str
+    profile_sha256: str
+    pending_seconds: float
+    predecessor_wait_seconds: float
+    max_pending: int
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        if not (
+            isfinite(self.pending_seconds)
+            and isfinite(self.predecessor_wait_seconds)
+            and 0 < self.predecessor_wait_seconds < self.pending_seconds
+            and type(self.max_pending) is int
+            and self.max_pending > 0
+            and type(self.max_bytes) is int
+            and self.max_bytes > 0
+        ):
+            raise ValueError("Invalid tracked capture limits")
+
+
 class HeadlessCameraProcessingWorker:
     """Own one explicit source-to-outbox lifecycle, independent of browser clients."""
 
@@ -92,6 +120,7 @@ class HeadlessCameraProcessingWorker:
         delivery_interval_seconds: float = 0.25,
         evidence_publisher: EvidencePublisherProtocol | None = None,
         partitioned_frame_delivery: bool = False,
+        tracked_capture: TrackedCapturePolicy | None = None,
         delivery_context_provider: Callable[
             [CameraConfigurationBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
             Awaitable[EventDeliveryContext | None],
@@ -102,6 +131,13 @@ class HeadlessCameraProcessingWorker:
             raise ValueError("delivery interval must be positive")
         if not ppe_region_id:
             raise ValueError("PPE region ID must not be empty")
+        if tracked_capture is not None and (
+            partitioned_frame_delivery or delivery_context_provider is None
+        ):
+            raise ValueError("Tracked capture requires bound context and its own delivery route")
+        if tracked_capture is not None and not stream.config.is_live:
+            raise ValueError("Tracked capture requires the Backend LIVE admission route")
+        self._tracked_capture = tracked_capture
         self._stream = stream
         self._detector = detector
         self._pipeline = pipeline
@@ -188,6 +224,18 @@ class HeadlessCameraProcessingWorker:
             if normal_source_completion and delivery_task is not None:
                 await delivery_task
                 await self._dispatcher.drain_once()
+                tracked = self._tracked_capture
+                if tracked is not None:
+                    try:
+                        async with asyncio.timeout(tracked.predecessor_wait_seconds):
+                            while await self._outbox.has_pending_tracked_frame(tracked.credential):
+                                await self._dispatcher.drain_once()
+                                if await self._outbox.has_pending_tracked_frame(tracked.credential):
+                                    await asyncio.sleep(self._delivery_interval_seconds)
+                    except TimeoutError:
+                        raise TimeoutError(
+                            "Timed out waiting for final tracked frame confirmation"
+                        ) from None
 
         source_status = self._stream.snapshot()
         if source_status.state is StreamState.ERROR:
@@ -296,6 +344,8 @@ class HeadlessCameraProcessingWorker:
             "observe",
             self._pipeline.process if hasattr(self._pipeline, "process") else None,
         )
+        if self._tracked_capture is not None:
+            observe = getattr(self._pipeline, "observe_frame", None)
         if observe is None:
             raise TypeError("Pipeline must provide observe or process")
         event = observe(
@@ -354,6 +404,63 @@ class HeadlessCameraProcessingWorker:
                 active_track_ids=active_track_ids,
                 observations=ppe_observations,
             )
+        tracked = self._tracked_capture
+        if tracked is not None:
+            if (
+                not isinstance(event, ObservationFrame)
+                or not isinstance(configuration, CameraConfigurationBundle)
+                or delivery_context is None
+                or delivery_context.camera_id != configuration.camera_id
+                or delivery_context.configuration_version != configuration.configuration_version
+                or delivery_context.view_revision != configuration.view_revision
+                or delivery_context.bundle_sha256 != configuration.bundle_sha256
+                or delivery_context.source_kind
+                != ("LIVE" if self._stream.config.is_live else "REPLAY")
+            ):
+                raise ProcessingWorkerSourceError(
+                    "Tracked capture context is unavailable or changed"
+                )
+
+            async def check_context() -> None:
+                if self._configuration_guard is not None:
+                    self._configuration_guard()
+                if (
+                    self._stream.config.is_live
+                    and await self._configurations.get_active_configuration(
+                        frame.camera_external_id
+                    )
+                    is not configuration
+                ):
+                    raise ProcessingWorkerSourceError("Tracked capture configuration changed")
+
+            def on_staged(parts: int) -> None:
+                self._durably_committed = True
+                self._last_frame_enqueued = True
+                self._last_frame_event_count = parts
+
+            await stage_tracked_capture(
+                self._outbox,
+                event,
+                delivery_context,
+                tracked.credential,
+                site_id=tracked.site_id,
+                profile_sha256=tracked.profile_sha256,
+                confirmed_ppe_candidates=confirmed_candidates,
+                expires_at=min(
+                    datetime.now(UTC) + timedelta(seconds=tracked.pending_seconds),
+                    datetime.fromisoformat(tracked.credential.expires_at),
+                ),
+                max_pending=tracked.max_pending,
+                max_bytes=tracked.max_bytes,
+                source_frame=frame if self._evidence_publisher is not None else None,
+                evidence_publisher=self._evidence_publisher,
+                predecessor_wait_seconds=tracked.predecessor_wait_seconds,
+                poll_interval_seconds=self._delivery_interval_seconds,
+                before_enqueue=check_context,
+                on_staged=on_staged,
+            )
+            return
+
         if event is None:
             return
         delivery_events = events_for_delivery(

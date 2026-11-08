@@ -11,12 +11,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import httpx
 
+from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
-from smartsite_ai.domain.observations import TechnicalObservationEvent
+from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
+from smartsite_ai.domain.tracked_frame_result import TrackedFrameReferences, TrackedFrameResult
+from smartsite_ai.domain.tracked_raw_receipt import TrackedRawReceipt
 from smartsite_ai.integrations.backend_client import (
     BackendClient,
     BoundDeliveryCredentialUnavailable,
@@ -173,6 +177,529 @@ class SqliteEventOutbox:
                     "ALTER TABLE observation_outbox ADD COLUMN delivery_context_hash TEXT "
                     "CHECK(delivery_context_hash IS NULL OR length(delivery_context_hash)=64)"
                 )
+
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS tracked_frame_head (
+                    scope_sha256 TEXT PRIMARY KEY,
+                    frame_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                ) STRICT"""
+            )
+
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS tracked_frame_pending (
+                    camera_id TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    frame_id TEXT NOT NULL,
+                    references_json TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    last_checked REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (camera_id, generation_id, session_id, frame_id)
+                ) STRICT"""
+            )
+
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(tracked_frame_pending)")
+            }
+            if "delivery_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE tracked_frame_pending ADD COLUMN delivery_json TEXT"
+                )
+
+            if "raw_stored" not in columns:
+                connection.execute(
+                    "ALTER TABLE tracked_frame_pending ADD COLUMN raw_stored INTEGER"
+                    " NOT NULL DEFAULT 0 CHECK(raw_stored IN (0, 1))"
+                )
+
+    async def enqueue_tracked_parts(
+        self,
+        credential: WorkerGenerationCredential,
+        context: EventDeliveryContext,
+        parts: tuple[dict[str, Any], ...],
+        *,
+        expected_seal: TrackedFrameReferences | None,
+        expires_at: datetime,
+        max_pending: int,
+        max_bytes: int,
+    ) -> None:
+        """Atomically retain draft wire bytes and their optional expected seal."""
+        if (
+            context.camera_id != credential.camera_id
+            or context.worker_generation_id != credential.worker_generation_id
+            or context.stream_session_id != credential.stream_session_id
+        ):
+            raise ValueError("Tracked frame context does not match the worker credential")
+        if not 1 <= len(parts) <= 1024:
+            raise ValueError("Tracked frame must contain a bounded complete set of parts")
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("Tracked frame size limit must be positive")
+
+        partition = parts[0]["framePartition"]
+        frame_id = validate_uuid_str(partition["frameId"], "frameId")
+        sequence = partition["sequenceNumber"]
+        coverage = parts[0]["continuity"]["coverage"]
+        if (
+            coverage["status"] not in ("COMPLETE", "INCOMPLETE")
+            or (expected_seal is None) != (coverage["status"] == "INCOMPLETE")
+            or (expected_seal is not None and expected_seal.sequence_number != sequence)
+        ):
+            raise ValueError("Tracked frame coverage and expected seal do not match")
+
+        subjects: dict[str, tuple[str, int]] = {}
+        retired: set[str] = set()
+        event_ids: set[str] = set()
+        wire = []
+        total_bytes = 0
+        for index, part in enumerate(parts):
+            event_id = validate_uuid_str(part["eventId"], "eventId")
+            if (
+                part["schemaVersion"] != "1.5.0"
+                or part["streamSessionId"] != context.stream_session_id
+                or event_id in event_ids
+                or part["framePartition"]
+                != {
+                    "frameId": frame_id,
+                    "sequenceNumber": sequence,
+                    "partIndex": index,
+                    "partCount": len(parts),
+                }
+                or part["continuity"]["coverage"] != coverage
+            ):
+                raise ValueError("Tracked frame parts do not match their original frame or session")
+            event_ids.add(event_id)
+            for claim in part["continuity"]["subjects"]:
+                person_index = claim["personObservationIndex"]
+                observations = part["observations"]
+                if (
+                    not 0 <= person_index < len(observations)
+                    or observations[person_index]["type"] != "PERSON"
+                ):
+                    raise ValueError("Tracked frame claim must reference an original PERSON")
+                subjects.setdefault(claim["segmentId"], (event_id, person_index))
+            retired.update(item["segmentId"] for item in part["continuity"]["retiredSegments"])
+
+            body = json.dumps(
+                {
+                    "schemaVersion": "1.0.0",
+                    "context": context.model_dump(by_alias=True),
+                    "event": part,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+            total_bytes += len(body.encode("utf-8"))
+            if total_bytes > max_bytes:
+                raise ValueError("Tracked frame exceeds its wire size limit")
+            wire.append(body)
+
+        if expected_seal is None:
+            if subjects or retired:
+                raise ValueError("Incomplete tracked frame cannot expect a seal")
+            references_json = "null"
+        else:
+            expected_seal.require_match(expected_seal.scope_sha256, sequence, subjects, retired)
+            references_json = expected_seal.model_dump_json(by_alias=True)
+
+        await self._stage_tracked(
+            credential,
+            frame_id,
+            references_json,
+            expires_at=expires_at,
+            max_pending=max_pending,
+            delivery_json=json.dumps(wire, ensure_ascii=False),
+        )
+
+    async def ready_tracked_parts(
+        self, credential: WorkerGenerationCredential, *, limit: int
+    ) -> tuple[tuple[str, tuple[bytes, ...]], ...]:
+        """Return original envelope bytes only to their camera, generation and session."""
+        now = _require_aware_utc(self._clock())
+        credential.ensure_current(now)
+        if type(limit) is not int or limit < 1:
+            raise ValueError("Tracked frame lookup limit must be a positive integer")
+        await self.initialize()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._ready_tracked_parts_sync, credential, now.timestamp(), limit
+            )
+
+    def _ready_tracked_parts_sync(
+        self, credential: WorkerGenerationCredential, now: float, limit: int
+    ) -> tuple[tuple[str, tuple[bytes, ...]], ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT frame_id, delivery_json FROM tracked_frame_pending
+                WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+                  AND expires_at > ? AND delivery_json IS NOT NULL AND raw_stored = 0
+                ORDER BY rowid LIMIT ?""",
+                (
+                    credential.camera_id,
+                    credential.worker_generation_id,
+                    credential.stream_session_id,
+                    now,
+                    limit,
+                ),
+            ).fetchall()
+        return tuple(
+            (
+                row["frame_id"],
+                tuple(body.encode("utf-8") for body in json.loads(row["delivery_json"])),
+            )
+            for row in rows
+        )
+
+    async def confirm_tracked_parts_stored(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        receipts: tuple[TrackedRawReceipt, ...],
+    ) -> bool:
+        """Promote only a full set of receipts obtained through authenticated transport."""
+        credential.ensure_current(_require_aware_utc(self._clock()))
+        frame_id = validate_uuid_str(frame_id, "frameId")
+        await self.initialize()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._confirm_tracked_parts_stored_sync, credential, frame_id, receipts
+            )
+
+    def _confirm_tracked_parts_stored_sync(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        receipts: tuple[TrackedRawReceipt, ...],
+    ) -> bool:
+        key = (
+            credential.camera_id,
+            credential.worker_generation_id,
+            credential.stream_session_id,
+            frame_id,
+        )
+        where = """WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+            AND frame_id = ? AND expires_at > ? AND delivery_json IS NOT NULL"""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = _require_aware_utc(self._clock()).timestamp()
+            row = connection.execute(
+                "SELECT delivery_json FROM tracked_frame_pending " + where, (*key, now)
+            ).fetchone()
+            if row is None:
+                return False
+
+            bodies = json.loads(row["delivery_json"])
+            by_id = {receipt.event_id: receipt for receipt in receipts}
+            if len(receipts) != len(bodies) or len(by_id) != len(receipts):
+                raise ValueError("A distinct raw receipt is required for each tracked part")
+            for body in bodies:
+                envelope = json.loads(body)
+                event = envelope["event"]
+                event_id = event["eventId"]
+                receipt = by_id.get(event_id)
+                if receipt is None:
+                    raise ValueError("Tracked part is missing its original raw receipt")
+                payload_hash = compute_canonical_payload_hash(event)
+                context = EventDeliveryContext.model_validate(envelope["context"])
+                receipt.require_match(event_id, payload_hash, context.binding_hash(payload_hash))
+
+            now = _require_aware_utc(self._clock()).timestamp()
+            updated = connection.execute(
+                "UPDATE tracked_frame_pending SET raw_stored = 1 " + where, (*key, now)
+            )
+            return updated.rowcount == 1
+
+    async def stage_tracked_frame(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        *,
+        scope_sha256: str,
+        sequence_number: str,
+        subjects: dict[str, tuple[str, int]],
+        retired_segment_ids: set[str],
+        expires_at: datetime,
+        max_pending: int,
+    ) -> None:
+        """Remember exact references before submitting a frame for admission."""
+        frame_id = validate_uuid_str(frame_id, "frameId")
+        references = TrackedFrameReferences.model_validate(
+            {
+                "scopeSha256": scope_sha256,
+                "sequenceNumber": sequence_number,
+                "subjects": [
+                    {"segmentId": segment, "eventId": event, "personObservationIndex": index}
+                    for segment, (event, index) in sorted(subjects.items())
+                ],
+                "retiredSegmentIds": sorted(retired_segment_ids),
+            }
+        )
+        await self._stage_tracked(
+            credential,
+            frame_id,
+            references.model_dump_json(by_alias=True),
+            expires_at=expires_at,
+            max_pending=max_pending,
+        )
+
+    async def _stage_tracked(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        references_json: str,
+        *,
+        expires_at: datetime,
+        max_pending: int,
+        delivery_json: str | None = None,
+    ) -> None:
+        now = _require_aware_utc(self._clock())
+        expiry = _require_aware_utc(expires_at)
+        credential.ensure_current(now)
+        if not now < expiry <= datetime.fromisoformat(credential.expires_at):
+            raise ValueError("Tracked frame lookup deadline is outside the credential lease")
+        if type(max_pending) is not int or max_pending < 1:
+            raise ValueError("Tracked frame capacity must be a positive integer")
+        source = (
+            credential.camera_id,
+            credential.worker_generation_id,
+            credential.stream_session_id,
+        )
+        await self.initialize()
+        async with self._lock:
+            await asyncio.to_thread(
+                self._stage_tracked_frame_sync,
+                source,
+                frame_id,
+                references_json,
+                now.timestamp(),
+                expiry.timestamp(),
+                max_pending,
+                delivery_json,
+            )
+
+    def _stage_tracked_frame_sync(
+        self,
+        source: tuple[str, str, str],
+        frame_id: str,
+        references_json: str,
+        now: float,
+        expiry: float,
+        max_pending: int,
+        delivery_json: str | None,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT references_json, expires_at, delivery_json FROM tracked_frame_pending
+                WHERE camera_id = ? AND generation_id = ? AND session_id = ? AND frame_id = ?""",
+                (*source, frame_id),
+            ).fetchone()
+            if row is not None:
+                if tuple(row) != (references_json, expiry, delivery_json):
+                    raise OutboxConflict("Tracked frame lookup was staged with different content")
+                return
+            count = connection.execute(
+                """SELECT count(*) FROM tracked_frame_pending
+                WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+                  AND expires_at > ? AND (raw_stored = 0 OR references_json <> 'null')""",
+                (*source, now),
+            ).fetchone()[0]
+            if count >= max_pending:
+                raise OutboxConflict("Tracked frame lookup capacity reached")
+            connection.execute(
+                """INSERT INTO tracked_frame_pending
+                (camera_id, generation_id, session_id, frame_id,
+                  references_json, expires_at, delivery_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (*source, frame_id, references_json, expiry, delivery_json),
+            )
+
+    async def has_pending_tracked_frame(self, credential: WorkerGenerationCredential) -> bool:
+        """Include expired unresolved work so source completion cannot look successful."""
+        await self.initialize()
+        async with self._lock:
+            return await asyncio.to_thread(self._has_pending_tracked_frame_sync, credential)
+
+    def _has_pending_tracked_frame_sync(self, credential: WorkerGenerationCredential) -> bool:
+        with self._connect() as connection:
+            return (
+                connection.execute(
+                    """SELECT 1 FROM tracked_frame_pending
+                WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+                  AND (raw_stored = 0 OR references_json <> 'null') LIMIT 1""",
+                    (
+                        credential.camera_id,
+                        credential.worker_generation_id,
+                        credential.stream_session_id,
+                    ),
+                ).fetchone()
+                is not None
+            )
+
+    async def reconcile_tracked_frames(
+        self, client: BackendClient, credential: WorkerGenerationCredential, *, limit: int
+    ) -> int:
+        """Recheck a bounded batch with the original source credentials after restart."""
+        now = _require_aware_utc(self._clock())
+        credential.ensure_current(now)
+        if type(limit) is not int or limit < 1:
+            raise ValueError("Tracked frame lookup limit must be a positive integer")
+        source = (
+            credential.camera_id,
+            credential.worker_generation_id,
+            credential.stream_session_id,
+        )
+        await self.initialize()
+        async with self._lock:
+            rows = await asyncio.to_thread(
+                self._ready_tracked_frames_sync, source, now.timestamp(), limit
+            )
+        resolved = 0
+        for row in rows:
+            now = _require_aware_utc(self._clock())
+            credential.ensure_current(now)
+            if now.timestamp() >= row["expires_at"]:
+                continue
+            references = TrackedFrameReferences.model_validate_json(row["references_json"])
+            result = await client.read_tracked_frame_result(
+                credential,
+                row["frame_id"],
+                scope_sha256=references.scope_sha256,
+                sequence_number=references.sequence_number,
+                subjects=references.subject_references(),
+                retired_segment_ids=set(references.retired_segment_ids),
+            )
+            async with self._lock:
+                resolved += await asyncio.to_thread(
+                    self._finish_tracked_lookup_sync, source, row, result
+                )
+        return resolved
+
+    def _ready_tracked_frames_sync(
+        self, source: tuple[str, str, str], now: float, limit: int
+    ) -> list[sqlite3.Row]:
+        with self._connect() as connection:
+            return connection.execute(
+                """SELECT frame_id, references_json, expires_at FROM tracked_frame_pending
+                WHERE camera_id = ? AND generation_id = ? AND session_id = ? AND expires_at > ?
+                  AND (delivery_json IS NULL OR raw_stored = 1) AND references_json <> 'null'
+                ORDER BY last_checked, rowid LIMIT ?""",
+                (*source, now, limit),
+            ).fetchall()
+
+    def _finish_tracked_lookup_sync(
+        self,
+        source: tuple[str, str, str],
+        row: sqlite3.Row,
+        result: TrackedFrameResult | None,
+    ) -> int:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            now = _require_aware_utc(self._clock()).timestamp()
+            key = (*source, row["frame_id"], row["references_json"], row["expires_at"], now)
+            where = """WHERE camera_id = ? AND generation_id = ? AND session_id = ?
+                AND frame_id = ? AND references_json = ? AND expires_at = ? AND expires_at > ?"""
+            if result is None:
+                connection.execute(
+                    "UPDATE tracked_frame_pending SET last_checked = ? " + where, (now, *key)
+                )
+                return 0
+            deleted = connection.execute("DELETE FROM tracked_frame_pending " + where, key)
+            if deleted.rowcount != 1:
+                return 0
+            self._retain_tracked_frame(connection, row["frame_id"], result)
+            return 1
+
+    async def refresh_tracked_frame(
+        self,
+        client: BackendClient,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        *,
+        scope_sha256: str,
+        sequence_number: str,
+        subjects: dict[str, tuple[str, int]],
+        retired_segment_ids: set[str],
+    ) -> bool:
+        """Fetch and retain the seal for this exact sent frame, if still current."""
+        result = await client.read_tracked_frame_result(
+            credential,
+            frame_id,
+            scope_sha256=scope_sha256,
+            sequence_number=sequence_number,
+            subjects=subjects,
+            retired_segment_ids=retired_segment_ids,
+        )
+        if result is None:
+            return False
+
+        await self.initialize()
+        async with self._lock:
+            return await asyncio.to_thread(self._retain_tracked_frame_sync, frame_id, result)
+
+    def _retain_tracked_frame_sync(self, frame_id: str, result: TrackedFrameResult) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._retain_tracked_frame(connection, frame_id, result)
+
+    @staticmethod
+    def _retain_tracked_frame(
+        connection: sqlite3.Connection, frame_id: str, result: TrackedFrameResult
+    ) -> bool:
+        row = connection.execute(
+            "SELECT frame_id, result_json FROM tracked_frame_head WHERE scope_sha256 = ?",
+            (result.scope_sha256,),
+        ).fetchone()
+        if row is not None:
+            previous = TrackedFrameResult.model_validate_json(row["result_json"])
+            sequence = int(result.sequence_number)
+            previous_sequence = int(previous.sequence_number)
+            if sequence < previous_sequence:
+                return False
+            if sequence == previous_sequence:
+                if frame_id != row["frame_id"] or result != previous:
+                    raise OutboxConflict("Different tracked seal at the same scope and sequence")
+                return True
+
+        connection.execute(
+            """INSERT INTO tracked_frame_head (scope_sha256, frame_id, result_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT (scope_sha256) DO UPDATE SET
+                frame_id = excluded.frame_id, result_json = excluded.result_json""",
+            (result.scope_sha256, frame_id, result.model_dump_json(by_alias=True)),
+        )
+        return True
+
+    async def read_tracked_predecessor(
+        self, scope_sha256: str, expected_sequence_number: str
+    ) -> TrackedFrameResult | None:
+        """Read only the latest seal and only for the producer's exact prior sequence."""
+        await self.initialize()
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._read_tracked_predecessor_sync, scope_sha256, expected_sequence_number
+            )
+
+    def _read_tracked_predecessor_sync(
+        self, scope_sha256: str, expected_sequence_number: str
+    ) -> TrackedFrameResult | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT result_json FROM tracked_frame_head WHERE scope_sha256 = ?",
+                (scope_sha256,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = TrackedFrameResult.model_validate_json(row["result_json"])
+        if (
+            result.scope_sha256 != scope_sha256
+            or result.sequence_number != expected_sequence_number
+        ):
+            return None
+        return result
 
     async def claim_worker_session(
         self, camera_id: UUID, generation_id: UUID, session_id: UUID
@@ -532,18 +1059,61 @@ class OutboxDispatcher:
         retry_base: timedelta = timedelta(seconds=1),
         retry_max: timedelta = timedelta(minutes=5),
         generation_credential: WorkerGenerationCredential | None = None,
+        tracked_batch_limit: int | None = None,
     ) -> None:
         if retry_base <= timedelta(0):
             raise ValueError("dispatcher retry_base must be positive")
         if retry_max < retry_base:
             raise ValueError("dispatcher retry_max must be at least retry_base")
+        if tracked_batch_limit is not None:
+            if type(tracked_batch_limit) is not int or tracked_batch_limit < 1:
+                raise ValueError("tracked batch limit must be a positive integer")
+            if generation_credential is None:
+                raise ValueError("scheduled tracked delivery requires the original credential")
+        self._tracked_batch_limit = tracked_batch_limit
         self._outbox = outbox
         self._backend = backend
         self._retry_base = retry_base
         self._retry_max = retry_max
         self._generation_credential = generation_credential
 
+    async def drain_tracked_once(self, *, limit: int) -> int:
+        """Send one bounded batch. A failed part leaves the full frame retryable."""
+        credential = self._generation_credential
+        if credential is None:
+            raise OutboxDeliveryBlocked("Tracked delivery requires the original credential")
+
+        stored = 0
+        for frame_id, parts in await self._outbox.ready_tracked_parts(credential, limit=limit):
+            receipts = []
+            for part in parts:
+                receipts.append(await self._backend.post_tracked_part(credential, part))
+            if await self._outbox.confirm_tracked_parts_stored(
+                credential, frame_id, tuple(receipts)
+            ):
+                stored += 1
+        return stored
+
+    async def _run_tracked_cycle(self, limit: int) -> None:
+        credential = self._generation_credential
+        if credential is None:
+            raise OutboxDeliveryBlocked("Tracked delivery requires the original credential")
+        try:
+            # Resolve previously stored frames even if a later raw send fails.
+            await self._outbox.reconcile_tracked_frames(self._backend, credential, limit=limit)
+            await self.drain_tracked_once(limit=limit)
+        except httpx.HTTPStatusError as error:
+            status = error.response.status_code
+            if status not in (408, 429) and not 500 <= status < 600:
+                raise
+        except (httpx.TransportError, TimeoutError):
+            # The next supervised tick retries the original durable bytes.
+            return
+
     async def drain_once(self, *, limit: int = 32) -> int:
+        if self._tracked_batch_limit is not None:
+            await self._run_tracked_cycle(min(limit, self._tracked_batch_limit))
+
         processed = 0
         for pending in await self._outbox.ready(limit=limit):
             if pending.delivery_context is not None and self._generation_credential is None:

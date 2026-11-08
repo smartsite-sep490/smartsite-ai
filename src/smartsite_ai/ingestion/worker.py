@@ -10,6 +10,7 @@ from uuid import UUID
 from smartsite_ai.ingestion.backoff import ExponentialBackoff
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
+from smartsite_ai.ingestion.frame_observer import FrameObserver, OptionalFrameObserver
 from smartsite_ai.ingestion.queue import BoundedFrameQueue
 from smartsite_ai.ingestion.source import (
     FrameIntegrityError,
@@ -36,8 +37,13 @@ class StreamWorker:
         source: FrameSource | None = None,
         sleeper: Callable[[float], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] | None = None,
+        *,
+        frame_observer: FrameObserver | None = None,
     ) -> None:
+        if frame_observer is not None and not config.is_live:
+            raise ValueError("Raw frame observers require a LIVE stream")
         self.config = config
+        self._frame_observer = OptionalFrameObserver(frame_observer)
         self.source = source
         self.queue = BoundedFrameQueue(maxsize=config.max_queue_size)
         self.backoff = ExponentialBackoff(
@@ -108,6 +114,18 @@ class StreamWorker:
             name=f"stream-worker-{self.config.stream_id}",
         )
 
+    @property
+    def camera_external_id(self) -> str:
+        return self.config.camera_external_id
+
+    @property
+    def observer_available(self) -> bool:
+        return (
+            self.state == StreamState.STREAMING
+            and not self._stop_event.is_set()
+            and self._frame_observer.available
+        )
+
     async def _finalize_terminal(self) -> None:
         """Finalize worker state on any terminal exit path exactly once."""
         self._has_stopped = True
@@ -135,6 +153,7 @@ class StreamWorker:
 
     async def _close_source_safely(self) -> bool:
         """Close the owned attempt, returning false when release cannot be proven."""
+        self._frame_observer.clear()
         async with self._source_close_lock:
             if self.source is None or not self._source_attempt_active:
                 return not self._source_release_failed
@@ -262,6 +281,9 @@ class StreamWorker:
                                     "Sequence must increase within a session"
                                 )
                         self._last_sequence_number = frame.sequence_number
+
+                        # Display observes validated capture cadence, before detector sampling.
+                        self._frame_observer.offer(frame)
 
                         # 3. Stable Criteria: reset backoff after min_stable_frames
                         self._consecutive_successful_frames += 1

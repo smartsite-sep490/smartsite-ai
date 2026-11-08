@@ -196,3 +196,20 @@ human directly authorizes it.
 Canonical wire ownership remains in SmartSite Main. Paired local parser checks
 are compatibility evidence; they do not finalize immutable merged-Main provenance.
 Do not hand-edit the existing vendored `contracts/` or its metadata.
+# Durable processing source observer
+
+An explicitly constructed LIVE `StreamWorker` can receive the same `MediaPreviewHub`
+through its optional `frame_observer` argument. Validated camera/stream/session/sequence
+frames reach the observer before inference sampling. The existing ingestion task keeps
+reading while the headless detector waits; the observer does not own another source.
+The authenticated preview router accepts either capture owner through its structural
+observer interface. Viewer disconnect does not stop ingestion or outbox delivery.
+
+Source close/reconnect/terminal paths clear display state. Observer exceptions disable
+display while preserving source processing/cleanup. REPLAY rejects this LIVE display
+opt-in. Configuration-only capture behavior and default worker behavior are unchanged.
+
+This is a source composition boundary, not an enabled worker host. Operator/manifest
+composition, cross-process physical resource exclusion, compatible Backend/Web consumer
+rollout and device performance qualification remain separate required gates. Never run a
+configuration-only owner beside a durable owner for the same physical camera.

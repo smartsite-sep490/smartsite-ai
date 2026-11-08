@@ -5,16 +5,24 @@ import json
 import secrets
 import time
 from collections.abc import AsyncIterator, Callable
+from typing import Protocol
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import SecretStr
 from starlette.types import Receive, Scope, Send
 
-from smartsite_ai.ingestion.configuration_capture import ConfigurationCapture
 from smartsite_ai.media_preview import MediaPreviewHub
 
 _HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+
+
+class PreviewCaptureOwner(Protocol):
+    @property
+    def camera_external_id(self) -> str: ...
+
+    @property
+    def observer_available(self) -> bool: ...
 
 
 class _ViewerStreamingResponse(StreamingResponse):
@@ -31,7 +39,7 @@ class _ViewerStreamingResponse(StreamingResponse):
 
 
 def configuration_media_router(
-    capture: ConfigurationCapture, hub: MediaPreviewHub, service_token: SecretStr
+    capture: PreviewCaptureOwner, hub: MediaPreviewHub, service_token: SecretStr
 ) -> APIRouter:
     token = service_token.get_secret_value()
     if not 32 <= len(token) <= 4096 or not token.isascii() or any(c.isspace() for c in token):

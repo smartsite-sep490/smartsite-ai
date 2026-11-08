@@ -4,17 +4,30 @@ import asyncio
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import SecretStr
-from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 
 from smartsite_ai.ingestion.configuration_capture import ConfigurationCapture
 from smartsite_ai.media_preview import MediaPreviewHub
 
 _HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+
+
+class _ViewerStreamingResponse(StreamingResponse):
+    def __init__(self, content: AsyncIterator[bytes], release: Callable[[], None]) -> None:
+        super().__init__(content, media_type="application/x-ndjson", headers=_HEADERS)
+        self._release = release
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Header-send failure/cancellation can occur before the iterator starts.
+            self._release()
 
 
 def configuration_media_router(
@@ -79,11 +92,6 @@ def configuration_media_router(
             finally:
                 release()
 
-        return StreamingResponse(
-            frames(),
-            media_type="application/x-ndjson",
-            headers=_HEADERS,
-            background=BackgroundTask(release),
-        )
+        return _ViewerStreamingResponse(frames(), release)
 
     return router

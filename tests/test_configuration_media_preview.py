@@ -214,3 +214,48 @@ def test_optional_observer_failure_revokes_display_without_skipping_source_teard
         assert source.closes == 1
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.CancelledError])
+def test_failed_response_start_releases_viewer_without_stopping_owner(tmp_path, failure):
+    async def scenario():
+        runtime, source, builds = runtime_pair(tmp_path, enabled=True)
+        statuses = []
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                statuses.append(message["status"])
+                raise failure("synthetic response-start disconnect")
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/v1/realtime/video-stream",
+            "raw_path": b"/v1/realtime/video-stream",
+            "query_string": b"cameraExternalId=camera-a",
+            "root_path": "",
+            "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+            "server": ("test", 80),
+            "client": ("test", 1234),
+        }
+        await runtime.start()
+        source.items.put_nowait(frame())
+        try:
+            await until(lambda: runtime._media_hub.latest() is not None)
+            for _ in range(3):
+                with pytest.raises(failure, match="response-start disconnect"):
+                    await runtime.app(dict(scope), receive, send)
+            assert statuses == [200, 200, 200]
+            assert runtime.state == "RUNNING" and source.closes == 0
+            assert len(builds) == source.connects == 1
+        finally:
+            source.items.put_nowait(None)
+            assert await runtime.stop()
+
+    asyncio.run(scenario())

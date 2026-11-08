@@ -225,6 +225,28 @@ renewal policy. Service tokens/source credentials remain environment references.
 
 This is source/CLI composition, not runtime rollout or device qualification. Physical
 alias mapping/non-cooperating owners, real server/driver/browser/performance tests and
-compatible Backend/Web consumer release remain required. Configuration-image composition
-inside the durable owner is still open; never start a configuration-only owner beside a
-durable owner for the same physical camera. No model is accepted by enabling preview.
+compatible Backend/Web consumer release remain required. Never start a configuration-only
+owner beside a durable owner for the same physical camera. No model is accepted by enabling
+preview.
+
+## Configuration images from the durable owner
+
+The same host also mounts `/v1/realtime/configuration-image`, with the same exact camera
+query and service-token policy. A separate purpose encoder reuses the existing
+`REGION_CONFIGURATION` payload,1280px/1MiB budget and JPEG SHA. It preserves original
+capture session/sequence/time and does not relabel the640px raw display image. Each purpose
+retains one pending latest frame and one encoder; configuration work is capped at2/sec.
+Requests read completed snapshots only. No request starts capture, inference or encoding.
+
+Source transitions clear both purposes and invalidate in-flight generations. Stale or
+unavailable images return503; image-encoding failure does not invent evidence or stop raw
+display. Backend frozen-image persistence, geometry validation/application and acknowledgment
+keep their existing contracts and are not performed by this observer endpoint.
+
+Closing clears visible pixels immediately and drains in-progress encoder work without
+cancelling its async waiter. The configuration-only runtime retains its configured bounded
+stop-response budget: pending media drain returns false and retains the process lease;
+`wait_for_release()` waits for source and encoder completion. Repeated cancellation cannot
+turn pending work into release proof. This is draining, not preemption: an indefinitely hung
+encoder/driver can still defer cleanup, including listener-finally completion, and requires
+separate native/process qualification. No physical shutdown or production proof is implied.

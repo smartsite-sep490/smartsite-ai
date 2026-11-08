@@ -223,7 +223,11 @@ def test_actual_cli_assembly_shares_capture_and_closes_model_after_source(tmp_pa
             async def observed_app(scope, receive, send):
                 async def observed_send(message):
                     await send(message)
-                    if message["type"] == "http.response.body" and message.get("body"):
+                    if (
+                        scope["path"] == "/v1/realtime/video-stream"
+                        and message["type"] == "http.response.body"
+                        and message.get("body")
+                    ):
                         assert json.loads(message["body"])["sequenceNumber"] == "0"
                         seen.set()
 
@@ -240,6 +244,20 @@ def test_actual_cli_assembly_shares_capture_and_closes_model_after_source(tmp_pa
                     )
                 )
                 await asyncio.wait_for(seen.wait(), 2)
+                await until(
+                    lambda: (
+                        groups[0].observer_for(config.stream.stream_id).configuration.latest()
+                        is not None
+                    )
+                )
+                snapshot = await client.get(
+                    "/v1/realtime/configuration-image",
+                    params={"cameraExternalId": config.stream.camera_external_id},
+                    headers={"Authorization": f"Bearer {config.token.get_secret_value()}"},
+                )
+                assert snapshot.status_code == 200
+                assert snapshot.json()["purpose"] == "REGION_CONFIGURATION"
+                assert snapshot.json()["frame"]["sequenceNumber"] == "0"
                 viewer.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await viewer

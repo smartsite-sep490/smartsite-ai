@@ -12,6 +12,23 @@ from typing import Any
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
 
+async def drain_encoder_task(task: asyncio.Task[None] | None) -> None:
+    """Do not abandon an in-progress thread by cancelling its async waiter."""
+    if task is None:
+        return
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 def encode_media_frame(frame: FrameEnvelope) -> tuple[bytes, int, int]:
     if frame.width * frame.height > 16_777_216:
         raise ValueError("Raw media input exceeds its pixel budget")
@@ -45,6 +62,7 @@ class MediaPreviewHub:
         self._pending: FrameEnvelope | None = None
         self._frame: dict[str, Any] | None = None
         self._ready = asyncio.Event()
+        self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._generation = 0
         self._received_at = 0.0
@@ -68,9 +86,14 @@ class MediaPreviewHub:
         last_encode = -1.0
         while not self._closed:
             await self._ready.wait()
+            if self._closed:
+                break
             delay = max(0.0, 0.125 - (self._clock() - last_encode))
             if delay:
-                await asyncio.sleep(delay)
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(self._stop.wait(), delay)
+            if self._closed:
+                break
             self._ready.clear()
             frame, self._pending = self._pending, None
             if frame is None:
@@ -116,8 +139,7 @@ class MediaPreviewHub:
 
     async def close(self) -> None:
         self._closed = True
+        self._stop.set()
         self.clear()
-        if self._task is not None:
-            self._task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._task
+        self._ready.set()
+        await drain_encoder_task(self._task)

@@ -13,11 +13,12 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import SecretStr
 
+from smartsite_ai.configuration_image_api import configuration_image_router
 from smartsite_ai.configuration_media_api import configuration_media_router
+from smartsite_ai.durable_preview import DurablePreviewFrames
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.configuration_process_lease import ConfigurationProcessLease
 from smartsite_ai.ingestion.worker import StreamWorker
-from smartsite_ai.media_preview import MediaPreviewHub
 from smartsite_ai.processing_worker import ProcessingWorkerResult
 from smartsite_ai.runtime.manifest import BoundManifest, CameraRuntimeError
 from smartsite_ai.runtime.supervisor import _finish_cleanup
@@ -67,7 +68,7 @@ def _server(app: FastAPI) -> ServerPort:
 @dataclass(repr=False)
 class _Binding:
     settings: PreviewSettings
-    hub: MediaPreviewHub
+    hub: DurablePreviewFrames
     lease: ConfigurationProcessLease
     listener: socket.socket | None = None
     stream: StreamWorker | None = None
@@ -116,7 +117,7 @@ class PreviewHostGroup:
             ports.add(config.port)
             self._bindings[config.stream.stream_id] = _Binding(
                 config,
-                MediaPreviewHub(config.stream.camera_external_id),
+                DurablePreviewFrames(config.stream.camera_external_id),
                 ConfigurationProcessLease(config.lock_directory, config.resource_id),
             )
 
@@ -149,7 +150,7 @@ class PreviewHostGroup:
             if item.listener is not None
         ]
 
-    def observer_for(self, stream_id: str) -> MediaPreviewHub | None:
+    def observer_for(self, stream_id: str) -> DurablePreviewFrames | None:
         binding = self._bindings.get(stream_id)
         return binding.hub if binding is not None else None
 
@@ -168,7 +169,12 @@ class PreviewHostGroup:
         listener = binding.listener
         binding.stream = stream
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-        app.include_router(configuration_media_router(stream, binding.hub, binding.settings.token))
+        app.include_router(
+            configuration_media_router(stream, binding.hub.raw, binding.settings.token)
+        )
+        app.include_router(
+            configuration_image_router(binding.hub.configuration, binding.settings.token)
+        )
 
         async def run() -> ProcessingWorkerResult:
             server = (server_factory or self._server_factory)(app)
@@ -215,9 +221,11 @@ class PreviewHostGroup:
             if binding.stream is not None:
                 await binding.stream.stop()
         finally:
-            await binding.hub.close()
-            if binding.listener is not None:
-                binding.listener.close()
+            try:
+                await binding.hub.close()
+            finally:
+                if binding.listener is not None:
+                    binding.listener.close()
         if binding.stream is None or binding.stream.source_released:
             binding.lease.release()
         else:

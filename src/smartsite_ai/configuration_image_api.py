@@ -1,18 +1,26 @@
 """Mountable observer-only configuration route; no application or worker startup."""
 
 import secrets
+from typing import Protocol
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import SecretStr
 
-from smartsite_ai.ingestion.configuration_capture import ConfigurationCapture
+from smartsite_ai.configuration_image import ConfigurationImagePayload
 
 _HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
+class ConfigurationImageProvider(Protocol):
+    @property
+    def camera_external_id(self) -> str: ...
+
+    def latest(self) -> ConfigurationImagePayload | None: ...
+
+
 def configuration_image_router(
-    capture: ConfigurationCapture, service_token: SecretStr
+    capture: ConfigurationImageProvider, service_token: SecretStr
 ) -> APIRouter:
     """The explicit runtime owner mounts this router; requests only observe it.
 

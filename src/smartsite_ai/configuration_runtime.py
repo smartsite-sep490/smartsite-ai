@@ -1,5 +1,6 @@
 """Explicit capture-only runtime assembly; application startup never opens sources."""
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,6 +113,8 @@ class ConfigurationCaptureRuntime:
             )
         self._started = False
         self._stop_requested = False
+        self._media_close_task: asyncio.Task[None] | None = None
+        self._stop_timeout = stop_timeout
 
     @property
     def state(self) -> str:
@@ -136,20 +139,37 @@ class ConfigurationCaptureRuntime:
 
     async def stop(self) -> bool:
         self._stop_requested = True
+        deadline = asyncio.get_running_loop().time() + self._stop_timeout
         try:
             released = await self._capture.stop()
         finally:
-            if self._media_hub is not None:
-                await self._media_hub.close()
-        if released:
+            media_released = await self._close_media(
+                wait=False, timeout=max(0.0, deadline - asyncio.get_running_loop().time())
+            )
+        if released and media_released:
             self._process_lease.release()
-        return released
+        return released and media_released
+
+    async def _close_media(self, *, wait: bool, timeout: float = 0) -> bool:
+        if self._media_hub is None:
+            return True
+        if self._media_close_task is None:
+            self._media_close_task = asyncio.create_task(self._media_hub.close())
+        if wait:
+            await asyncio.shield(self._media_close_task)
+        else:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._media_close_task), timeout=timeout)
+            except TimeoutError:
+                return False
+        return True
 
     async def wait_for_release(self) -> bool:
         """Keep OS ownership while the existing source task drains after stop."""
         if not self._stop_requested:
             raise RuntimeError("Stop must be requested before waiting for release")
         released = await self._capture.wait_for_release()
-        if released:
+        media_released = await self._close_media(wait=True)
+        if released and media_released:
             self._process_lease.release()
-        return released
+        return released and media_released

@@ -16,6 +16,31 @@ Không dùng API readiness để bật nghiệp vụ PPE/Zone. Contract models, 
 
 Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit schema trước, sau đó vendor bytes và cập nhật source SHA/checksums ở repo này. Không sửa schema vendored trước.
 
+## Explicit Camera PPE policy bundle v2
+
+The default legacy event and configuration routes are unchanged. The separately opted-in
+`BackendConfigurationClient(policy_v2=True)` reads `configuration-bundle/v2` and requires
+its ETag to match the validated immutable bundle hash. `CameraPolicyConfigurationBundle`
+preserves the Camera default, Region INHERIT/EXPLICIT/DISABLED policies, geometry and Zone
+provenance without changing signed wire content. Schema/example provenance is recorded
+separately in `contracts/metadata.json`; CI compares the exact bytes with the immutable
+Platform commit, including the existing referenced v1 Region schema.
+
+Consumers must explicitly select `RegionConfigurationStore(allow_policy_v2=True)` and
+`CameraConfigurationPoller(require_bundle=True)`. Default stores refuse policy v2. Once v2
+is installed, a legacy bundle cannot replace it. Installation retains policy and geometry
+as one snapshot. `resolve_ppe_policy` accepts the supplied containing Region IDs; it does
+not establish geometric containment, wearing, identity, or a business violation. An empty
+selection applies the Camera policy without fabricating a Region.
+
+The poller's existing definitive generation ACK, freshness/expiry, serialized retry,
+in-flight snapshot checks and finite replay draining remain in force for v2. Delivery
+context source kind remains an explicit caller selection under the existing runtime
+boundary; the decoder does not prove a source is live. A receipt confirms configuration
+loading, not detection accuracy or authorization. This transport/storage contribution
+does not enable v2 manifests, emit tracked v1.7 events, activate a camera/model, or deploy
+the service. Those worker/encoder and operational gates follow separately.
+
 ## Thiết kế dự kiến
 
 - Backend cấp cấu hình camera/Zone theo phạm vi AI được phép.

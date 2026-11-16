@@ -42,5 +42,16 @@
       "sourcePath": "contracts/schemas/v1.4/technical-observation-event.json",
       "schemaSha256": "fa15581034c6e7d4366f7e264079541fcaecb00db12439dcc33c67b84bf41c66"
     }
-  ]
+  ],
+  "cameraPolicyConfigurationBundle": {
+    "schemaVersion": "2.0.0",
+    "sourceRepository": "smartsite-sep490/smartsite",
+    "sourceCommitSha": "0a690f745091923de55c20c2765c99074c5f1d36",
+    "path": "contracts/schemas/v2/camera-policy-configuration-bundle.json",
+    "sourcePath": "contracts/schemas/v2/camera-policy-configuration-bundle.json",
+    "schemaSha256": "dce75c6f92bfb4c7705dab57c2415a1819b39c8d43696989c5f286368b54df5a",
+    "examplePath": "contracts/schemas/v2/examples/camera-policy-configuration-bundle.json",
+    "sourceExamplePath": "contracts/schemas/v2/examples/camera-policy-configuration-bundle.json",
+    "exampleSha256": "477c8aa3a91ebc67b7b9eaadcb94bb7605d61437dd9c3a49f5639bfd943ad958"
+  }
 }

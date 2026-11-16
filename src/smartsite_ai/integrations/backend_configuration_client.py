@@ -16,6 +16,7 @@ from smartsite_ai.domain.configuration_ack import (
     CameraConfigurationAcknowledgementReceipt,
 )
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
+from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.domain.regions import (
     MAX_CAMERA_REGION_PAYLOAD_BYTES,
     CameraRegionConfiguration,
@@ -77,7 +78,7 @@ class ConfigurationSnapshotResult:
 
 @dataclass(frozen=True, slots=True)
 class ConfigurationBundleResult:
-    bundle: CameraConfigurationBundle
+    bundle: CameraConfigurationBundle | CameraPolicyConfigurationBundle
     etag: str
     kind: Literal["bundle"] = "bundle"
 
@@ -158,6 +159,7 @@ class BackendConfigurationClient:
         sleep_func: Callable[[float], Awaitable[None]] | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         backoff_factor: float = DEFAULT_BACKOFF_FACTOR,
+        policy_v2: bool = False,
     ) -> None:
         if not base_url or not str(base_url).strip():
             raise ValueError("BackendConfigurationClient requires a non-empty base_url")
@@ -198,6 +200,9 @@ class BackendConfigurationClient:
             )
 
         self._origin = f"{parsed.scheme}://{parsed.netloc}"
+        if not isinstance(policy_v2, bool):
+            raise TypeError("policy_v2 must be a boolean")
+        self._policy_v2 = policy_v2
         self._timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
         self._transport = transport
         self._sleep = sleep_func if sleep_func is not None else asyncio.sleep
@@ -278,6 +283,8 @@ class BackendConfigurationClient:
         expected_camera_external_id: str,
         etag: str | None = None,
     ) -> ConfigurationBundleFetchResult:
+        decoder = CameraPolicyConfigurationBundle if self._policy_v2 else CameraConfigurationBundle
+
         def parse_bundle(
             payload: bytes,
             validated_etag: str,
@@ -285,7 +292,7 @@ class BackendConfigurationClient:
             expected_external_id: str,
         ) -> ConfigurationBundleResult:
             try:
-                bundle = CameraConfigurationBundle.from_wire_bytes(payload)
+                bundle = decoder.from_wire_bytes(payload)
             except (TypeError, ValueError):
                 raise BackendConfigurationResponseError(
                     "Backend configuration bundle response body is invalid"
@@ -299,11 +306,19 @@ class BackendConfigurationClient:
                     "Backend configuration bundle cameraExternalId does not match "
                     "the expected camera"
                 )
+            if self._policy_v2 and not _weak_etag_equal(
+                validated_etag, f'"sha256:{bundle.bundle_sha256}"'
+            ):
+                raise BackendConfigurationResponseError(
+                    "Backend policy bundle ETag does not match its validated hash"
+                )
             return ConfigurationBundleResult(bundle, validated_etag)
 
         return await self._fetch_conditional(
             camera_id,
-            endpoint_suffix="configuration-bundle",
+            endpoint_suffix=(
+                "configuration-bundle/v2" if self._policy_v2 else "configuration-bundle"
+            ),
             expected_camera_external_id=expected_camera_external_id,
             etag=etag,
             parse_ok=parse_bundle,
@@ -396,7 +411,9 @@ class BackendConfigurationClient:
         self,
         camera_id: UUID | str,
         *,
-        endpoint_suffix: Literal["configuration", "configuration-bundle"],
+        endpoint_suffix: Literal[
+            "configuration", "configuration-bundle", "configuration-bundle/v2"
+        ],
         expected_camera_external_id: str,
         etag: str | None,
         parse_ok: Callable[[bytes, str, str, str], _ResultT],

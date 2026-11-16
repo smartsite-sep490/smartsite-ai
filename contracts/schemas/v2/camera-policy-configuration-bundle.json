@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.local/contracts/v2/camera-policy-configuration-bundle.json",
+  "title": "CameraPolicyConfigurationBundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "cameraId",
+    "cameraExternalId",
+    "configurationVersion",
+    "viewRevision",
+    "issuedAt",
+    "bundleSha256",
+    "regions",
+    "cameraPpePolicy"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "2.0.0"
+    },
+    "cameraId": {
+      "$ref": "#/$defs/lowercaseUuid"
+    },
+    "cameraExternalId": {
+      "$ref": "../v1/camera-region-configuration.json#/properties/cameraExternalId"
+    },
+    "configurationVersion": {
+      "$ref": "../v1/camera-region-configuration.json#/properties/configurationVersion"
+    },
+    "viewRevision": {
+      "$ref": "../v1/camera-region-configuration.json#/properties/configurationVersion"
+    },
+    "issuedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "bundleSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/region"
+      }
+    },
+    "cameraPpePolicy": {
+      "$ref": "#/$defs/cameraPpePolicy"
+    }
+  },
+  "$defs": {
+    "lowercaseUuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regionId",
+        "geometryVersion",
+        "coordinateSpace",
+        "polygon",
+        "zoneId",
+        "policyRevision",
+        "ppePolicy"
+      ],
+      "properties": {
+        "regionId": {
+          "$ref": "#/$defs/lowercaseUuid"
+        },
+        "geometryVersion": {
+          "$ref": "../v1/camera-region-configuration.json#/$defs/region/properties/geometryVersion"
+        },
+        "coordinateSpace": {
+          "$ref": "../v1/camera-region-configuration.json#/$defs/region/properties/coordinateSpace"
+        },
+        "polygon": {
+          "$ref": "../v1/camera-region-configuration.json#/$defs/polygon"
+        },
+        "zoneId": {
+          "$ref": "#/$defs/lowercaseUuid"
+        },
+        "policyRevision": {
+          "$ref": "../v1/camera-region-configuration.json#/properties/configurationVersion"
+        },
+        "ppePolicy": {
+          "$ref": "#/$defs/regionPpePolicy"
+        }
+      }
+    },
+    "cameraPpePolicy": {
+      "anyOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "EXPLICIT"
+            },
+            "requiredPpe": {
+              "items": {
+                "enum": ["HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES"]
+              },
+              "minItems": 1,
+              "type": "array",
+              "maxItems": 5,
+              "uniqueItems": true
+            }
+          },
+          "type": "object",
+          "required": ["mode", "requiredPpe"],
+          "additionalProperties": false
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "DISABLED"
+            },
+            "reason": {
+              "minLength": 1,
+              "pattern": "^(?=.*\\S)[^\\p{Cc}\\p{Cs}]+$",
+              "type": "string",
+              "maxLength": 500
+            }
+          },
+          "type": "object",
+          "required": ["mode", "reason"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "regionPpePolicy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/cameraPpePolicy"
+        },
+        {
+          "properties": {
+            "mode": {
+              "const": "INHERIT"
+            }
+          },
+          "type": "object",
+          "required": ["mode"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

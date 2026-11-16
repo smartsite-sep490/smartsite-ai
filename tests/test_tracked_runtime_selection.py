@@ -34,6 +34,8 @@ def document(tmp_path):
             }
         )
     )
+    # Match the operator credential contract on POSIX; never relax the loader guard.
+    credential.chmod(0o600)
     value = {
         "schemaVersion": "1",
         "modelSpec": str(model),

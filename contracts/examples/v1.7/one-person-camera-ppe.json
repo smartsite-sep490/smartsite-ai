@@ -1,0 +1,56 @@
+{
+  "eventId": "00000000-0000-4000-8000-000000000001",
+  "schemaVersion": "1.7.0",
+  "cameraExternalId": "CAM-1",
+  "streamSessionId": "00000000-0000-4000-8000-000000000002",
+  "capturedAt": "2026-11-01T00:00:00.000Z",
+  "frameDimensions": {
+    "width": 1280,
+    "height": 720
+  },
+  "framePartition": {
+    "frameId": "00000000-0000-4000-8000-000000000003",
+    "sequenceNumber": "0",
+    "partIndex": 0,
+    "partCount": 1
+  },
+  "observations": [
+    {
+      "type": "PERSON",
+      "trackId": 0,
+      "boundingBox": {
+        "coordinateSpace": "NORMALIZED_0_1",
+        "x1": 0.2,
+        "y1": 0.2,
+        "x2": 0.4,
+        "y2": 0.8
+      }
+    },
+    {
+      "type": "PPE",
+      "trackId": 0,
+      "scope": "CAMERA",
+      "ppeItem": "HARD_HAT",
+      "status": "MISSING"
+    }
+  ],
+  "evidence": [],
+  "continuity": {
+    "schemaVersion": "1.0.0",
+    "profileSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "coverage": {
+      "status": "COMPLETE"
+    },
+    "subjects": [
+      {
+        "personObservationIndex": 0,
+        "segmentId": "00000000-0000-4000-8000-000000000020",
+        "link": {
+          "kind": "START",
+          "reason": "INITIAL"
+        }
+      }
+    ],
+    "retiredSegments": []
+  }
+}

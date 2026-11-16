@@ -1,10 +1,11 @@
 """MF05 PPE-to-person association and technical observation generation."""
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Final, Literal
 
 from smartsite_ai.domain.observations import PpeObservation
 from smartsite_ai.domain.regions import CameraObservationRegionConfiguration
+from smartsite_ai.domain.tracked_observations import CameraPpeObservation
 from smartsite_ai.inference.models import NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.inference.ppe_profiles import (
     LEGACY_PPE_5_PROFILE,
@@ -142,8 +143,52 @@ class PpePipeline:
                 observation_region.polygon.coordinates,
             )
         )
+        return tuple(
+            PpeObservation.model_validate(
+                {
+                    **self._observation_fields(track_id, item, status, detection),
+                    "regionId": observation_region.region_id,
+                    "geometryVersion": observation_region.geometry_version,
+                }
+            )
+            for track_id, item, status, detection in self._observations(
+                tracked_frame, eligible_people
+            )
+        )
+
+    def process_camera(
+        self,
+        tracked_frame: TrackedFrame,
+        regions: Iterable[CameraObservationRegionConfiguration],
+        required_ppe: Iterable[PpeItem],
+    ) -> tuple[CameraPpeObservation, ...]:
+        """Evaluate the camera default only for tracks outside all configured polygons."""
+        required = frozenset(required_ppe)
+        if not required:
+            return ()
+        scopes = tuple(regions)
+        outside = tuple(
+            person
+            for person in tracked_frame.persons
+            if not any(
+                point_in_polygon(bottom_center(person.bounding_box), region.polygon.coordinates)
+                for region in scopes
+            )
+        )
+        return tuple(
+            CameraPpeObservation.model_validate(
+                {**self._observation_fields(track_id, item, status, detection), "scope": "CAMERA"}
+            )
+            for track_id, item, status, detection in self._observations(tracked_frame, outside)
+            if item in required
+        )
+
+    def _observations(
+        self, tracked_frame: TrackedFrame, eligible_people: tuple[TrackedPerson, ...]
+    ) -> Iterator[tuple[int, PpeItem, Literal["PRESENT", "MISSING"], NormalizedDetection | None]]:
+        if not eligible_people:
+            return
         associations, conflicted = self._associate(tracked_frame, eligible_people)
-        observations: list[PpeObservation] = []
         for person in eligible_people:
             for item in self._items:
                 key = (person.track_id, item)
@@ -152,26 +197,9 @@ class PpePipeline:
                 association = associations.get(key)
                 if association is not None:
                     status, detection = association
-                    observations.append(
-                        self._observation(
-                            person.track_id,
-                            item,
-                            status,
-                            observation_region,
-                            detection,
-                        )
-                    )
+                    yield person.track_id, item, status, detection
                 elif self._emit_missing and self._is_observable(person):
-                    observations.append(
-                        self._observation(
-                            person.track_id,
-                            item,
-                            "MISSING",
-                            observation_region,
-                            None,
-                        )
-                    )
-        return tuple(observations)
+                    yield person.track_id, item, "MISSING", None
 
     def _associate(
         self,
@@ -253,27 +281,24 @@ class PpePipeline:
         )
 
     @staticmethod
-    def _observation(
+    def _observation_fields(
         track_id: int,
         item: PpeItem,
         status: Literal["PRESENT", "MISSING"],
-        region: CameraObservationRegionConfiguration,
         detection: NormalizedDetection | None,
-    ) -> PpeObservation:
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "type": "PPE",
             "trackId": track_id,
             "ppeItem": item,
             "status": status,
-            "regionId": region.region_id,
-            "geometryVersion": region.geometry_version,
         }
         if detection is not None:
             payload["confidence"] = detection.confidence
             payload["boundingBox"] = to_observation_bounding_box(
                 detection.bounding_box
             ).to_wire_dict()
-        return PpeObservation.model_validate(payload)
+        return payload
 
 
 def _contains(box: NormalizedBoundingBox, point: tuple[float, float]) -> bool:

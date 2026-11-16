@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.local/contracts/v1.6/technical-observation-event.json",
+  "title": "TrackedFrameEntryOriginObservationEventCandidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "schemaVersion",
+    "cameraExternalId",
+    "streamSessionId",
+    "capturedAt",
+    "frameDimensions",
+    "observations",
+    "evidence",
+    "framePartition",
+    "continuity"
+  ],
+  "properties": {
+    "eventId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/eventId"
+    },
+    "schemaVersion": {
+      "const": "1.6.0"
+    },
+    "cameraExternalId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/cameraExternalId"
+    },
+    "streamSessionId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/streamSessionId"
+    },
+    "capturedAt": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/capturedAt"
+    },
+    "frameDimensions": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/frameDimensions"
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/personObservation"
+          },
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/ppeObservation"
+          },
+          {
+            "$ref": "#/$defs/zoneEntryObservation"
+          },
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/identityCandidateObservation"
+          }
+        ]
+      }
+    },
+    "evidence": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/evidence"
+    },
+    "framePartition": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/framePartition"
+    },
+    "continuity": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/continuity"
+    }
+  },
+  "$defs": {
+    "zoneEntryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId", "regionId", "geometryVersion", "entryOrigin"],
+      "properties": {
+        "type": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/type"
+        },
+        "trackId": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/trackId"
+        },
+        "regionId": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/regionId"
+        },
+        "geometryVersion": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/geometryVersion"
+        },
+        "confidence": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/confidence"
+        },
+        "entryOrigin": {
+          "enum": ["OUTSIDE_TO_INSIDE", "INSIDE_ENTRY_UNOBSERVED"]
+        }
+      }
+    }
+  }
+}

@@ -84,6 +84,9 @@ async def run_manifest(
             configuration_client_factory=lambda: BackendConfigurationClient.from_settings(
                 runtime_settings
             ),
+            policy_v2_client_factory=lambda: BackendConfigurationClient.from_settings(
+                runtime_settings, policy_v2=True
+            ),
         )
         plans.extend(prepared)
         return failure

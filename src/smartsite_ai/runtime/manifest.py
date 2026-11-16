@@ -66,6 +66,17 @@ class EnvCameraSource(_StrictModel):
 CameraSource = Annotated[PathCameraSource | EnvCameraSource, Field(discriminator="kind")]
 
 
+class TrackedV17Manifest(_StrictModel):
+    site_id: UUID = Field(alias="siteId")
+    profile_sha256: str = Field(alias="profileSha256", pattern=r"^[0-9a-f]{64}$")
+    pending_seconds: float = Field(alias="pendingSeconds", gt=0, le=300, strict=True)
+    predecessor_wait_seconds: float = Field(
+        alias="predecessorWaitSeconds", gt=0, le=60, strict=True
+    )
+    max_pending: int = Field(alias="maxPending", strict=True, ge=1, le=1024)
+    max_bytes: int = Field(alias="maxBytes", strict=True, ge=1, le=20_000_000)
+
+
 class CameraManifestEntry(_StrictModel):
     stream_id: str = Field(alias="streamId", pattern=_STREAM_ID_RE.pattern)
     camera_id: UUID = Field(alias="cameraId")
@@ -88,8 +99,19 @@ class CameraManifestEntry(_StrictModel):
         default=None, alias="evidenceDir", min_length=1, max_length=1024
     )
 
+    tracked_v17: TrackedV17Manifest | None = Field(default=None, alias="trackedV17")
+
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
+        if self.tracked_v17 is not None and (
+            not self.live
+            or self.evidence_dir is None
+            or self.generation_credential_file is None
+            or self.partitioned_frame_delivery
+            or self.generation_bound_event_delivery
+            or self.tracked_v17.predecessor_wait_seconds >= self.tracked_v17.pending_seconds
+        ):
+            raise ValueError("camera runtime manifest is invalid")
         if self.generation_bound_event_delivery and self.generation_credential_file is None:
             raise ValueError("Bound event delivery requires an original generation credential")
         if self.generation_credential_file is not None and not _is_portable_absolute_path(

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -7,8 +8,13 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from smartsite_ai.config import Settings
+from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
+from smartsite_ai.domain.configuration_bundle import _reject_duplicate_json_keys
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
+from smartsite_ai.domain.tracked_frame_result import TrackedFrameResult
+from smartsite_ai.domain.tracked_observations import TrackedObservationEvent
+from smartsite_ai.domain.tracked_raw_receipt import TrackedRawReceipt
 from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -216,7 +222,7 @@ class BackendClient:
         Immediately calls raise_for_status on all other 4xx errors without retrying.
         """
         if isinstance(event, TechnicalObservationEvent):
-            validated_event = event
+            validated_event = TechnicalObservationEvent.model_validate(event.to_wire_dict())
         elif isinstance(event, dict):
             validated_event = TechnicalObservationEvent.model_validate(event)
         else:
@@ -239,6 +245,7 @@ class BackendClient:
         The credential may authenticate an old pending claim. It grants no right
         to open a new source or reuse an expired generation for processing.
         """
+        event = TechnicalObservationEvent.model_validate(event.to_wire_dict())
         context = EventDeliveryContext.model_validate_json(context.model_dump_json(by_alias=True))
         if (
             not isinstance(credential, WorkerGenerationCredential)
@@ -263,6 +270,120 @@ class BackendClient:
             f"{origin}{BOUND_INGESTION_ENDPOINT_PATH}",
             headers,
         )
+
+    async def post_tracked_part(
+        self, credential: WorkerGenerationCredential, wire: bytes
+    ) -> TrackedRawReceipt:
+        """Send original validated bytes once; the durable outbox owns transient retry.
+
+        Backend decides whether an original pending claim is still admissible.
+        This delivery credential never authorizes a new source connection.
+        """
+        if not isinstance(wire, bytes):
+            raise TypeError("Tracked part must be original bytes")
+        if len(wire) > 1024 * 1024:
+            raise ValueError("Tracked part exceeds Backend body limit")
+        try:
+            envelope = json.loads(wire, object_pairs_hook=_reject_duplicate_json_keys)
+            if (
+                set(envelope) != {"schemaVersion", "context", "event"}
+                or envelope["schemaVersion"] != "1.0.0"
+            ):
+                raise ValueError("Invalid tracked part envelope")
+            event = envelope["event"]
+            TrackedObservationEvent.model_validate(event)
+            context = EventDeliveryContext.model_validate(envelope["context"])
+            event_id = validate_uuid_str(event["eventId"], "eventId")
+            payload_hash = compute_canonical_payload_hash(event)
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Tracked part envelope is invalid") from None
+
+        if (
+            not isinstance(credential, WorkerGenerationCredential)
+            or credential.camera_id != context.camera_id
+            or credential.worker_generation_id != context.worker_generation_id
+            or credential.stream_session_id != context.stream_session_id
+            or event["streamSessionId"].lower() != context.stream_session_id
+        ):
+            raise BoundDeliveryCredentialUnavailable(
+                "Original generation credential is unavailable"
+            )
+
+        origin = self._base_url.removesuffix(INGESTION_ENDPOINT_PATH)
+        headers = self._get_headers()
+        headers["x-worker-generation-secret"] = credential.secret.get_secret_value()
+        headers["accept-encoding"] = "identity"
+        client = await self._get_client()
+        async with client.stream(
+            "POST",
+            f"{origin}/api/v1/integrations/ai/tracked-parts",
+            content=wire,
+            headers=headers,
+            follow_redirects=False,
+        ) as response:
+            body = await self._read_tracked_json(response, limit=4096, label="Tracked raw receipt")
+
+        try:
+            receipt = TrackedRawReceipt.model_validate(
+                json.loads(body, object_pairs_hook=_reject_duplicate_json_keys)
+            )
+            receipt.require_match(event_id, payload_hash, context.binding_hash(payload_hash))
+        except ValueError:
+            raise ValueError("Tracked raw receipt is invalid or does not match") from None
+        return receipt
+
+    @staticmethod
+    async def _read_tracked_json(response: httpx.Response, *, limit: int, label: str) -> bytearray:
+        response.raise_for_status()
+        if (
+            response.status_code != 200
+            or response.headers.get("content-type", "").split(";", 1)[0] != "application/json"
+            or response.headers.get("content-encoding", "identity") != "identity"
+        ):
+            raise ValueError(f"{label} has invalid response headers")
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > limit:
+                raise ValueError(f"{label} exceeds size limit")
+            body.extend(chunk)
+        return body
+
+    async def read_tracked_frame_result(
+        self,
+        credential: WorkerGenerationCredential,
+        frame_id: str,
+        *,
+        scope_sha256: str,
+        sequence_number: str,
+        subjects: dict[str, tuple[str, int]],
+        retired_segment_ids: set[str],
+    ) -> TrackedFrameResult | None:
+        """Fetch one committed seal; an unavailable result does not advance tracking."""
+        frame_id = validate_uuid_str(frame_id, "frameId")
+        origin = self._base_url.removesuffix(INGESTION_ENDPOINT_PATH)
+        url = (
+            f"{origin}/api/v1/integrations/ai/cameras/{credential.camera_id}"
+            f"/generations/{credential.worker_generation_id}/sessions/{credential.stream_session_id}"
+            f"/tracked-frames/{frame_id}/result"
+        )
+        headers = self._get_headers()
+        headers["x-worker-generation-secret"] = credential.secret.get_secret_value()
+        headers["accept-encoding"] = "identity"
+        client = await self._get_client()
+        async with client.stream("GET", url, headers=headers, follow_redirects=False) as response:
+            if response.status_code == 404:
+                return None
+            body = await self._read_tracked_json(
+                response, limit=1024 * 1024, label="Tracked frame result"
+            )
+        try:
+            result = TrackedFrameResult.model_validate(
+                json.loads(body, object_pairs_hook=_reject_duplicate_json_keys)
+            )
+            result.require_match(scope_sha256, sequence_number, subjects, retired_segment_ids)
+        except ValueError:
+            raise ValueError("Tracked frame result is invalid or does not match") from None
+        return result
 
     async def _post_payload(
         self, event_id: str, payload: dict[str, Any], url: str, headers: dict[str, str]

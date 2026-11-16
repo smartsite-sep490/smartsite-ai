@@ -10,12 +10,12 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from smartsite_ai.core.region_configuration_store import (
+    CameraBundle,
     RegionConfigurationApplyOutcome,
     RegionConfigurationConflict,
     RegionConfigurationStore,
 )
 from smartsite_ai.domain.configuration_ack import CameraConfigurationAcknowledgement
-from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.integrations.backend_configuration_client import (
@@ -101,7 +101,7 @@ class CameraConfigurationPoller:
 
     async def snapshot_delivery_context(
         self,
-        bundle: CameraConfigurationBundle,
+        bundle: CameraBundle,
         frame: FrameEnvelope,
         source_kind: Literal["LIVE", "REPLAY"],
     ) -> EventDeliveryContext | None:
@@ -137,7 +137,7 @@ class CameraConfigurationPoller:
             if (
                 self._acknowledged_at is None
                 or self._read_clock() - self._acknowledged_at >= 60
-                or not isinstance(bundle, CameraConfigurationBundle)
+                or not isinstance(bundle, CameraBundle)
                 or await self._store.get_bundle(self._camera_external_id) is not bundle
                 or bundle.camera_id != str(self._camera_id)
                 or frame.camera_external_id != self._camera_external_id

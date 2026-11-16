@@ -17,6 +17,7 @@ from smartsite_ai.core.region_configuration_store import (
 )
 from smartsite_ai.domain.configuration_ack import CameraConfigurationAcknowledgement
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
+from smartsite_ai.domain.tracked_observations import TrackedScopeTransitionRequired
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.integrations.backend_configuration_client import (
     BackendConfigurationClient,
@@ -51,6 +52,7 @@ class CameraConfigurationPoller:
         stale_after_seconds: float = 60.0,
         monotonic_clock: Callable[[], float] = monotonic,
         require_bundle: bool = False,
+        pin_bundle_scope: bool = False,
     ) -> None:
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             raise ValueError("configuration poll interval must be positive")
@@ -58,6 +60,8 @@ class CameraConfigurationPoller:
             raise ValueError("configuration stale window must be at least the poll interval")
         if not camera_external_id:
             raise ValueError("camera external ID must not be empty")
+        if type(pin_bundle_scope) is not bool or (pin_bundle_scope and not require_bundle):
+            raise ValueError("Tracked scope pinning requires immutable bundle delivery")
         self._client = client
         self._store = store
         self._camera_id = camera_id
@@ -66,6 +70,8 @@ class CameraConfigurationPoller:
         self._stale_after_seconds = stale_after_seconds
         self._clock = monotonic_clock
         self._require_bundle = require_bundle
+        self._pin_bundle_scope = pin_bundle_scope
+        self._pinned_bundle_scope: tuple[str, int, str, int] | None = None
         self._etag: str | None = None
         self._last_success: float | None = None
         self._last_clock_read: float | None = None
@@ -259,6 +265,20 @@ class CameraConfigurationPoller:
             self._etag = None
             self._last_success = None
             raise RuntimeError("configuration client returned an unsupported result")
+        scope = None
+        if self._pin_bundle_scope:
+            bundle = result.bundle
+            scope = (
+                bundle.camera_id,
+                bundle.configuration_version,
+                bundle.bundle_sha256,
+                bundle.view_revision,
+            )
+            if self._pinned_bundle_scope is not None and self._pinned_bundle_scope != scope:
+                self._invalidate()
+                raise TrackedScopeTransitionRequired(
+                    "Tracked source requires a trusted scope transition"
+                )
         try:
             outcome = (
                 await self._store.apply_bundle(result.bundle)
@@ -277,6 +297,8 @@ class CameraConfigurationPoller:
             )
         self._etag = result.etag
         self._last_success = now
+        if scope is not None:
+            self._pinned_bundle_scope = scope
         return outcome
 
     def ensure_fresh(self) -> None:

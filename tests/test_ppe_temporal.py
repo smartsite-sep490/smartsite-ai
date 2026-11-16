@@ -81,6 +81,8 @@ def test_confirmation_at_third_consecutive_missing_observation() -> None:
         ppe_item="HARD_HAT",
         first_seen_at=t0,
         confirmed_at=t_confirm,
+        region_id=ppe_obs(1, "HARD_HAT", "MISSING").region_id,
+        geometry_version=1,
     )
 
 

@@ -5,6 +5,7 @@ from uuid import UUID
 
 from smartsite_ai.domain.observations import ZoneEntryObservation
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.domain.tracked_observations import TrackedZoneEntryObservation
 from smartsite_ai.pipelines._geometry import bottom_center, point_in_polygon
 from smartsite_ai.tracking.models import TrackedFrame
 
@@ -87,6 +88,7 @@ class RestrictedZonePipeline:
         configuration: CameraRegionConfiguration,
         *,
         view_revision: int | None = None,
+        include_entry_origin: bool = False,
     ) -> tuple[ZoneEntryObservation, ...]:
         """Return entries after consecutive inside evidence for current tracks.
 
@@ -121,7 +123,11 @@ class RestrictedZonePipeline:
 
         # Geometry versions alone do not identify the camera view. Never carry
         # pending/confirmed occupancy into a different view (or a legacy context).
-        if self._view_revision != view_revision:
+        if self._view_revision != view_revision or (
+            include_entry_origin
+            and self._last_sequence is not None
+            and batch.sequence_number != self._last_sequence + 1
+        ):
             self._inside.clear()
             self._inside_streaks.clear()
             self._outside_streaks.clear()
@@ -162,17 +168,20 @@ class RestrictedZonePipeline:
                     and previous is not True
                     and self._inside_streaks[state_key] >= self._entry_confirmation_frames
                 ):
-                    observations.append(
-                        ZoneEntryObservation.model_validate(
-                            {
-                                "type": "ZONE_ENTRY",
-                                "trackId": person.track_id,
-                                "regionId": region.region_id,
-                                "geometryVersion": region.geometry_version,
-                                "confidence": person.detection.confidence,
-                            }
+                    observation = {
+                        "type": "ZONE_ENTRY",
+                        "trackId": person.track_id,
+                        "regionId": region.region_id,
+                        "geometryVersion": region.geometry_version,
+                        "confidence": person.detection.confidence,
+                    }
+                    if include_entry_origin:
+                        observation["entryOrigin"] = (
+                            "OUTSIDE_TO_INSIDE" if previous is False else "INSIDE_ENTRY_UNOBSERVED"
                         )
-                    )
+                        observations.append(TrackedZoneEntryObservation.model_validate(observation))
+                    else:
+                        observations.append(ZoneEntryObservation.model_validate(observation))
                     self._inside[state_key] = True
                 elif not inside and previous is None:
                     # Initial outside evidence establishes the baseline immediately;
@@ -242,4 +251,4 @@ class RestrictedZonePipeline:
                 self._outside_streaks.pop(state_key, None)
 
 
-__all__ = ["RestrictedZonePipeline"]
+__all__ = ["RestrictedZonePipeline", "ZoneTemporalState"]

@@ -55,6 +55,16 @@ jobs:
             git -C "$source_checkout" show "${policy_commit}:${policy_path}" > "$RUNNER_TEMP/source-policy-bytes.json"
             cmp "$policy_path" "$RUNNER_TEMP/source-policy-bytes.json"
           done
+          tracked_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["trackedTechnicalObservationVersions"][-1]["sourceCommitSha"])')
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$tracked_commit"
+          for tracked_path in \
+            contracts/schemas/v1.5/technical-observation-event.json \
+            contracts/schemas/v1.6/technical-observation-event.json \
+            contracts/schemas/v1.7/technical-observation-event.json \
+            contracts/examples/v1.7/one-person-camera-ppe.json; do
+            git -C "$source_checkout" show "${tracked_commit}:${tracked_path}" > "$RUNNER_TEMP/source-tracked-bytes.json"
+            cmp "$tracked_path" "$RUNNER_TEMP/source-tracked-bytes.json"
+          done
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .
@@ -79,6 +89,9 @@ jobs:
           assert "smartsite_ai/contracts/camera-region-configuration-vectors.json" in names
           assert "smartsite_ai/contracts/schemas/v2/camera-policy-configuration-bundle.json" in names
           assert "smartsite_ai/contracts/schemas/v2/examples/camera-policy-configuration-bundle.json" in names
+          for version in ("1.5", "1.6", "1.7"):
+              assert f"smartsite_ai/contracts/schemas/v{version}/technical-observation-event.json" in names
+          assert "smartsite_ai/contracts/examples/v1.7/one-person-camera-ppe.json" in names
           PY
       - name: Verify minimal runtime package
         run: |

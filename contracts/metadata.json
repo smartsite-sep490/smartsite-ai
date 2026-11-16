@@ -53,5 +53,34 @@
     "examplePath": "contracts/schemas/v2/examples/camera-policy-configuration-bundle.json",
     "sourceExamplePath": "contracts/schemas/v2/examples/camera-policy-configuration-bundle.json",
     "exampleSha256": "477c8aa3a91ebc67b7b9eaadcb94bb7605d61437dd9c3a49f5639bfd943ad958"
-  }
+  },
+  "trackedTechnicalObservationVersions": [
+    {
+      "schemaVersion": "1.5.0",
+      "path": "contracts/schemas/v1.5/technical-observation-event.json",
+      "sourcePath": "contracts/schemas/v1.5/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "cf964554dcc45ba34a0161fcb1d0fe48485fb828",
+      "schemaSha256": "301b7731e9b9ec6205d633134e18e182d00e2cd34bf34e20480898885f855a06"
+    },
+    {
+      "schemaVersion": "1.6.0",
+      "path": "contracts/schemas/v1.6/technical-observation-event.json",
+      "sourcePath": "contracts/schemas/v1.6/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "cf964554dcc45ba34a0161fcb1d0fe48485fb828",
+      "schemaSha256": "58c651bf86db0bda25fb2423e97bc3acca70859de87fff4f0827903295809888"
+    },
+    {
+      "schemaVersion": "1.7.0",
+      "path": "contracts/schemas/v1.7/technical-observation-event.json",
+      "sourcePath": "contracts/schemas/v1.7/technical-observation-event.json",
+      "sourceRepository": "smartsite-sep490/smartsite",
+      "sourceCommitSha": "cf964554dcc45ba34a0161fcb1d0fe48485fb828",
+      "schemaSha256": "e5d5813c94b480e6e06075be9744393e5311f0188fad9445e91c23803d6b996f",
+      "examplePath": "contracts/examples/v1.7/one-person-camera-ppe.json",
+      "sourceExamplePath": "contracts/examples/v1.7/one-person-camera-ppe.json",
+      "exampleSha256": "587b77a737837c00022b110d83bb5575d45a75018ee6196dbace5e1047f4770f"
+    }
+  ]
 }

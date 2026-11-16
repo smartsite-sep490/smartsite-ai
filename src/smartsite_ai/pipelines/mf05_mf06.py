@@ -3,13 +3,16 @@
 from typing import Literal
 from uuid import UUID
 
+from smartsite_ai.core.region_configuration_store import CameraBundle
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.observations import (
     FrameDimensions,
     PersonObservation,
     TechnicalObservationEvent,
 )
+from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.domain.tracked_observations import TrackedScopeTransitionRequired
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.pipelines._geometry import to_observation_bounding_box
 from smartsite_ai.pipelines.observation_frame import ObservationFrame
@@ -29,6 +32,7 @@ class Mf05Mf06Pipeline:
         zones: RestrictedZonePipeline,
         ppe_region_id: str,
         schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
+        tracked_v17: bool = False,
     ) -> None:
         if not ppe_region_id:
             raise ValueError("ppe_region_id must not be empty")
@@ -36,38 +40,45 @@ class Mf05Mf06Pipeline:
             raise ValueError("unsupported observation schema version")
         if schema_version == "1.0.0" and ppe.minimum_schema_version == "1.1.0":
             raise ValueError("expanded PPE requires a configured v1.1.0 consumer")
-        self._schema_version = schema_version
         self._tracker = tracker
         self._ppe = ppe
         self._zones = zones
         self._ppe_region_id = ppe_region_id.casefold()
+        self._schema_version = schema_version
+        self._tracked_v17 = tracked_v17
+        self._tracked_scope: (
+            tuple[str, str, UUID, int, str, int, int, int, str, str, str] | None
+        ) = None
 
     def checkpoint_temporal_state(self) -> ZoneTemporalState:
         return self._zones.checkpoint_temporal_state()
 
-    def restore_temporal_state(self, state: ZoneTemporalState) -> None:
-        # Keep tracker identities monotonic; restore only uncommitted zone evidence.
+    def restore_temporal_state(self, state: object) -> None:
+        if not isinstance(state, ZoneTemporalState):
+            raise TypeError("Invalid zone confirmation checkpoint")
+        # Keep processed tracking state and its monotonically allocated IDs.
         self._zones.restore_temporal_state(state)
 
     def process(
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        region_configuration: CameraRegionConfiguration | CameraBundle,
         event_id: str,
     ) -> TechnicalObservationEvent | None:
         """Create one technical event, or ``None`` when no person is observable."""
+
         frame = self.observe(batch, region_configuration=region_configuration, event_id=event_id)
-        return frame.to_event() if frame is not None else None
+        return None if frame is None else frame.to_event()
 
     def observe(
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        region_configuration: CameraRegionConfiguration | CameraBundle,
         event_id: str,
     ) -> ObservationFrame | None:
-        """Observe all subjects before bounded wire packing; no findings are truncated."""
+        """Observe the whole frame before transport capacity or delivery filtering."""
 
         frame = self.observe_frame(
             batch, region_configuration=region_configuration, event_id=event_id
@@ -78,7 +89,7 @@ class Mf05Mf06Pipeline:
         self,
         batch: DetectionBatch,
         *,
-        region_configuration: CameraRegionConfiguration | CameraConfigurationBundle,
+        region_configuration: CameraRegionConfiguration | CameraBundle,
         event_id: str,
     ) -> ObservationFrame:
         """Keep captured-frame lifecycle internally, including no-person observations.
@@ -87,6 +98,8 @@ class Mf05Mf06Pipeline:
         not a safety/Zone EXIT claim or a serializable empty legacy event. Failed
         capture/inference has no batch here and must not be converted to emptiness.
         """
+        if self._tracked_v17 != isinstance(region_configuration, CameraPolicyConfigurationBundle):
+            raise ValueError("Tracked v1.7 PPE requires a v2 camera policy bundle")
         if batch.camera_external_id != region_configuration.camera_external_id:
             raise ValueError(
                 "camera region configuration does not match the detection batch camera"
@@ -99,18 +112,36 @@ class Mf05Mf06Pipeline:
             ),
             None,
         )
-        if ppe_region is None and not isinstance(region_configuration, CameraConfigurationBundle):
+        is_bundle = isinstance(
+            region_configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)
+        )
+        if ppe_region is None and not is_bundle:
             raise ValueError(
                 f"PPE observation region {self._ppe_region_id!r} is not in the configuration"
             )
 
+        if self._tracked_v17:
+            scope = (
+                region_configuration.camera_id,
+                batch.stream_id,
+                batch.session_id,
+                region_configuration.configuration_version,
+                region_configuration.bundle_sha256,
+                region_configuration.view_revision,
+                batch.frame_width,
+                batch.frame_height,
+                batch.model_artifact_id,
+                batch.model_version,
+                batch.model_sha256,
+            )
+            if self._tracked_scope is not None and self._tracked_scope != scope:
+                raise TrackedScopeTransitionRequired(
+                    "Tracked source requires a trusted scope transition"
+                )
+            self._tracked_scope = scope
         tracked_frame = self._tracker.update(
             batch,
-            view_revision=(
-                region_configuration.view_revision
-                if isinstance(region_configuration, CameraConfigurationBundle)
-                else None
-            ),
+            view_revision=(region_configuration.view_revision if is_bundle else None),
         )
         person_observations = tuple(
             PersonObservation.model_validate(
@@ -123,7 +154,27 @@ class Mf05Mf06Pipeline:
             )
             for person in tracked_frame.persons
         )
-        if isinstance(region_configuration, CameraConfigurationBundle):
+        if isinstance(region_configuration, CameraPolicyConfigurationBundle):
+            observations_by_region = []
+            for region in region_configuration.regions:
+                required = region_configuration.resolve_ppe_policy((region.region_id,)).required_ppe
+                if required:
+                    observations_by_region.extend(
+                        observation
+                        for observation in self._ppe.process(tracked_frame, region)
+                        if observation.ppe_item in required
+                    )
+            if self._tracked_v17:
+                observations_by_region.extend(
+                    self._ppe.process_camera(
+                        tracked_frame,
+                        region_configuration.regions,
+                        region_configuration.resolve_ppe_policy(()).required_ppe,
+                    )
+                )
+            ppe_observations = tuple(observations_by_region)
+            restricted_zone_configuration = region_configuration.to_region_configuration()
+        elif isinstance(region_configuration, CameraConfigurationBundle):
             ppe_observations = tuple(
                 observation
                 for region in region_configuration.regions
@@ -147,16 +198,13 @@ class Mf05Mf06Pipeline:
         zone_observations = self._zones.process(
             tracked_frame,
             restricted_zone_configuration,
-            view_revision=(
-                region_configuration.view_revision
-                if isinstance(region_configuration, CameraConfigurationBundle)
-                else None
-            ),
+            view_revision=(region_configuration.view_revision if is_bundle else None),
+            include_entry_origin=self._tracked_v17,
         )
         observations = [*person_observations, *ppe_observations, *zone_observations]
         return ObservationFrame(
-            event_id=event_id,
             schema_version=self._schema_version,
+            event_id=event_id,
             camera_external_id=batch.camera_external_id,
             stream_session_id=str(batch.session_id),
             captured_at=batch.captured_at.isoformat(),
@@ -165,6 +213,8 @@ class Mf05Mf06Pipeline:
             source_sequence_number=batch.sequence_number,
             subject_segments=tracked_frame.subject_segments,
             retired_segments=tracked_frame.retired_segments,
+            requires_tracked_wire=self._tracked_v17,
+            camera_configuration_version=region_configuration.configuration_version,
         )
 
     def occupied_zone_track_regions(

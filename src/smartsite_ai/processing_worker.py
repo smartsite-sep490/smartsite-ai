@@ -7,14 +7,18 @@ import logging
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Literal, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
-from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
+from smartsite_ai.core.region_configuration_store import CameraBundle, RegionConfigurationStore
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
 from smartsite_ai.domain.observations import TechnicalObservationEvent
+from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.domain.regions import CameraRegionConfiguration
+from smartsite_ai.domain.tracked_observations import TrackedScopeTransitionRequired
 from smartsite_ai.evidence.models import FrameBatchBindingError
 from smartsite_ai.evidence.protocol import EvidencePublisherProtocol
 from smartsite_ai.inference.models import DetectionBatch
@@ -24,6 +28,9 @@ from smartsite_ai.ingestion.queue import QueueClosedError
 from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
+from smartsite_ai.integrations.tracked_capture import stage_tracked_capture
+from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
+from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
     events_for_delivery,
@@ -75,6 +82,31 @@ class ProcessingWorkerSourceError(RuntimeError):
     """The configured source could not sustain a processable stream."""
 
 
+@dataclass(frozen=True, slots=True)
+class TrackedCapturePolicy:
+    credential: WorkerGenerationCredential
+    site_id: str
+    profile_sha256: str
+    pending_seconds: float
+    predecessor_wait_seconds: float
+    max_pending: int
+    max_bytes: int
+
+    def __post_init__(self) -> None:
+        if not (
+            type(self.pending_seconds) in (int, float)
+            and type(self.predecessor_wait_seconds) in (int, float)
+            and isfinite(self.pending_seconds)
+            and isfinite(self.predecessor_wait_seconds)
+            and 0 < self.predecessor_wait_seconds < self.pending_seconds
+            and type(self.max_pending) is int
+            and self.max_pending > 0
+            and type(self.max_bytes) is int
+            and self.max_bytes > 0
+        ):
+            raise ValueError("Invalid tracked capture limits")
+
+
 class HeadlessCameraProcessingWorker:
     """Own one explicit source-to-outbox lifecycle, independent of browser clients."""
 
@@ -92,8 +124,9 @@ class HeadlessCameraProcessingWorker:
         delivery_interval_seconds: float = 0.25,
         evidence_publisher: EvidencePublisherProtocol | None = None,
         partitioned_frame_delivery: bool = False,
+        tracked_capture: TrackedCapturePolicy | None = None,
         delivery_context_provider: Callable[
-            [CameraConfigurationBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
+            [CameraBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
             Awaitable[EventDeliveryContext | None],
         ]
         | None = None,
@@ -102,6 +135,13 @@ class HeadlessCameraProcessingWorker:
             raise ValueError("delivery interval must be positive")
         if not ppe_region_id:
             raise ValueError("PPE region ID must not be empty")
+        if tracked_capture is not None and (
+            partitioned_frame_delivery or delivery_context_provider is None
+        ):
+            raise ValueError("Tracked capture requires bound context and its own delivery route")
+        if tracked_capture is not None and not stream.config.is_live:
+            raise ValueError("Tracked capture requires the Backend LIVE admission route")
+        self._tracked_capture = tracked_capture
         self._stream = stream
         self._detector = detector
         self._pipeline = pipeline
@@ -120,7 +160,8 @@ class HeadlessCameraProcessingWorker:
         self._current_ppe_geometry_version: int | None = None
         self._temporal_gate = TemporalPpeCandidateGate()
         self._region_gates: dict[tuple[str, int], TemporalPpeCandidateGate] = {}
-        self._active_snapshot: CameraRegionConfiguration | CameraConfigurationBundle | None = None
+        self._last_tracked_sequence: int | None = None
+        self._active_snapshot: CameraRegionConfiguration | CameraBundle | None = None
         self._started = False
 
     async def run(self) -> ProcessingWorkerResult:
@@ -188,6 +229,24 @@ class HeadlessCameraProcessingWorker:
             if normal_source_completion and delivery_task is not None:
                 await delivery_task
                 await self._dispatcher.drain_once()
+                tracked = self._tracked_capture
+                if tracked is not None:
+                    try:
+                        while (
+                            remaining := await self._outbox.tracked_pending_remaining_seconds(
+                                tracked.credential
+                            )
+                        ) is not None:
+                            if remaining <= 0:
+                                raise TimeoutError
+                            async with asyncio.timeout(remaining):
+                                await self._dispatcher.drain_once()
+                                if await self._outbox.has_pending_tracked_frame(tracked.credential):
+                                    await asyncio.sleep(self._delivery_interval_seconds)
+                    except TimeoutError:
+                        raise TimeoutError(
+                            "Timed out waiting for final tracked frame confirmation"
+                        ) from None
 
         source_status = self._stream.snapshot()
         if source_status.state is StreamState.ERROR:
@@ -220,6 +279,7 @@ class HeadlessCameraProcessingWorker:
             self._current_session_id,
             self._current_ppe_geometry_version,
             self._active_snapshot,
+            self._last_tracked_sequence,
         )
         self._discard_frame = False
         self._durably_committed = False
@@ -236,6 +296,7 @@ class HeadlessCameraProcessingWorker:
                     self._current_session_id,
                     self._current_ppe_geometry_version,
                     self._active_snapshot,
+                    self._last_tracked_sequence,
                 ) = previous
 
     async def _process_frame_once(self, frame: FrameEnvelope) -> None:
@@ -248,9 +309,37 @@ class HeadlessCameraProcessingWorker:
         )
         if configuration is None:
             raise RuntimeError("active camera region configuration became unavailable")
+        if (
+            self._tracked_capture is not None
+            and self._active_snapshot is not None
+            and (
+                not isinstance(
+                    configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)
+                )
+                or not isinstance(
+                    self._active_snapshot,
+                    (CameraConfigurationBundle, CameraPolicyConfigurationBundle),
+                )
+                or (
+                    configuration.configuration_version,
+                    configuration.bundle_sha256,
+                    configuration.view_revision,
+                )
+                != (
+                    self._active_snapshot.configuration_version,
+                    self._active_snapshot.bundle_sha256,
+                    self._active_snapshot.view_revision,
+                )
+            )
+        ):
+            raise TrackedScopeTransitionRequired(
+                "Tracked source requires a trusted scope transition"
+            )
         delivery_context = None
         if self._delivery_context_provider is not None:
-            if not isinstance(configuration, CameraConfigurationBundle):
+            if not isinstance(
+                configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)
+            ):
                 raise RuntimeError("Bound delivery requires an immutable configuration bundle")
             delivery_context = await self._delivery_context_provider(
                 configuration, frame, "LIVE" if self._stream.config.is_live else "REPLAY"
@@ -268,7 +357,9 @@ class HeadlessCameraProcessingWorker:
             ),
             None,
         )
-        if ppe_region is None and not isinstance(configuration, CameraConfigurationBundle):
+        if ppe_region is None and not isinstance(
+            configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)
+        ):
             raise RuntimeError("required PPE region is absent from active camera configuration")
 
         batch = await self._detector.detect(frame)
@@ -280,6 +371,10 @@ class HeadlessCameraProcessingWorker:
             and await self._configurations.get_active_configuration(frame.camera_external_id)
             is not configuration
         ):
+            if self._tracked_capture is not None:
+                raise TrackedScopeTransitionRequired(
+                    "Tracked source requires a trusted scope transition"
+                )
             return
         if (
             self._current_session_id != batch.session_id
@@ -296,6 +391,8 @@ class HeadlessCameraProcessingWorker:
             "observe",
             self._pipeline.process if hasattr(self._pipeline, "process") else None,
         )
+        if self._tracked_capture is not None:
+            observe = getattr(self._pipeline, "observe_frame", None)
         if observe is None:
             raise TypeError("Pipeline must provide observe or process")
         event = observe(
@@ -322,7 +419,28 @@ class HeadlessCameraProcessingWorker:
                 observation for observation in event.observations if observation.type == "PPE"
             )
 
-        if isinstance(configuration, CameraConfigurationBundle):
+        if isinstance(configuration, CameraPolicyConfigurationBundle):
+            if (
+                self._tracked_capture is None
+                or not isinstance(event, ObservationFrame)
+                or not event.requires_tracked_wire
+            ):
+                raise ProcessingWorkerSourceError("PPE policy v2 requires tracked v1.7 capture")
+            if (
+                self._last_tracked_sequence is not None
+                and batch.sequence_number != self._last_tracked_sequence + 1
+            ):
+                self._temporal_gate = TemporalPpeCandidateGate()
+            self._last_tracked_sequence = batch.sequence_number
+            confirmed_candidates = self._temporal_gate.update(
+                stream_id=batch.stream_id,
+                session_id=batch.session_id,
+                observed_at=batch.captured_at,
+                active_track_ids=active_track_ids,
+                observations=ppe_observations,
+                camera_configuration_version=configuration.configuration_version,
+            )
+        elif isinstance(configuration, CameraConfigurationBundle):
             confirmed_candidates = []
             for region in configuration.regions:
                 key = (region.region_id, region.geometry_version)
@@ -354,6 +472,69 @@ class HeadlessCameraProcessingWorker:
                 active_track_ids=active_track_ids,
                 observations=ppe_observations,
             )
+        tracked = self._tracked_capture
+        if tracked is not None:
+            if (
+                not isinstance(event, ObservationFrame)
+                or not isinstance(
+                    configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)
+                )
+                or event.requires_tracked_wire
+                != isinstance(configuration, CameraPolicyConfigurationBundle)
+                or delivery_context is None
+                or delivery_context.camera_id != configuration.camera_id
+                or delivery_context.configuration_version != configuration.configuration_version
+                or delivery_context.view_revision != configuration.view_revision
+                or delivery_context.bundle_sha256 != configuration.bundle_sha256
+                or delivery_context.source_kind
+                != ("LIVE" if self._stream.config.is_live else "REPLAY")
+            ):
+                raise ProcessingWorkerSourceError(
+                    "Tracked capture context is unavailable or changed"
+                )
+
+            async def check_context() -> None:
+                if self._configuration_guard is not None:
+                    self._configuration_guard()
+                if (
+                    self._stream.config.is_live
+                    and await self._configurations.get_active_configuration(
+                        frame.camera_external_id
+                    )
+                    is not configuration
+                ):
+                    raise TrackedScopeTransitionRequired(
+                        "Tracked source requires a trusted scope transition"
+                    )
+
+            def on_staged(parts: int) -> None:
+                self._durably_committed = True
+                self._last_frame_enqueued = True
+                self._last_frame_event_count = parts
+
+            await stage_tracked_capture(
+                self._outbox,
+                event,
+                delivery_context,
+                tracked.credential,
+                site_id=tracked.site_id,
+                profile_sha256=tracked.profile_sha256,
+                confirmed_ppe_candidates=confirmed_candidates,
+                expires_at=min(
+                    datetime.now(UTC) + timedelta(seconds=tracked.pending_seconds),
+                    datetime.fromisoformat(tracked.credential.expires_at),
+                ),
+                max_pending=tracked.max_pending,
+                max_bytes=tracked.max_bytes,
+                source_frame=frame if self._evidence_publisher is not None else None,
+                evidence_publisher=self._evidence_publisher,
+                predecessor_wait_seconds=tracked.predecessor_wait_seconds,
+                poll_interval_seconds=self._delivery_interval_seconds,
+                before_enqueue=check_context,
+                on_staged=on_staged,
+            )
+            return
+
         if event is None:
             return
         delivery_events = events_for_delivery(
@@ -428,5 +609,6 @@ __all__ = [
     "HeadlessCameraProcessingWorker",
     "ProcessingWorkerResult",
     "ProcessingWorkerSourceError",
+    "TrackedCapturePolicy",
     "validate_frame_batch_binding",
 ]

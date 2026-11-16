@@ -12,7 +12,7 @@ Service mặc định ở `127.0.0.1:8000`; trong Compose, các container cùng 
 - `GET /health/ready`: 200 sau startup, `{"status":"ready","service":"smartsite-ai","scope":"api","inference_ready":false}`. Ngoài lifecycle trả 503 với `status: "not_ready"`.
 - `GET /v1/capabilities`: `api_version: "v1"`, `inference_ready: false`, `capabilities` gồm camera, detector, zone, identity, openai. Mỗi capability có `status: "not_configured"`, `provider` và `reason`. Các ghi chú không chứa secret hoặc model path.
 
-Không dùng API readiness để bật nghiệp vụ PPE/Zone. Contract models, canonical hash và Backend client đã có; camera scheduler/producer loop, inference và OpenAI adapter chưa có. OpenAPI development mô tả chính các HTTP endpoint hiện có.
+Không dùng API readiness để bật nghiệp vụ PPE/Zone. Headless/multi-camera worker và inference có lifecycle opt-in riêng; không tự mở nguồn hay tải model khi API khởi động. Readiness API không chứng minh worker, camera hoặc chất lượng model đã được nghiệm thu. OpenAPI development mô tả các HTTP endpoint hiện có.
 
 Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit schema trước, sau đó vendor bytes và cập nhật source SHA/checksums ở repo này. Không sửa schema vendored trước.
 
@@ -37,9 +37,9 @@ The poller's existing definitive generation ACK, freshness/expiry, serialized re
 in-flight snapshot checks and finite replay draining remain in force for v2. Delivery
 context source kind remains an explicit caller selection under the existing runtime
 boundary; the decoder does not prove a source is live. A receipt confirms configuration
-loading, not detection accuracy or authorization. This transport/storage contribution
-does not enable v2 manifests, emit tracked v1.7 events, activate a camera/model, or deploy
-the service. Those worker/encoder and operational gates follow separately.
+loading, not detection accuracy or authorization. Decoder/storage alone do not activate
+a producer. The explicit v2 manifest/worker and tracked v1.7 encoder are described below;
+camera/model activation, qualification and service deployment remain separate gates.
 
 ## Thiết kế dự kiến
 
@@ -80,5 +80,68 @@ remains the caller outcome. This is graceful ownership, not a hard shutdown time
 hung native provider still requires process-level recovery.
 
 ## Release
+
+### Explicit tracked Camera/Region PPE producer
+
+The multi-camera `smartsite-ai-camera-runtime` manifest has an optional per-camera
+`trackedV17` object. This selects policy-bundle v2, tracked event v1.7 and the tracked
+part/result endpoints together. Defaults and the existing `partitionedFrameDelivery`
+and `generationBoundEventDelivery` profiles remain unchanged. The new option cannot
+be combined with either legacy delivery flag.
+
+```json
+{
+  "trackedV17": {
+    "siteId": "00000000-0000-4000-8000-000000000077",
+    "profileSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "pendingSeconds": 30,
+    "predecessorWaitSeconds": 1,
+    "maxPending": 2,
+    "maxBytes": 100000
+  }
+}
+```
+
+This is a synthetic fragment, not a deployable or qualified model profile. A real
+entry additionally requires `live: true`, private absolute `evidenceDir` and
+`generationCredentialFile` paths, the existing source/outbox fields, and a Backend
+profile/Camera allowlist that matches the approved producer. The profile digest must
+come from release qualification, not be invented to bypass a Backend rejection.
+Generation/session claims, installed-bundle identity, ACK freshness and source
+cancellation remain enforced. No model, camera or inference starts on import.
+
+A tracked generation is pinned to one immutable bundle/view and producer scope.
+Its poller refuses to install or acknowledge a changed bundle, invalidates its
+cached delivery context and reports `TrackedScopeTransitionRequired`. The worker
+and pipeline also refuse cross-scope continuation, retirement or model/session/
+dimension changes. Receipt refresh for the identical bundle remains valid. A
+trusted Backend source-transition owner must finish the prior scope and authorize
+the replacement source before new settings can be used. Automatic source handoff
+for live configuration changes is a separate integration gate still open; do not
+reset tracker IDs or re-label old captures to bypass it. A saved policy is not
+proof that the stopped worker applied that policy.
+
+The producer applies Camera PPE outside all configured polygons. Inside a polygon,
+the issued Region INHERIT/EXPLICIT/DISABLED policy applies; DISABLED does not fall
+back to Camera PPE. Temporal confirmation is bound to the Region geometry or Camera
+configuration and cannot borrow a streak across those boundaries. Tracked delivery
+also requires the candidate's exact session and captured instant; old manually
+constructed legacy candidates are not valid tracked confirmations.
+
+Each complete frame's original wire bytes and expected subject references enter
+SQLite atomically. A `RAW_STORED` receipt confirms storage only. A continuation can
+use the prior frame only after its exact `ADMITTED_TRACKED_FRAME` result is checked.
+Unresolved/expired work does not become a predecessor or a successful source drain.
+Final-source draining uses the earliest outstanding frame's original stored expiry,
+not a fresh lease and not the shorter predecessor-polling timeout.
+Evidence keeps the original frame/part identity and JPEG SHA. Empty captured frames
+may retain lifecycle data; failed inference is not an empty safe scene.
+
+This tracked worker mode requires LIVE admission. Existing legacy REPLAY handling
+is preserved; Backend review-only replay receipts must not be treated as operational
+admitted seals or real safety notifications. Backend rollout must coordinate its
+explicit v1.7 profile and forward schema fence; a v1.6 runtime cannot be used as a
+mixed-version canary against a widened v1.7 schema. Local unit/mock transport proofs
+do not qualify a model, physical camera, production rollout or end-to-end alert flow.
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.

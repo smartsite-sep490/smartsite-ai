@@ -12,6 +12,7 @@ from uuid import UUID
 
 from smartsite_ai.core.region_configuration_store import RegionConfigurationStore
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
+from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile, experimental_ppe_profile
 from smartsite_ai.inference.protocol import DetectorProtocol
@@ -29,7 +30,7 @@ from smartsite_ai.integrations.worker_generation import (
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
-from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker
+from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, TrackedCapturePolicy
 from smartsite_ai.runtime.manifest import BoundCamera, BoundManifest, CameraRuntimeError
 from smartsite_ai.runtime.supervisor import (
     CameraOutcome,
@@ -57,6 +58,7 @@ async def preflight_manifest(
     bound: BoundManifest,
     *,
     configuration_client_factory: ConfigurationClientFactory,
+    policy_v2_client_factory: ConfigurationClientFactory | None = None,
 ) -> tuple[tuple[CameraOutcome, ...] | None, tuple[CameraPlan, ...]]:
     """Confirm every camera region before a model or source is opened."""
 
@@ -64,7 +66,11 @@ async def preflight_manifest(
     identities = [(camera.stream_id, camera.camera_external_id) for camera in bound.cameras]
     try:
         for camera in bound.cameras:
-            client = configuration_client_factory()
+            tracked = camera.entry.tracked_v17 is not None
+            factory = policy_v2_client_factory if tracked else configuration_client_factory
+            if factory is None:
+                raise CameraRuntimeError("Tracked v1.7 requires an explicit v2 client")
+            client = factory()
             try:
                 generation = None
                 if camera.entry.generation_credential_file is not None:
@@ -78,7 +84,7 @@ async def preflight_manifest(
                         UUID(generation.worker_generation_id),
                         UUID(generation.stream_session_id),
                     )
-                store = RegionConfigurationStore()
+                store = RegionConfigurationStore(allow_policy_v2=tracked)
                 poller = CameraConfigurationPoller(
                     client=client,
                     store=store,
@@ -87,10 +93,17 @@ async def preflight_manifest(
                     poll_interval_seconds=bound.manifest.poll_interval_seconds,
                     stale_after_seconds=bound.manifest.stale_after_seconds,
                     require_bundle=generation is not None
-                    or camera.entry.partitioned_frame_delivery,
+                    or camera.entry.partitioned_frame_delivery
+                    or tracked,
+                    pin_bundle_scope=tracked,
                 )
                 await poller.refresh()
                 poller.ensure_fresh()
+                if tracked and not isinstance(
+                    await store.get_bundle(camera.camera_external_id),
+                    CameraPolicyConfigurationBundle,
+                ):
+                    raise CameraRuntimeError("Tracked v1.7 requires a v2 configuration bundle")
                 await _require_ppe_region(
                     store, camera.camera_external_id, camera.entry.ppe_region_id
                 )
@@ -143,12 +156,33 @@ def assemble_sessions(
     sessions: list[CameraSession] = []
     for plan in plans:
         camera = plan.bound
+        tracked_options = camera.entry.tracked_v17
+        tracked_capture = None
+        if tracked_options is not None:
+            if (
+                plan.generation is None
+                or camera.evidence_dir is None
+                or not camera.source_config.is_live
+            ):
+                raise CameraRuntimeError(
+                    "Tracked v1.7 requires a live generation and evidence storage"
+                )
+            tracked_capture = TrackedCapturePolicy(
+                credential=plan.generation,
+                site_id=str(tracked_options.site_id),
+                profile_sha256=tracked_options.profile_sha256,
+                pending_seconds=tracked_options.pending_seconds,
+                predecessor_wait_seconds=tracked_options.predecessor_wait_seconds,
+                max_pending=tracked_options.max_pending,
+                max_bytes=tracked_options.max_bytes,
+            )
         evidence_publisher = None
         if camera.evidence_dir is not None:
             evidence_publisher = LocalEvidencePublisher(
                 root_dir=camera.evidence_dir,
                 max_jpeg_bytes=evidence_max_bytes,
-                bind_content_hash=camera.entry.partitioned_frame_delivery,
+                bind_content_hash=camera.entry.partitioned_frame_delivery
+                or tracked_capture is not None,
             )
         pipeline = Mf05Mf06Pipeline(
             tracker=IoUPersonTracker(),
@@ -156,6 +190,7 @@ def assemble_sessions(
             zones=RestrictedZonePipeline(),
             ppe_region_id=str(camera.entry.ppe_region_id),
             schema_version=observation_schema_version,
+            tracked_v17=tracked_capture is not None,
         )
         outbox = SqliteEventOutbox(camera.outbox)
         source = source_factory(camera.source_config)
@@ -174,11 +209,15 @@ def assemble_sessions(
                 outbox,
                 backend_client_factory(),
                 generation_credential=plan.generation
-                if camera.entry.generation_bound_event_delivery
+                if tracked_capture is not None or camera.entry.generation_bound_event_delivery
+                else None,
+                tracked_batch_limit=tracked_capture.max_pending
+                if tracked_capture is not None
                 else None,
             ),
+            tracked_capture=tracked_capture,
             delivery_context_provider=plan.poller.snapshot_delivery_context
-            if camera.entry.generation_bound_event_delivery
+            if tracked_capture is not None or camera.entry.generation_bound_event_delivery
             else None,
             configuration_guard=plan.poller.ensure_fresh,
             delivery_interval_seconds=delivery_interval_seconds,
@@ -213,7 +252,7 @@ async def _require_ppe_region(
     configuration = await store.get_active_configuration(camera_external_id)
     if configuration is None:
         raise CameraRuntimeError("Backend returned no active camera region configuration")
-    if isinstance(configuration, CameraConfigurationBundle):
+    if isinstance(configuration, (CameraConfigurationBundle, CameraPolicyConfigurationBundle)):
         return
     expected = str(ppe_region_id).casefold()
     if not any(region.region_id.casefold() == expected for region in configuration.regions):

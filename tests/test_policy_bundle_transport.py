@@ -101,3 +101,54 @@ async def test_v2_poll_installs_bundle_and_rejects_etag_from_different_payload()
         snapshot = await store.get_active_configuration(value["cameraExternalId"])
         assert snapshot is not None
         assert snapshot.bundle_sha256 == digest
+
+
+@pytest.mark.anyio
+async def test_tracked_scope_pinning_never_installs_or_acknowledges_a_changed_bundle():
+    import copy
+    from unittest.mock import AsyncMock
+
+    from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
+    from smartsite_ai.integrations.backend_configuration_client import ConfigurationBundleResult
+    from smartsite_ai.integrations.configuration_poller import ConfigurationStaleError
+
+    value = content()
+    original = CameraPolicyConfigurationBundle.from_wire_bytes(packet(value))
+    changed_value = copy.deepcopy(value)
+    changed_value["configurationVersion"] += 1
+    changed_value["cameraPpePolicy"] = {"mode": "DISABLED", "reason": "Approved later policy"}
+    changed = CameraPolicyConfigurationBundle.from_wire_bytes(packet(changed_value))
+    client = AsyncMock()
+    client.fetch_bundle.side_effect = [
+        ConfigurationBundleResult(original, '"first"'),
+        ConfigurationBundleResult(changed, '"second"'),
+        ConfigurationBundleResult(changed, '"second"'),
+    ]
+    store = RegionConfigurationStore(allow_policy_v2=True)
+    poller = CameraConfigurationPoller(
+        client=client,
+        store=store,
+        camera_id=UUID(value["cameraId"]),
+        camera_external_id=value["cameraExternalId"],
+        require_bundle=True,
+        pin_bundle_scope=True,
+    )
+    binding = WorkerGenerationCredential.model_validate(
+        {**credential_payload(), "cameraId": value["cameraId"]}
+    )
+    source = GenerationBoundSource(FakeSource(), binding, clock=lambda: NOW)
+    poller.enable_generation_ack(source)
+    await source.connect()
+    await source.read_frame()
+    await poller.refresh()
+    await poller.acknowledge_loaded()
+    assert client.acknowledge_configuration.await_count == 1
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="scope transition") as error:
+            await poller.refresh()
+        assert type(error.value).__name__ == "TrackedScopeTransitionRequired"
+        assert await store.get_bundle(value["cameraExternalId"]) is original
+        with pytest.raises(ConfigurationStaleError):
+            poller.ensure_fresh()
+    assert client.acknowledge_configuration.await_count == 1
+    await source.close()

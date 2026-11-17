@@ -343,3 +343,31 @@ def test_cli_atomically_writes_incomplete_report_and_closes_runner_on_failure(
     assert "detector failed" in report["failure"]["message"]
     assert FakeRunner.instances[0].closed == 1
     assert not list(tmp_path.glob(".benchmark.json.*.tmp"))
+
+
+def test_cli_benchmarks_expanded_ppe_only_with_explicit_matching_profile(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from smartsite_ai.inference.ppe_profiles import UNIFIED_PPE_15_PROFILE
+
+    class ExpandedRunner(FakeRunner):
+        fail = False
+
+        @property
+        def provider_metadata(self):
+            return {**super().provider_metadata, "classMap": expanded_map}
+
+    expanded_map = {str(class_id): name for class_id, name in UNIFIED_PPE_15_PROFILE.class_map}
+    video, spec = _benchmark_files(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["classMap"] = expanded_map
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    services = replace(_services(), runner_factory=ExpandedRunner)
+
+    assert run(_arguments(video, spec, tmp_path / "default.json"), services=services) == 1
+    output = tmp_path / "expanded.json"
+    args = _arguments(video, spec, output)
+    assert run([*args, "--experimental-model-profile", "unified-ppe-15"], services=services) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["artifact"]["experimentalModelProfile"] == "unified-ppe-15"
+    assert report["status"] == "COMPLETE"

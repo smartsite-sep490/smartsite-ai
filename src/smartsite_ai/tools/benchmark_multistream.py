@@ -131,6 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--artifact-spec", type=Path, required=True)
+    parser.add_argument(
+        "--experimental-model-profile",
+        choices=("native-ppe-10", "unified-ppe-15"),
+        help="validate the artifact against this explicit experimental PPE profile",
+    )
     parser.add_argument("--output", type=Path, required=True, help="new atomic JSON report path")
     parser.add_argument(
         "--stream-counts",
@@ -276,6 +281,7 @@ def _execute_complete(
         detector, runner, artifact, _class_map = load_yolo11_detector(
             artifact_spec_path,
             runner_factory=services.runner_factory,
+            experimental_profile=args.experimental_model_profile,
         )
         try:
             device_index = resolve_torch_device(torch_module, artifact.device)
@@ -366,6 +372,7 @@ def _execute_complete(
             "checkpointPath": str(artifact.resolved_path),
             "checkpointSha256": artifact.actual_sha256,
             "artifactId": artifact.artifact_id,
+            "experimentalModelProfile": args.experimental_model_profile,
             "version": artifact.version,
             "modelFamily": artifact.model_family,
             "device": artifact.device,

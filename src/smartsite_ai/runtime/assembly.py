@@ -17,6 +17,8 @@ from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile, experimental_ppe_profile
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
+from smartsite_ai.ingestion.queue import PreviewFrameQueue
+from smartsite_ai.ingestion.status import StreamState
 from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
@@ -32,6 +34,7 @@ from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, TrackedCapturePolicy
 from smartsite_ai.runtime.manifest import BoundCamera, BoundManifest, CameraRuntimeError
+from smartsite_ai.runtime.media_preview import CameraPreviewObserver
 from smartsite_ai.runtime.supervisor import (
     CameraOutcome,
     CameraSession,
@@ -141,11 +144,16 @@ def assemble_sessions(
     delivery_interval_seconds: float,
     experimental_model_profile: ExperimentalPpeProfile | None = None,
     observation_schema_version: Literal["1.0.0", "1.1.0"] = "1.0.0",
+    preview_observers: dict[str, CameraPreviewObserver] | None = None,
 ) -> tuple[CameraSession, ...]:
     """Create isolated tracker, poller, outbox, and evidence state per camera."""
 
     if not 1 <= len(plans) <= 3:
         raise CameraRuntimeError("runtime requires 1 to 3 cameras")
+    if preview_observers is not None and (
+        not isinstance(preview_observers, dict) or preview_observers
+    ):
+        raise CameraRuntimeError("Preview registry must be an empty per-runtime dictionary")
     if experimental_model_profile not in (None, "native-ppe-10", "unified-ppe-15"):
         raise CameraRuntimeError("unsupported experimental PPE profile")
     if observation_schema_version not in ("1.0.0", "1.1.0"):
@@ -198,8 +206,21 @@ def assemble_sessions(
             plan.generation.ensure_current(datetime.now(UTC))
             source = GenerationBoundSource(source, plan.generation)
             plan.poller.enable_generation_ack(source)
+        preview_queue = PreviewFrameQueue() if preview_observers is not None else None
+        stream = StreamWorker(
+            config=camera.source_config, source=source, preview_frames=preview_queue
+        )
+        preview = None
+        if preview_queue is not None:
+            preview = CameraPreviewObserver(
+                camera.camera_external_id,
+                preview_queue,
+                source_kind="LIVE" if camera.source_config.is_live else "REPLAY",
+                is_streaming=lambda stream=stream: stream.state == StreamState.STREAMING,
+            )
+            preview_observers[camera.camera_external_id] = preview
         worker = HeadlessCameraProcessingWorker(
-            stream=StreamWorker(config=camera.source_config, source=source),
+            stream=stream,
             detector=detector,
             pipeline=pipeline,
             ppe_region_id=str(camera.entry.ppe_region_id),
@@ -230,6 +251,7 @@ def assemble_sessions(
                 camera_external_id=camera.camera_external_id,
                 worker=worker,
                 poller=plan.poller,
+                preview=preview,
             )
         )
     return tuple(sessions)

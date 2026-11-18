@@ -155,10 +155,15 @@ class PreviewFrameQueue:
 
     def __init__(self) -> None:
         self._current = BoundedFrameQueue(maxsize=1)
+        self._revision = 0
         self._closed = False
         self._enqueued_count = 0
         self._dequeued_count = 0
         self._dropped_count = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
 
     @property
     def is_closed(self) -> bool:
@@ -186,6 +191,7 @@ class PreviewFrameQueue:
         return self._current.empty()
 
     def clear(self) -> None:
+        self._revision += 1
         previous = self._current
         if not self._closed:
             self._current = BoundedFrameQueue(maxsize=1)

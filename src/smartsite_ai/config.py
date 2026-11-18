@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     backend_ingestion_url: str | None = None
     backend_service_token: SecretStr | None = None
     identity_service_token: SecretStr | None = None
+    preview_service_token: SecretStr | None = None
     # Explicit opt-in only. The public InsightFace model pack is restricted to
     # non-commercial research; application startup never downloads a model.
     identity_demo_mode: bool = False

@@ -23,12 +23,21 @@ class _Poller(Protocol):
     async def run(self, stop_event: asyncio.Event) -> None: ...
 
 
+class _Preview(Protocol):
+    async def start(self) -> None: ...
+
+    async def stop(self) -> bool: ...
+
+    async def wait_for_release(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class CameraSession:
     stream_id: str
     camera_external_id: str
     worker: _Worker
     poller: _Poller
+    preview: _Preview | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +112,8 @@ async def run_camera_session(session: CameraSession) -> ProcessingWorkerResult:
         name=f"poller-{session.stream_id}",
     )
     try:
+        if session.preview is not None:
+            await session.preview.start()
         done, _pending = await asyncio.wait(
             (worker_task, poller_task),
             return_when=asyncio.FIRST_COMPLETED,
@@ -122,7 +133,16 @@ async def run_camera_session(session: CameraSession) -> ProcessingWorkerResult:
         for task in (worker_task, poller_task):
             if not task.done():
                 task.cancel()
-        await _finish_cleanup(asyncio.gather(worker_task, poller_task, return_exceptions=True))
+        try:
+            await _finish_cleanup(asyncio.gather(worker_task, poller_task, return_exceptions=True))
+        finally:
+            if session.preview is not None:
+
+                async def drain_preview() -> None:
+                    if not await session.preview.stop():
+                        await session.preview.wait_for_release()
+
+                await _finish_cleanup(drain_preview())
 
 
 async def supervise_sessions(sessions: Sequence[CameraSession]) -> tuple[CameraOutcome, ...]:

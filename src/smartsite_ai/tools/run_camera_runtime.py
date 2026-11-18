@@ -30,6 +30,8 @@ from smartsite_ai.runtime.manifest import (
     bind_manifest,
     load_manifest_bytes,
 )
+from smartsite_ai.runtime.media_host import run_with_camera_preview
+from smartsite_ai.runtime.media_preview import CameraPreviewObserver
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
@@ -51,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--generation-credential-file", type=Path)
     parser.add_argument("--expected-camera-id", type=UUID)
     parser.add_argument("--expected-outbox", type=Path)
+    parser.add_argument(
+        "--preview-port",
+        type=int,
+        help="explicit raw-preview HTTP port; requires SMARTSITE_AI_PREVIEW_SERVICE_TOKEN",
+    )
     return parser
 
 
@@ -61,12 +68,19 @@ async def run_manifest(
     generation_credential_file: Path | None = None,
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
+    preview_port: int | None = None,
 ) -> int:
     supervised = any(
         value is not None
         for value in (generation_credential_file, expected_camera_id, expected_outbox)
     )
     runtime_settings = settings or (Settings(_env_file=None) if supervised else Settings())
+    if preview_port is not None and (
+        type(preview_port) is not int or not 1 <= preview_port <= 65535
+    ):
+        raise CameraRuntimeError("Preview port must be between 1 and 65535")
+    if preview_port is not None and runtime_settings.preview_service_token is None:
+        raise CameraRuntimeError("Preview service token must be configured")
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())
@@ -77,6 +91,7 @@ async def run_manifest(
     plans: list[CameraPlan] = []
     backend_clients: list[BackendClient] = []
     runner: UltralyticsYoloRunner | None = None
+    observers: dict[str, CameraPreviewObserver] = {}
 
     async def preflight() -> tuple[object, ...] | None:
         failure, prepared = await preflight_manifest(
@@ -130,6 +145,7 @@ async def run_manifest(
             delivery_interval_seconds=bound.manifest.delivery_interval_seconds,
             experimental_model_profile=bound.manifest.experimental_model_profile,
             observation_schema_version=bound.manifest.observation_schema_version,
+            preview_observers=observers if preview_port is not None else None,
         )
 
     async def close_clients() -> None:
@@ -138,14 +154,22 @@ async def run_manifest(
         await close_configuration_clients(plans)
 
     try:
-        report = await execute_runtime(
-            RuntimePlan(
-                preflight=preflight,
-                open_model=open_model,
-                close_model=close_model,
-                build_sessions=build_sessions,
-            )
+        plan = RuntimePlan(
+            preflight=preflight,
+            open_model=open_model,
+            close_model=close_model,
+            build_sessions=build_sessions,
         )
+        if preview_port is None:
+            report = await execute_runtime(plan)
+        else:
+            report = await run_with_camera_preview(
+                plan,
+                observers,
+                runtime_settings.preview_service_token,
+                host=str(runtime_settings.host),
+                port=preview_port,
+            )
     finally:
         await _finish_cleanup(close_clients())
 
@@ -155,6 +179,7 @@ async def run_manifest(
 
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    preview_options = {} if args.preview_port is None else {"preview_port": args.preview_port}
     try:
         if any(
             value is not None
@@ -170,9 +195,10 @@ def run(argv: list[str] | None = None) -> int:
                     generation_credential_file=args.generation_credential_file,
                     expected_camera_id=args.expected_camera_id,
                     expected_outbox=args.expected_outbox,
+                    **preview_options,
                 )
             )
-        return asyncio.run(run_manifest(args.manifest))
+        return asyncio.run(run_manifest(args.manifest, **preview_options))
     except KeyboardInterrupt:
         return 130
     except CameraRuntimeError as exc:

@@ -146,18 +146,42 @@ do not qualify a model, physical camera, production rollout or end-to-end alert 
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.
 
-## Capture preview lane (ingestion foundation)
+## Shared capture preview and setup images (explicit runtime opt-in)
 
-An explicitly assembled `StreamWorker` may receive `preview_frames=PreviewFrameQueue()`.
-The capture owner offers each identity/session-validated immutable frame before inference sampling,
-without awaiting either consumer. A slow preview reader drops its own stale frame; it cannot steal
-inference frames or cause another source connection. Closing the preview queue does not stop ingestion.
-Source release clears queued preview pixels; terminal completion and explicit stop also close the queue
-and wake pending readers. Source invalidation fences in-flight queue getters as well. Previously delivered/encoded images still require observer-side freshness
-and session checks: clearing a queue is not revocation of bytes already handed to a consumer.
+`smartsite-ai-camera-runtime --manifest /absolute/private/runtime.json --preview-port 8123`
+opts into the media host. Without `--preview-port`, the runtime keeps its previous inference-only
+construction. Configure `SMARTSITE_AI_PREVIEW_SERVICE_TOKEN` server-side to match the Backend's
+`SMARTSITE_AI_SERVICE_TOKEN`. The token is never a browser credential or a CLI argument.
+The host uses `SMARTSITE_AI_HOST` (default127.0.0.1). Its socket is bound before runtime preflight
+or model/camera activation, so a port conflict cannot leave a second camera owner running.
 
-This is not a monitoring API or an enabled runtime profile. The normal camera assembly does not yet
-mount an encoder/media route for this lane. Keep the `REGION_CONFIGURATION` image endpoint's separate
-purpose; do not start its capture-only runtime beside an inference owner for the same physical camera.
-Backend-authenticated preview routing, freshness of encoded images and browser/camera acceptance
-remain integration work. Existing inference-only construction and durable event delivery are unchanged.
+Configure the Backend's existing `SMARTSITE_AI_PREVIEW_SOURCES` allowlist for the camera's external
+ID and this host's origin. Loopback is appropriate only when reachable from the Backend host;
+remote operation still requires reviewed TLS/network routing and secret management. This source
+addition does not configure a tunnel, change the website, or deploy either service.
+
+The opt-in assembly gives each StreamWorker a `PreviewFrameQueue()` and one CameraPreviewObserver.
+Validated immutable frames enter this single-slot lane before inference sampling. A slow encoder
+or viewer cannot steal inference frames, block capture on a consumer, or open another camera.
+Source release replaces the preview generation; stopped/failed streams invalidate cached images.
+An encoding that completes after invalidation is discarded. Runtime completion/cancellation drains
+owned preview encoding after worker/poller cleanup. Previously delivered pixels remain client-held
+bytes; the API and Backend recheck freshness for each new response.
+
+The observer-only routes use the server Bearer token and accept exactly one cameraExternalId query:
+
+- `/v1/realtime/video-stream`: existing Backend-compatible9-key CameraMediaFrame NDJSON, at most640px
+  per side and180000characters per image data URL. Images contain original session/sequence/capture
+  metadata and no detections, Worker identity or business conclusion. The API reserves at most2
+  viewers per camera/4per runtime; response lifetime includes stalled ASGI sends and is bounded by
+  600seconds plus at most50ms for a final empty body. Browser disconnect releases a viewer slot,
+  not the capture owner.
+- `/v1/realtime/configuration-image`: the same capture observer provides a fresh image with purpose
+  REGION_CONFIGURATION, explicit LIVE/REPLAY source kind and SHA256 of the exact JPEG bytes. It
+  does not start the separate capture-only configuration runtime. Manager/Site authorization and
+  version/reference persistence remain in the Backend's existing configuration-image flow.
+
+Encoding is off the event loop, at most10encodes/second per camera, with at most one pending frame.
+No available/current frame produces503; a request never activates a camera/model. Raw display pixels
+are not retained evidence and are not an AI overlay. The analyzed-frame `/preview/latest` surface,
+physical camera/browser acceptance, independent detection quality and rollout remain separate gates.

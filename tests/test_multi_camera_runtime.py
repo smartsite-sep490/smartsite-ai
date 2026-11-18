@@ -37,6 +37,7 @@ from smartsite_ai.runtime.supervisor import (
     execute_runtime,
     exit_code,
     report_payload,
+    run_camera_session,
     startup_outcomes,
     supervise_sessions,
 )
@@ -788,9 +789,13 @@ async def test_supervised_cameras_do_not_share_pipeline_or_outbox_state(tmp_path
     assert isinstance(detector, SerializingDetector)
 
 
-@pytest.mark.parametrize("profile", [None, "native-ppe-10", "unified-ppe-15"])
+@pytest.mark.parametrize(
+    "profile,with_preview", [(None, False), ("native-ppe-10", False), ("unified-ppe-15", True)]
+)
 def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
-    tmp_path: Path, profile: Literal["native-ppe-10", "unified-ppe-15"] | None
+    tmp_path: Path,
+    profile: Literal["native-ppe-10", "unified-ppe-15"] | None,
+    with_preview: bool,
 ) -> None:
     from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
     from smartsite_ai.runtime.assembly import CameraPlan
@@ -853,6 +858,7 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
     def source_factory(config: StreamConfig) -> object:
         return SimpleNamespace(config=config)
 
+    previews = {} if with_preview else None
     sessions = assemble_sessions(
         plans,
         detector,  # type: ignore[arg-type]
@@ -862,7 +868,14 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
         delivery_interval_seconds=0.25,
         experimental_model_profile=profile,
         observation_schema_version="1.1.0" if profile else "1.0.0",
+        preview_observers=previews,
     )
+    if previews is not None:
+        assert set(previews) == {"CAM-A", "CAM-B"}
+        assert all(session.preview is previews[session.camera_external_id] for session in sessions)
+        assert all(observer.state == "IDLE" for observer in previews.values())
+    else:
+        assert all(session.preview is None for session in sessions)
     workers = [session.worker for session in sessions]
     assert workers[0]._detector is detector  # type: ignore[attr-defined]
     assert workers[1]._detector is detector  # type: ignore[attr-defined]
@@ -903,6 +916,53 @@ def test_assemble_sessions_keeps_one_detector_and_distinct_camera_state(
         "unified-ppe-15": {("GLOVES", "MISSING"), ("SAFETY_VEST", "MISSING")},
     }
     assert ppe_states == expected[profile]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_camera_session_drains_its_preview_on_completion_and_cancellation(
+    cancel: bool,
+) -> None:
+    started = asyncio.Event()
+
+    class Preview:
+        running = False
+        drained = False
+
+        async def start(self) -> None:
+            self.running = True
+
+        async def stop(self) -> bool:
+            self.running = False
+            return False
+
+        async def wait_for_release(self) -> None:
+            self.drained = True
+
+    preview = Preview()
+
+    class Worker:
+        async def run(self) -> ProcessingWorkerResult:
+            started.set()
+            assert preview.running
+            if cancel:
+                await asyncio.Event().wait()
+            return _clean_result()
+
+    task = asyncio.create_task(
+        run_camera_session(
+            CameraSession("preview", "CAM-A", Worker(), _StopPoller(), preview=preview)
+        )
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    if cancel:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        assert (await task).frames_processed == 2
+    assert preview.drained
+    assert not preview.running
 
 
 def test_third_camera_id_constant_is_distinct() -> None:

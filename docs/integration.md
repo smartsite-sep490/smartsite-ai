@@ -145,3 +145,19 @@ mixed-version canary against a widened v1.7 schema. Local unit/mock transport pr
 do not qualify a model, physical camera, production rollout or end-to-end alert flow.
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.
+
+## Capture preview lane (ingestion foundation)
+
+An explicitly assembled `StreamWorker` may receive `preview_frames=PreviewFrameQueue()`.
+The capture owner offers each identity/session-validated immutable frame before inference sampling,
+without awaiting either consumer. A slow preview reader drops its own stale frame; it cannot steal
+inference frames or cause another source connection. Closing the preview queue does not stop ingestion.
+Source release clears queued preview pixels; terminal completion and explicit stop also close the queue
+and wake pending readers. Source invalidation fences in-flight queue getters as well. Previously delivered/encoded images still require observer-side freshness
+and session checks: clearing a queue is not revocation of bytes already handed to a consumer.
+
+This is not a monitoring API or an enabled runtime profile. The normal camera assembly does not yet
+mount an encoder/media route for this lane. Keep the `REGION_CONFIGURATION` image endpoint's separate
+purpose; do not start its capture-only runtime beside an inference owner for the same physical camera.
+Backend-authenticated preview routing, freshness of encoded images and browser/camera acceptance
+remain integration work. Existing inference-only construction and durable event delivery are unchanged.

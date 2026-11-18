@@ -85,10 +85,12 @@ async def test_preview_keeps_latest_frame_without_waiting_for_inference() -> Non
         assert preview.dropped_count == 3
         assert await preview.get() is frames[-1]
         assert await worker.get_frame() is frames[0]
+        assert worker.owns_current_frame(frames[0])
         assert worker.sampled_out_frames == 3
     finally:
         await worker.stop()
     assert source.close_calls == 1
+    assert not worker.owns_current_frame(frames[0])
 
 
 @pytest.mark.anyio

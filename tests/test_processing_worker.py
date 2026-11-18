@@ -138,8 +138,10 @@ class RecordingPipeline:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("broken_preview", [False, True])
 async def test_worker_runs_without_browser_and_delivers_deterministic_events(
     tmp_path: Path,
+    broken_preview: bool,
 ) -> None:
     requests: list[httpx.Request] = []
 
@@ -155,6 +157,13 @@ async def test_worker_runs_without_browser_and_delivers_deterministic_events(
     await store.apply(_configuration())
     stream = FakeStream([_frame(0), _frame(1)])
     pipeline = RecordingPipeline()
+    analyzed = []
+
+    def preview(item):
+        analyzed.append(item)
+        if broken_preview:
+            raise RuntimeError("SYNTHETIC_PREVIEW_FAILURE")
+
     outbox = SqliteEventOutbox((tmp_path / "outbox.sqlite3").resolve())
     async with BackendClient(
         "http://backend:3000",
@@ -170,6 +179,7 @@ async def test_worker_runs_without_browser_and_delivers_deterministic_events(
             outbox=outbox,
             dispatcher=OutboxDispatcher(outbox, backend),
             delivery_interval_seconds=0.01,
+            analysis_observer=preview,
         )
         result = await worker.run()
 
@@ -181,6 +191,13 @@ async def test_worker_runs_without_browser_and_delivers_deterministic_events(
     assert result.outbox.pending == 0
     assert len(requests) == 2
     assert len(set(pipeline.event_ids)) == 2
+    assert len(analyzed) == (1 if broken_preview else 2)
+    for index, item in enumerate(analyzed):
+        assert item.frame.sequence_number == index
+        assert item.observation.event_id == pipeline.event_ids[index]
+        assert item.observation.captured_at == item.frame.captured_at_iso
+        assert item.configuration.camera_external_id == item.frame.camera_external_id
+        assert item.confirmed_ppe_items == frozenset()
 
 
 @pytest.mark.anyio

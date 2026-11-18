@@ -404,6 +404,18 @@ class StreamWorker:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""
         return await self.queue.get()
 
+    def owns_current_frame(self, frame: FrameEnvelope) -> bool:
+        """Check source lineage for observer publication; this is not Worker identity."""
+        return (
+            self.state == StreamState.STREAMING
+            and not self._first_frame_in_connection
+            and frame.stream_id == self.config.stream_id
+            and frame.camera_external_id == self.config.camera_external_id
+            and frame.session_id == self._current_session_id
+            and self._last_sequence_number is not None
+            and frame.sequence_number <= self._last_sequence_number
+        )
+
     def snapshot(self) -> StreamStatus:
         """Return an immutable status snapshot of this stream."""
         metrics = StreamMetrics(

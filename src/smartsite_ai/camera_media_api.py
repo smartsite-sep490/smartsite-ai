@@ -101,6 +101,15 @@ def camera_media_router(
             fail(503, "CONFIGURATION_IMAGE_UNAVAILABLE")
         return JSONResponse(payload, headers=_HEADERS)
 
+    @router.get("/v1/realtime/preview/latest", include_in_schema=False)
+    async def analysis_preview(
+        observer: Annotated[CameraPreviewObserver, Depends(resolve)],
+    ) -> JSONResponse:
+        frame = await observer.analysis.latest() if observer.analysis is not None else None
+        if frame is None:
+            fail(503, "ANALYZED_PREVIEW_UNAVAILABLE")
+        return JSONResponse({"sourceKind": observer.source_kind, "frame": frame}, headers=_HEADERS)
+
     @router.get("/v1/realtime/video-stream", include_in_schema=False)
     async def video_stream(
         observer: Annotated[CameraPreviewObserver, Depends(reserve)],

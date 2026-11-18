@@ -29,10 +29,12 @@ from smartsite_ai.integrations.worker_generation import (
     WorkerGenerationCredential,
     load_worker_generation,
 )
+from smartsite_ai.pipelines.analysis_frame import AnalysisFrame
 from smartsite_ai.pipelines.mf05_mf06 import Mf05Mf06Pipeline
 from smartsite_ai.pipelines.ppe import PpePipeline
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
 from smartsite_ai.processing_worker import HeadlessCameraProcessingWorker, TrackedCapturePolicy
+from smartsite_ai.runtime.analysis_preview import AnalysisPreviewObserver
 from smartsite_ai.runtime.manifest import BoundCamera, BoundManifest, CameraRuntimeError
 from smartsite_ai.runtime.media_preview import CameraPreviewObserver
 from smartsite_ai.runtime.supervisor import (
@@ -211,12 +213,26 @@ def assemble_sessions(
             config=camera.source_config, source=source, preview_frames=preview_queue
         )
         preview = None
+        analysis = None
         if preview_queue is not None:
+
+            async def current_analysis(
+                item: AnalysisFrame, stream=stream, store=plan.store, poller=plan.poller
+            ) -> bool:
+                try:
+                    poller.ensure_fresh()
+                except Exception:
+                    return False
+                current = await store.get_active_configuration(item.frame.camera_external_id)
+                return current is item.configuration and stream.owns_current_frame(item.frame)
+
+            analysis = AnalysisPreviewObserver(camera.camera_external_id, current=current_analysis)
             preview = CameraPreviewObserver(
                 camera.camera_external_id,
                 preview_queue,
                 source_kind="LIVE" if camera.source_config.is_live else "REPLAY",
                 is_streaming=lambda stream=stream: stream.state == StreamState.STREAMING,
+                analysis=analysis,
             )
             preview_observers[camera.camera_external_id] = preview
         worker = HeadlessCameraProcessingWorker(
@@ -237,6 +253,7 @@ def assemble_sessions(
                 else None,
             ),
             tracked_capture=tracked_capture,
+            analysis_observer=analysis.offer if analysis is not None else None,
             delivery_context_provider=plan.poller.snapshot_delivery_context
             if tracked_capture is not None or camera.entry.generation_bound_event_delivery
             else None,

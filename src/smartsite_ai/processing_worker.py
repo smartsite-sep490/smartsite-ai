@@ -30,6 +30,7 @@ from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.outbox import OutboxCounts, OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.integrations.tracked_capture import stage_tracked_capture
 from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
+from smartsite_ai.pipelines.analysis_frame import AnalysisFrame
 from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
@@ -125,6 +126,7 @@ class HeadlessCameraProcessingWorker:
         evidence_publisher: EvidencePublisherProtocol | None = None,
         partitioned_frame_delivery: bool = False,
         tracked_capture: TrackedCapturePolicy | None = None,
+        analysis_observer: Callable[[AnalysisFrame], None] | None = None,
         delivery_context_provider: Callable[
             [CameraBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
             Awaitable[EventDeliveryContext | None],
@@ -144,6 +146,7 @@ class HeadlessCameraProcessingWorker:
         self._tracked_capture = tracked_capture
         self._stream = stream
         self._detector = detector
+        self._analysis_observer = analysis_observer
         self._pipeline = pipeline
         self._ppe_region_id = ppe_region_id.casefold()
         self._configurations = configurations
@@ -472,6 +475,36 @@ class HeadlessCameraProcessingWorker:
                 active_track_ids=active_track_ids,
                 observations=ppe_observations,
             )
+        if self._analysis_observer is not None:
+            try:
+                occupancy = getattr(self._pipeline, "occupied_zone_track_regions", None)
+                occupied_zone_regions = (
+                    occupancy(
+                        stream_id=batch.stream_id,
+                        session_id=batch.session_id,
+                        active_track_ids=active_track_ids,
+                    )
+                    if occupancy is not None
+                    else frozenset()
+                )
+                self._analysis_observer(
+                    AnalysisFrame(
+                        frame=frame,
+                        observation=event,
+                        configuration=configuration,
+                        ppe_region_id=self._ppe_region_id,
+                        confirmed_ppe_items=frozenset(
+                            (candidate.track_id, candidate.ppe_item)
+                            for candidate in confirmed_candidates
+                        ),
+                        occupied_zone_regions=frozenset(occupied_zone_regions),
+                    )
+                )
+            except Exception:
+                # Preview cannot disable durable event delivery. A failed sink
+                # is retired for this worker; only a safe diagnostic is logged.
+                self._analysis_observer = None
+                _LOGGER.warning("analysis preview observer failed; retired until runtime restart")
         tracked = self._tracked_capture
         if tracked is not None:
             if (

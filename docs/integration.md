@@ -182,6 +182,26 @@ The observer-only routes use the server Bearer token and accept exactly one came
   version/reference persistence remain in the Backend's existing configuration-image flow.
 
 Encoding is off the event loop, at most10encodes/second per camera, with at most one pending frame.
-No available/current frame produces503; a request never activates a camera/model. Raw display pixels
-are not retained evidence and are not an AI overlay. The analyzed-frame `/preview/latest` surface,
-physical camera/browser acceptance, independent detection quality and rollout remain separate gates.
+When no current raw frame is available, the route returns503; a request never activates a camera/model. Raw display pixels
+are not retained evidence and are not an AI overlay. The analyzed-frame `/preview/latest` surface is now supplied by the same opt-in host.
+Physical camera/browser acceptance, independent detection quality and rollout remain separate gates.
+### Exact analyzed-frame overlay
+
+`/v1/realtime/preview/latest?cameraExternalId=...` requires the same server token and camera scope
+as the raw stream. It returns the existing `{sourceKind,frame}` response expected by the Backend.
+The processing worker offers an immutable packet after detector/frame binding, configuration guards
+and temporal processing. One pending packet and one off-loop encoder retain original pixels,
+capture time, sequence, observations and confirmed Zone occupancy. They do not borrow a newer raw
+frame. Configuration/session/freshness are checked before/after encoding and again on API reads.
+When no current analyzed frame is available, the route returns503, including during warmup. Raw preview remains independent.
+
+Expanded v2 policies resolve each person's bottom-center location using the same geometry helper
+and canonical Camera/Region PPE resolver. Required PPE with no observation remains UNKNOWN;
+COMPLIANT requires a nonempty required set with every item observed PRESENT. DISABLED does not
+become a safety-compliance conclusion. Track IDs remain local technical tracks. TemporalCONFIRMED
+preview is technical evidence status, not a Backend-approved case, Worker identity or Zone permission.
+The immutable occupancy snapshot keeps people visibly inside between entry transitions.
+
+A preview sink failure is logged using a fixed safe diagnostic and the sink is retired until restart;
+it does not interrupt durable event handling. Preview/API availability does not prove successful
+Backend ingestion, persistence, recipient notification or independent model accuracy.

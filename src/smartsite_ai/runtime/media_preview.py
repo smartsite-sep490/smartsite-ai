@@ -13,6 +13,7 @@ from typing import Literal, TypedDict
 from smartsite_ai.configuration_image import ConfigurationImagePayload, SourceKind
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import PreviewFrameQueue, QueueClosedError
+from smartsite_ai.runtime.analysis_preview import AnalysisPreviewObserver
 from smartsite_ai.runtime.supervisor import _finish_cleanup
 
 
@@ -68,6 +69,7 @@ class CameraPreviewObserver:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         encoder: Callable[[FrameEnvelope], CameraMediaFrame] = encode_media_frame,
         stop_timeout: float = 2.0,
+        analysis: AnalysisPreviewObserver | None = None,
     ) -> None:
         if not camera_external_id or len(camera_external_id) > 128:
             raise ValueError("Preview camera identity is invalid")
@@ -76,6 +78,7 @@ class CameraPreviewObserver:
         if not math.isfinite(stop_timeout) or not 0 < stop_timeout <= 10:
             raise ValueError("Preview stop budget must be bounded")
         self.camera_external_id = camera_external_id
+        self.analysis = analysis
         self.source_kind = source_kind
         self.state: Literal["IDLE", "RUNNING", "STOPPING", "STOPPED", "FAILED"] = "IDLE"
         self.reason: str | None = None
@@ -109,6 +112,8 @@ class CameraPreviewObserver:
         if self.state != "IDLE" or self._frames.is_closed:
             raise RuntimeError("Preview observer lifecycle has ended")
         self.state = "RUNNING"
+        if self.analysis is not None:
+            await self.analysis.start()
         self._task = asyncio.create_task(self._run(), name="camera-preview-encoder")
 
     def configuration_image(self) -> ConfigurationImagePayload | None:
@@ -170,16 +175,21 @@ class CameraPreviewObserver:
         self._stopping = True
         self._latest = self._latest_time = None
         self._frames.close()
+        analysis_stopped = True
+        if self.analysis is not None:
+            analysis_stopped = await self.analysis.stop()
         if self._task is None:
             self.state = "STOPPED"
             return True
         if self.state == "RUNNING":
             self.state = "STOPPING"
         done, _ = await asyncio.wait({self._task}, timeout=self._stop_timeout)
-        return bool(done)
+        return bool(done) and analysis_stopped
 
     async def wait_for_release(self) -> None:
         if not self._stopping:
             raise RuntimeError("Stop must be requested before draining preview")
         if self._task is not None:
             await _finish_cleanup(self._task)
+        if self.analysis is not None:
+            await self.analysis.wait_for_release()

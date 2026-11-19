@@ -3,6 +3,7 @@
 from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
+from math import isfinite
 from typing import Final
 from uuid import UUID
 
@@ -52,17 +53,25 @@ class IoUPersonTracker:
         max_missed_frames: int = 2,
         person_class_names: frozenset[str] | set[str] = _DEFAULT_PERSON_CLASS_NAMES,
         max_segment_gap: timedelta | None = None,
+        association_iou_margin: float | None = None,
     ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0 and 1")
         if max_missed_frames < 0:
             raise ValueError("max_missed_frames must be non-negative")
+        if association_iou_margin is not None and (
+            type(association_iou_margin) not in (int, float)
+            or not isfinite(association_iou_margin)
+            or not 0 < association_iou_margin <= 1
+        ):
+            raise ValueError("association_iou_margin must be finite in (0, 1] or None")
         normalized_names = frozenset(name.casefold() for name in person_class_names)
         if not normalized_names:
             raise ValueError("person_class_names must not be empty")
 
         self._iou_threshold = iou_threshold
         self._max_missed_frames = max_missed_frames
+        self._association_iou_margin = association_iou_margin
         self._person_class_names = normalized_names
         self._source_key: tuple[str, UUID] | None = None
         self._camera_external_id: str | None = None
@@ -141,12 +150,15 @@ class IoUPersonTracker:
         self, detections: tuple[NormalizedDetection, ...]
     ) -> tuple[dict[int, int], set[int]]:
         candidates: list[tuple[int, int]] = []
+        scores: dict[tuple[int, int], float] = {}
         for track_id, track in self._tracks.items():
             for detection_index, detection in enumerate(detections):
                 iou = bounding_box_iou(track.detection.bounding_box, detection.bounding_box)
                 # Zero overlap provides no continuity, even at the lowest threshold.
                 if iou > 0 and iou >= self._iou_threshold:
                     candidates.append((track_id, detection_index))
+                    if self._association_iou_margin is not None:
+                        scores[track_id, detection_index] = iou
 
         track_counts = Counter(track_id for track_id, _ in candidates)
         detection_counts = Counter(index for _, index in candidates)
@@ -155,10 +167,55 @@ class IoUPersonTracker:
             for track_id, index in candidates
             if track_counts[track_id] == 1 and detection_counts[index] == 1
         }
+        if self._association_iou_margin is not None:
+            assignments.update(self._separated_components(scores, self._association_iou_margin))
         # Retire ambiguous owners permanently: a later frame must not resurrect
         # their pending PPE/Zone state after a crossing, merge or split.
         retired_track_ids = set(track_counts) - assignments.keys()
         return assignments, retired_track_ids
+
+    def _separated_components(
+        self, scores: dict[tuple[int, int], float], margin: float
+    ) -> dict[int, int]:
+        """Opt-in geometric evidence only; incomplete or weak components still retire."""
+        by_track: dict[int, dict[int, float]] = {}
+        by_detection: dict[int, dict[int, float]] = {}
+        for (track_id, index), score in scores.items():
+            by_track.setdefault(track_id, {})[index] = score
+            by_detection.setdefault(index, {})[track_id] = score
+
+        def separated_best(values: dict[int, float]) -> int | None:
+            ranked = sorted(values.items(), key=lambda item: (-item[1], item[0]))
+            if len(ranked) == 1 or ranked[0][1] - ranked[1][1] > margin:
+                return ranked[0][0]
+            return None
+
+        best_track = {track: separated_best(values) for track, values in by_track.items()}
+        best_detection = {index: separated_best(values) for index, values in by_detection.items()}
+        remaining = set(by_track)
+        accepted: dict[int, int] = {}
+        while remaining:
+            pending = {min(remaining)}
+            tracks: set[int] = set()
+            indexes: set[int] = set()
+            while pending:
+                track = pending.pop()
+                if track in tracks:
+                    continue
+                tracks.add(track)
+                for index in by_track[track]:
+                    indexes.add(index)
+                    pending.update(set(by_detection[index]) - tracks)
+            remaining.difference_update(tracks)
+            matches = {
+                track: index
+                for track in tracks
+                if (index := best_track[track]) is not None and best_detection[index] == track
+            }
+            # A high-scoring survivor must not inherit an unresolved merge/split component.
+            if len(matches) == len(tracks) == len(indexes):
+                accepted.update(matches)
+        return accepted
 
     def _reset_for_source(self, source_key: tuple[str, UUID]) -> None:
         self._source_key = source_key

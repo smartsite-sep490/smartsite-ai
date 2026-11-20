@@ -5,12 +5,13 @@ import json
 import secrets
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
 
+from smartsite_ai.source_activation import SourceActivationError, SourceActivator
 from smartsite_ai.source_control_models import SourceDraft, SourcePolicy, SourceRejected
 
 
@@ -61,6 +62,7 @@ def source_control_router(
     policy: SourcePolicy,
     service_token: SecretStr,
     probe: Callable[[str, bool, tuple[str, str]], Awaitable[dict[str, object]]],
+    activator: SourceActivator | None = None,
 ) -> APIRouter:
     token = service_token.get_secret_value()
     if not 32 <= len(token) <= 4096 or not token.isascii() or any(c.isspace() for c in token):
@@ -106,7 +108,13 @@ def source_control_router(
                 ],
                 "videos": [{"id": key, "label": path.name} for key, path in policy.videos.items()],
                 "browserCameraSupported": False,
-                "applySupported": False,
+                "applySupported": activator is not None
+                and activator.driver.supports((site_id, camera_id)),
+                "sourceRevision": (activator.registry.read((site_id, camera_id)) or {}).get(
+                    "sourceRevision", 0
+                )
+                if activator
+                else 0,
             },
             headers=headers,
         )
@@ -150,11 +158,16 @@ def source_control_router(
             raise
         except Exception:
             return error(503, "SOURCE_UNAVAILABLE")
+        receipt = str(uuid4())
+        if activator:
+            activator.remember(
+                (site_id, camera_id), receipt, source, "REPLAY" if draft.kind == "VIDEO" else "LIVE"
+            )
         return JSONResponse(
             {
                 "schemaVersion": "1.0.0",
                 "state": "TESTED",
-                "receiptId": str(uuid4()),
+                "receiptId": receipt,
                 "expiresAt": (datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                 "sourceKind": "REPLAY" if draft.kind == "VIDEO" else "LIVE",
                 "frame": frame.model_dump(mode="json"),
@@ -162,4 +175,67 @@ def source_control_router(
             headers=headers,
         )
 
+    if activator is not None:
+
+        @router.post("/v1/source-control/{site_id}/{camera_id}/prepare", include_in_schema=False)
+        async def prepare_source(request: Request, site_id: str, camera_id: str) -> JSONResponse:
+            denied = authorize(request, site_id, camera_id)
+            if denied is not None:
+                return denied
+            try:
+                body = await activation_body(request)
+                if set(body) != {"commandId", "receiptId", "expectedRevision"}:
+                    return error(400, "INVALID_SOURCE_COMMAND")
+                command, receipt = str(UUID(body["commandId"])), str(UUID(body["receiptId"]))
+                async with lock, asyncio.timeout(20):
+                    result = await activator.prepare(
+                        (site_id, camera_id), command, receipt, body["expectedRevision"]
+                    )
+                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+            except (ValueError, TypeError, KeyError):
+                return error(409, "SOURCE_ACTIVATION_CONFLICT")
+            except TimeoutError:
+                return error(504, "SOURCE_ACTIVATION_TIMEOUT")
+            except Exception:
+                return error(503, "SOURCE_RECONCILIATION_REQUIRED")
+
+        @router.post("/v1/source-control/{site_id}/{camera_id}/commit", include_in_schema=False)
+        async def commit_source(request: Request, site_id: str, camera_id: str) -> JSONResponse:
+            denied = authorize(request, site_id, camera_id)
+            if denied is not None:
+                return denied
+            try:
+                body = await activation_body(request)
+                if set(body) != {"commandId", "generation"} or not isinstance(
+                    body["generation"], dict
+                ):
+                    return error(400, "INVALID_SOURCE_COMMAND")
+                command = str(UUID(body["commandId"]))
+                async with lock, asyncio.timeout(40):
+                    result = await activator.commit(
+                        (site_id, camera_id), command, body["generation"]
+                    )
+                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+            except (SourceActivationError, ValueError, TypeError, KeyError):
+                return error(409, "SOURCE_ACTIVATION_CONFLICT")
+            except TimeoutError:
+                return error(504, "SOURCE_ACTIVATION_TIMEOUT")
+            except Exception:
+                return error(503, "SOURCE_RECONCILIATION_REQUIRED")
+
     return router
+
+
+async def activation_body(request: Request) -> dict:
+    if request.headers.get("content-type", "").split(";")[0] != "application/json":
+        raise ValueError()
+    raw = bytearray()
+    async with asyncio.timeout(3):
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 12_000:
+                raise ValueError()
+    body = json.loads(raw)
+    if not isinstance(body, dict):
+        raise ValueError()
+    return body

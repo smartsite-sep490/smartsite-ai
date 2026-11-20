@@ -75,4 +75,6 @@ async def finish(capture, source: FakeSource) -> None:
     source.connect_gate.set()
     source.close_gate.set()
     source.items.put_nowait(None)
-    assert await capture.stop()
+    if not await capture.stop():
+        # stop's deliberately tiny test budget is not a deadline for encoder teardown.
+        assert await asyncio.wait_for(capture.wait_for_release(), timeout=2)

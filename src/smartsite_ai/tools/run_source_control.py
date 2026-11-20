@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,6 +13,7 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
+from smartsite_ai.source_activation import SourceActivator
 from smartsite_ai.source_control_api import source_control_router
 from smartsite_ai.source_control_models import SourcePolicy
 from smartsite_ai.source_control_probe import capture_source
@@ -36,7 +38,13 @@ class HostManifest(BaseModel):
     active_sources: list[ActiveSource] = Field(default_factory=list, max_length=16)
 
 
-def build_source_control_app(manifest: HostManifest, token: SecretStr) -> FastAPI:
+def build_source_control_app(
+    manifest: HostManifest,
+    token: SecretStr,
+    *,
+    activator: SourceActivator | None = None,
+    owned_source: Callable[[tuple[str, str]], str | None] | None = None,
+) -> FastAPI:
     for active in manifest.active_sources:
         url = urlsplit(active.preview_origin)
         if (
@@ -59,7 +67,16 @@ def build_source_control_app(manifest: HostManifest, token: SecretStr) -> FastAP
     policy = SourcePolicy(manifest.webcams, manifest.videos, manifest.networks)
 
     async def probe(source: str, live: bool, scope: tuple[str, str]) -> dict[str, object]:
-        matching = [a for a in manifest.active_sources if a.source.get_secret_value() == source]
+        matching = [
+            a
+            for a in manifest.active_sources
+            if (
+                owned_source((a.site_id, a.camera_external_id))
+                if owned_source
+                else a.source.get_secret_value()
+            )
+            == source
+        ]
         if not matching:
             return await capture_source(source, live)
         active = next((a for a in matching if (a.site_id, a.camera_external_id) == scope), None)
@@ -106,6 +123,7 @@ def build_source_control_app(manifest: HostManifest, token: SecretStr) -> FastAP
             policy=policy,
             service_token=token,
             probe=probe,
+            activator=activator,
         )
     )
     return app

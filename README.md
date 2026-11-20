@@ -1010,8 +1010,17 @@ RTSP credentials are separate fields; browser file paths, embedded credentials,
 DNS targets and destinations outside the configured policy are rejected. A test
 returns a short-lived JPEG and LIVE/REPLAY label. Disconnect/timeout cancels and
 reaps its decode child. It does not save a source, issue a generation, start AI,
-or create a business alert. `applySupported` and `browserCameraSupported` remain
-false. Durable encrypted source activation and browser ingestion are unfinished.
+or create a business alert. The stock command is test-only (`applySupported=false`).
+An explicit operator composition may attach `SourceActivator`, an encrypted
+single-writer `SourceRegistry`, and `SourceProcessDriver` with fixed reviewed
+commands/environment. Tests issue short-lived scope-bound receipts; Backend
+prepare stops the prior owner before issuing a fresh generation and commit starts
+the new process. Uncertain STOPPING/STARTING states require operator reconciliation;
+they are not silently replayed as running. Host restart does not adopt unknown
+processes. Source/generation secrets stay in encrypted state and filtered child
+environment, never browser responses or command arguments. The configured runtime
+must expose a fresh session-matching preview and wait for new geometry/PPE before
+inference. Replay activation and browser ingestion remain unavailable.
 Native RTSP redirects/SDP egress still require external network enforcement and
 real-device validation; the URL allowlist alone is not a production egress fence.
 

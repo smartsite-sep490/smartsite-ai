@@ -1024,6 +1024,34 @@ inference. Replay activation and browser ingestion remain unavailable.
 Native RTSP redirects/SDP egress still require external network enforcement and
 real-device validation; the URL allowlist alone is not a production egress fence.
 
+The canonical multi-camera command has an optional **resume-only POSIX child profile**:
+
+```sh
+python -m smartsite_ai.tools.run_camera_runtime \
+  --manifest /private/reviewed-camera-runtime.json \
+  --source-control-profile /private/reviewed-source-host.json \
+  --expected-camera-id 00000000-0000-4000-8000-000000000077
+```
+
+This fixed operator command consumes `SMARTSITE_AI_SOURCE_RUNTIME_SOURCE`,
+`SMARTSITE_AI_SOURCE_RUNTIME_GENERATION`, and the required
+`SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION` from the trusted driver.
+It requires exactly one tracked LIVE camera, the matching configured Site/camera
+scope, and a webcam/RTSP source allowed by the host policy. It atomically publishes
+the fresh credential only to the existing private `generationCredentialFile` in
+the reviewed runtime manifest. Source selection changes in memory; model, outbox,
+evidence paths and the manifest on disk remain fixed. The fetched bundle and new
+camera/generation/session must match before loading a model or opening capture.
+Source/generation environment values without this explicit profile are rejected.
+
+Windows profile execution fails closed: secure DACL-preserving credential creation
+and replacement require a separate implementation and validation. POSIX atomic
+publication tests are skipped on Windows. This profile does not bootstrap a known
+process owner, provide camera preview/reference authoring, implement source
+replacement, or qualify hardware. The stock source-control host remains test-only;
+the local Windows operator wrapper is a separate composition, not proof of canonical
+Windows support or production deployment.
+
 Gate presence mode (`gatePresenceSession`, 64 hex characters scoped by Backend) cannot carry templates or enrollment targets. It returns only technical presence reasons, never identities/authorization. Two stable observations trigger a new-face signal; the same face suppresses duplicate gate verification. Confirmed absence (2 seconds) permits reentry. Continuity embeddings stay in bounded transient RAM (128 sessions, 30-second idle expiry), with no DB/file writes. Similarity thresholds 0.55 (same/stable) and 0.45 (definitely different) are demo heuristics, not calibrated person-change accuracy or liveness.
 
 AI and biometric data must be treated as sensitive. Important principles include secrets outside source control, least-privilege service authentication, encrypted transport, controlled evidence access, explicit biometric retention rules, auditability, and no identity assignment below the approved confidence policy.

@@ -32,6 +32,11 @@ from smartsite_ai.runtime.manifest import (
 )
 from smartsite_ai.runtime.media_host import run_with_camera_preview
 from smartsite_ai.runtime.media_preview import CameraPreviewObserver
+from smartsite_ai.runtime.source_control_child import (
+    GENERATION_ENV,
+    SOURCE_ENV,
+    bind_source_control_child,
+)
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
@@ -40,7 +45,9 @@ from smartsite_ai.runtime.supervisor import (
     exit_code,
     report_payload,
 )
+from smartsite_ai.source_control_models import SourcePolicy
 from smartsite_ai.source_resume_models import ResumeBinding, ResumeConfiguration, ResumeManifest
+from smartsite_ai.tools.run_source_control import HostManifest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit raw-preview HTTP port; requires SMARTSITE_AI_PREVIEW_SERVICE_TOKEN",
     )
     parser.add_argument("--require-resume-manifest", action="store_true")
+    parser.add_argument("--source-control-profile", type=Path)
     return parser
 
 
@@ -72,9 +80,20 @@ async def run_manifest(
     expected_outbox: Path | None = None,
     preview_port: int | None = None,
     require_resume_manifest: bool = False,
+    source_control_profile: Path | None = None,
 ) -> int:
+    if source_control_profile is not None and os.name == "nt":
+        raise CameraRuntimeError(
+            "Source-control child profile unavailable on Windows: private credential gate"
+        )
+    if source_control_profile is None and any(
+        key in os.environ for key in (SOURCE_ENV, GENERATION_ENV)
+    ):
+        raise CameraRuntimeError(
+            "Runtime source credentials require an explicit source-control profile"
+        )
     raw_expected = os.environ.get("SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION")
-    if require_resume_manifest and raw_expected is None:
+    if (require_resume_manifest or source_control_profile is not None) and raw_expected is None:
         raise CameraRuntimeError("Expected resume manifest is required")
     expected_resume = None
     if raw_expected is not None:
@@ -83,7 +102,12 @@ async def run_manifest(
         expected_resume = ResumeManifest.model_validate_json(raw_expected)
     supervised = any(
         value is not None
-        for value in (generation_credential_file, expected_camera_id, expected_outbox)
+        for value in (
+            generation_credential_file,
+            expected_camera_id,
+            expected_outbox,
+            source_control_profile,
+        )
     )
     runtime_settings = settings or (Settings(_env_file=None) if supervised else Settings())
     if preview_port is not None and (
@@ -95,9 +119,34 @@ async def run_manifest(
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())
-    manifest = bind_generation_manifest(
-        manifest, generation_credential_file, expected_camera_id, expected_outbox
-    )
+    if source_control_profile is not None:
+        if (
+            expected_camera_id is None
+            or generation_credential_file is not None
+            or expected_outbox is not None
+            or expected_resume is None
+            or not source_control_profile.is_absolute()
+            or not source_control_profile.is_file()
+            or source_control_profile.resolve() != source_control_profile
+        ):
+            raise CameraRuntimeError("Source-control profile requires fixed reviewed runtime paths")
+        with source_control_profile.open("rb") as profile_file:
+            profile_bytes = profile_file.read(65_537)
+        if len(profile_bytes) > 65_536:
+            raise CameraRuntimeError("Source-control profile is too large")
+        host = HostManifest.model_validate_json(profile_bytes)
+        manifest = bind_source_control_child(
+            manifest,
+            policy=SourcePolicy(host.webcams, host.videos, host.networks),
+            scopes=set(host.scopes),
+            camera_id=expected_camera_id,
+            environ=os.environ,
+            expected=expected_resume,
+        )
+    else:
+        manifest = bind_generation_manifest(
+            manifest, generation_credential_file, expected_camera_id, expected_outbox
+        )
     bound = bind_manifest(manifest, os.environ)
     plans: list[CameraPlan] = []
     backend_clients: list[BackendClient] = []
@@ -222,6 +271,17 @@ def run(argv: list[str] | None = None) -> int:
     preview_options = {} if args.preview_port is None else {"preview_port": args.preview_port}
     resume_options = {"require_resume_manifest": True} if args.require_resume_manifest else {}
     try:
+        if args.source_control_profile is not None:
+            return asyncio.run(
+                run_manifest(
+                    args.manifest,
+                    source_control_profile=args.source_control_profile,
+                    expected_camera_id=args.expected_camera_id,
+                    generation_credential_file=args.generation_credential_file,
+                    expected_outbox=args.expected_outbox,
+                    **resume_options,
+                )
+            )
         if any(
             value is not None
             for value in (

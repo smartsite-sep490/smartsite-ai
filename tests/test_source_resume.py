@@ -385,8 +385,8 @@ def test_resume_api_uses_scoped_auth_strict_body_and_default_unavailable(tmp_pat
 
     active.driver = LegacyDriver()
     assert (
-        client.get(url + "/capabilities", headers=headers).json()["configurationResumeSupported"]
-        is False
+        "configurationResumeSupported"
+        not in client.get(url + "/capabilities", headers=headers).json()
     )
     assert (
         client.post(url + "/prepare-resume", headers=headers, json=req.model_dump()).status_code

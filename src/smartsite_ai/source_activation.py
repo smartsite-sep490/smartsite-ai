@@ -129,6 +129,9 @@ class SourceActivator:
                 json.dumps([receipt, expected_revision]).encode()
             ).hexdigest()
             old = self.registry.read(scope)
+            history = self._resume_history(old) if old else {}
+            if command in history:
+                raise SourceActivationError("SOURCE_RESUME_SUPERSEDED")
             if old and old.get("commandId") == command:
                 if old.get("requestHash") != fingerprint:
                     raise SourceActivationError()
@@ -161,6 +164,7 @@ class SourceActivator:
                 "sourceKind": tested[2],
                 "source": tested[1],
                 "currentGenerationId": generation,
+                "resumeHistory": history,
             }
             self.registry.write(scope, row)
             # Persist uncertainty before side effects; cancellation requires reconciliation.
@@ -210,6 +214,7 @@ class SourceActivator:
                 sourceRevision=int(row["sourceRevision"]) + 1,
                 currentGenerationId=generation["workerGenerationId"],
             )
+            row.pop("resumeHistory", None)
             self.registry.write(scope, row)
             return self._public(row)
 
@@ -227,6 +232,53 @@ class SourceActivator:
             scope, str(row["source"]), manifest.generationBinding
         )
 
+    @staticmethod
+    def _resume_history(row: dict[str, object]) -> dict[str, object]:
+        saved = row.get("resumeHistory", {})
+        if not isinstance(saved, dict):
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+        history = dict(saved)
+        # Support the prior single-command encrypted registry without discarding its command.
+        if row.get("operation") == "RESUME":
+            request = ResumePrepare.model_validate(row["resumeRequest"])
+            history.setdefault(request.commandId, request.model_dump())
+        return history
+
+    async def resume_status(self, scope: Scope, command: str) -> dict[str, object]:
+        command = str(UUID(command))
+        async with self.lock:
+            self._resume_driver(scope)
+            row = self.registry.read(scope)
+            if not row:
+                raise SourceActivationError("SOURCE_RESUME_NOT_FOUND")
+            if row.get("operation") != "RESUME" and row.get("state") != "RUNNING":
+                raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+            history = self._resume_history(row)
+            if command not in history:
+                raise SourceActivationError("SOURCE_RESUME_NOT_FOUND")
+            if row.get("commandId") != command or row.get("operation") != "RESUME":
+                raise SourceActivationError("SOURCE_RESUME_SUPERSEDED")
+            request = ResumePrepare.model_validate(history[command])
+            if request.expectedRevision != row.get("sourceRevision"):
+                raise SourceActivationError("SOURCE_RESUME_SUPERSEDED")
+            result: dict[str, object] = {
+                "commandId": command,
+                "sourceRevision": request.expectedRevision,
+                "sourceKind": "LIVE",
+                "state": row["state"],
+                "generationBinding": request.generationBinding.model_dump(),
+                "configuration": request.configuration.model_dump(),
+            }
+            if row["state"] == "RUNNING":
+                if not self._owns_running_resume(scope, row) or not await self.driver.is_running(
+                    scope, str(row["currentGenerationId"])
+                ):
+                    raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+                result["newGenerationBinding"] = ResumeManifest.model_validate(
+                    row["resumeManifest"]
+                ).generationBinding.model_dump()
+            return result
+
     async def prepare_resume(self, scope: Scope, request: ResumePrepare) -> dict[str, object]:
         # Revalidate even callers using model_copy/model_construct; freeze before awaiting.
         request = ResumePrepare.model_validate(request.model_dump())
@@ -234,6 +286,9 @@ class SourceActivator:
         async with self.lock:
             driver = self._resume_driver(scope)
             row = self.registry.read(scope)
+            history = self._resume_history(row) if row else {}
+            if request.commandId in history and row.get("commandId") != request.commandId:
+                raise SourceActivationError("SOURCE_RESUME_SUPERSEDED")
             if row and row.get("commandId") == request.commandId:
                 if row.get("operation") != "RESUME" or row.get("requestHash") != fingerprint:
                     raise SourceActivationError()
@@ -265,6 +320,7 @@ class SourceActivator:
                 commandId=request.commandId,
                 requestHash=fingerprint,
                 resumeRequest=request.model_dump(),
+                resumeHistory={**history, request.commandId: request.model_dump()},
             )
             self.registry.write(scope, row)
             await self.driver.stop(scope)

@@ -40,6 +40,7 @@ from smartsite_ai.runtime.supervisor import (
     exit_code,
     report_payload,
 )
+from smartsite_ai.source_resume_models import ResumeBinding, ResumeConfiguration, ResumeManifest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="explicit raw-preview HTTP port; requires SMARTSITE_AI_PREVIEW_SERVICE_TOKEN",
     )
+    parser.add_argument("--require-resume-manifest", action="store_true")
     return parser
 
 
@@ -69,7 +71,16 @@ async def run_manifest(
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
     preview_port: int | None = None,
+    require_resume_manifest: bool = False,
 ) -> int:
+    raw_expected = os.environ.get("SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION")
+    if require_resume_manifest and raw_expected is None:
+        raise CameraRuntimeError("Expected resume manifest is required")
+    expected_resume = None
+    if raw_expected is not None:
+        if len(raw_expected.encode("utf-8")) > 12_000:
+            raise CameraRuntimeError("Expected resume manifest is too large")
+        expected_resume = ResumeManifest.model_validate_json(raw_expected)
     supervised = any(
         value is not None
         for value in (generation_credential_file, expected_camera_id, expected_outbox)
@@ -104,6 +115,35 @@ async def run_manifest(
             ),
         )
         plans.extend(prepared)
+        if failure is None and expected_resume is not None:
+            if len(prepared) != 1:
+                raise CameraRuntimeError("Resume must bind exactly one tracked LIVE camera")
+            plan = prepared[0]
+            if (
+                plan.generation is None
+                or plan.bound.entry.tracked_v17 is None
+                or not plan.bound.source_config.is_live
+            ):
+                raise CameraRuntimeError("Resume requires a tracked LIVE generation")
+            actual_binding = ResumeBinding(
+                cameraId=str(plan.bound.entry.camera_id),
+                workerGenerationId=plan.generation.worker_generation_id,
+                streamSessionId=plan.generation.stream_session_id,
+            )
+            bundle = await plan.store.get_bundle(plan.bound.camera_external_id)
+            if (
+                actual_binding != expected_resume.generationBinding
+                or bundle is None
+                or str(bundle.camera_id) != actual_binding.cameraId
+            ):
+                raise CameraRuntimeError("Expected resume generation binding changed")
+            expected_resume.require_configuration(
+                ResumeConfiguration(
+                    configurationVersion=bundle.configuration_version,
+                    viewRevision=bundle.view_revision,
+                    bundleSha256=bundle.bundle_sha256,
+                )
+            )
         return failure
 
     async def open_model() -> DetectorProtocol:
@@ -180,6 +220,7 @@ async def run_manifest(
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preview_options = {} if args.preview_port is None else {"preview_port": args.preview_port}
+    resume_options = {"require_resume_manifest": True} if args.require_resume_manifest else {}
     try:
         if any(
             value is not None
@@ -196,9 +237,10 @@ def run(argv: list[str] | None = None) -> int:
                     expected_camera_id=args.expected_camera_id,
                     expected_outbox=args.expected_outbox,
                     **preview_options,
+                    **resume_options,
                 )
             )
-        return asyncio.run(run_manifest(args.manifest, **preview_options))
+        return asyncio.run(run_manifest(args.manifest, **preview_options, **resume_options))
     except KeyboardInterrupt:
         return 130
     except CameraRuntimeError as exc:

@@ -36,7 +36,13 @@ class SourceProcessDriver:
         self.environment = dict(environment)
         self.ready = ready
         self.process: asyncio.subprocess.Process | None = None
-        self.current_source: str | None = None
+        self._current_source: str | None = None
+
+    @property
+    def current_source(self) -> str | None:
+        if self.process is None or self.process.returncode is not None:
+            return None
+        return self._current_source
 
     def supports(self, scope: Scope) -> bool:
         return scope == self.scope
@@ -59,7 +65,7 @@ class SourceProcessDriver:
                 self.process.kill()
                 await self.process.wait()
             self.process = None
-        self.current_source = None
+        self._current_source = None
         # The operator must stop any pre-existing reader before this driver starts.
         # A fresh host process cannot infer ownership from a PID or port alone.
 
@@ -78,7 +84,7 @@ class SourceProcessDriver:
             stderr=asyncio.subprocess.DEVNULL,
             creationflags=int(getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)),
         )
-        self.current_source = source
+        self._current_source = source
 
     async def is_running(self, scope: Scope, generation_id: str) -> bool:
         if not self.supports(scope) or self.process is None:

@@ -6,6 +6,38 @@ from pathlib import Path
 from smartsite_ai.source_process_driver import SourceProcessDriver
 
 
+def test_exited_capture_no_longer_claims_live_source_and_is_reaped_before_replacement(tmp_path):
+    async def run():
+        child = tmp_path / "child.py"
+        child.write_text("raise SystemExit(7)\n")
+
+        async def ready(_identifier):
+            return False
+
+        driver = SourceProcessDriver(
+            scope=("site", "camera"),
+            command=(str(Path(sys.executable)), "-I", str(child)),
+            stop_file=tmp_path / "stop",
+            generation_file=tmp_path / "generation.json",
+            environment={},
+            ready=ready,
+        )
+        await driver.start(("site", "camera"), "0", {"workerGenerationId": "next"})
+        process = driver.process
+        assert process is not None
+        try:
+            async with asyncio.timeout(5):
+                await process.wait()
+            assert process.returncode == 7
+            assert driver.current_source is None
+            assert driver.process is process
+        finally:
+            await driver.stop(("site", "camera"))
+        assert driver.process is None
+
+    asyncio.run(run())
+
+
 def test_owned_process_is_stopped_before_replacement_without_database_environment(tmp_path):
     async def run():
         output = tmp_path / "ready.json"

@@ -13,6 +13,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr
 
 from smartsite_ai.source_activation import SourceActivationError, SourceActivator
 from smartsite_ai.source_control_models import SourceDraft, SourcePolicy, SourceRejected
+from smartsite_ai.source_resume_models import ResumePrepare
 
 
 class _ClientGone(Exception):
@@ -110,6 +111,11 @@ def source_control_router(
                 "browserCameraSupported": False,
                 "applySupported": activator is not None
                 and activator.driver.supports((site_id, camera_id)),
+                **(
+                    {"configurationResumeSupported": True}
+                    if activator is not None and activator.supports_resume((site_id, camera_id))
+                    else {}
+                ),
                 "sourceRevision": (activator.registry.read((site_id, camera_id)) or {}).get(
                     "sourceRevision", 0
                 )
@@ -176,6 +182,100 @@ def source_control_router(
         )
 
     if activator is not None:
+
+        @router.post(
+            "/v1/source-control/{site_id}/{camera_id}/resume-status", include_in_schema=False
+        )
+        async def resume_status(request: Request, site_id: str, camera_id: str) -> JSONResponse:
+            denied = authorize(request, site_id, camera_id)
+            if denied is not None:
+                return denied
+            try:
+                body = await activation_body(request)
+                if set(body) != {"commandId"} or not isinstance(body["commandId"], str):
+                    return error(400, "INVALID_SOURCE_COMMAND")
+                command = str(UUID(body["commandId"]))
+            except (ValueError, TypeError, KeyError):
+                return error(400, "INVALID_SOURCE_COMMAND")
+            except TimeoutError:
+                return error(408, "SOURCE_BODY_TIMEOUT")
+            try:
+                async with lock, asyncio.timeout(40):
+                    result = await activator.resume_status((site_id, camera_id), command)
+                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+            except SourceActivationError as exc:
+                if str(exc) == "SOURCE_RESUME_NOT_FOUND":
+                    return error(404, "SOURCE_RESUME_NOT_FOUND")
+                return error(409, "SOURCE_RECONCILIATION_REQUIRED")
+            except TimeoutError:
+                return error(504, "SOURCE_ACTIVATION_TIMEOUT")
+            except Exception:
+                return error(503, "SOURCE_RECONCILIATION_REQUIRED")
+
+        @router.post(
+            "/v1/source-control/{site_id}/{camera_id}/prepare-resume", include_in_schema=False
+        )
+        async def prepare_resume(request: Request, site_id: str, camera_id: str) -> JSONResponse:
+            denied = authorize(request, site_id, camera_id)
+            if denied is not None:
+                return denied
+            try:
+                command = ResumePrepare.model_validate(await activation_body(request))
+            except (ValueError, TypeError, KeyError):
+                return error(400, "INVALID_SOURCE_COMMAND")
+            except TimeoutError:
+                return error(408, "SOURCE_BODY_TIMEOUT")
+            try:
+                async with lock, asyncio.timeout(20):
+                    result = await activator.prepare_resume((site_id, camera_id), command)
+                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+            except SourceActivationError:
+                return error(409, "SOURCE_RECONCILIATION_REQUIRED")
+            except TimeoutError:
+                return error(504, "SOURCE_ACTIVATION_TIMEOUT")
+            except Exception:
+                return error(503, "SOURCE_RECONCILIATION_REQUIRED")
+
+        @router.post(
+            "/v1/source-control/{site_id}/{camera_id}/commit-resume", include_in_schema=False
+        )
+        async def commit_resume(request: Request, site_id: str, camera_id: str) -> JSONResponse:
+            denied = authorize(request, site_id, camera_id)
+            if denied is not None:
+                return denied
+            try:
+                body = await activation_body(request)
+                if (
+                    set(body) != {"commandId", "generation"}
+                    or not isinstance(body["commandId"], str)
+                    or not isinstance(body["generation"], dict)
+                ):
+                    return error(400, "INVALID_SOURCE_COMMAND")
+                command = str(UUID(body["commandId"]))
+                generation = body["generation"]
+                if set(generation) != {
+                    "workerGenerationId",
+                    "streamSessionId",
+                    "secret",
+                    "expiresAt",
+                } or any(not isinstance(value, str) for value in generation.values()):
+                    return error(400, "INVALID_SOURCE_COMMAND")
+            except (ValueError, TypeError, KeyError):
+                return error(400, "INVALID_SOURCE_COMMAND")
+            except TimeoutError:
+                return error(408, "SOURCE_BODY_TIMEOUT")
+            try:
+                async with lock, asyncio.timeout(40):
+                    result = await activator.commit_resume(
+                        (site_id, camera_id), command, generation
+                    )
+                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+            except (SourceActivationError, ValueError, TypeError, KeyError):
+                return error(409, "SOURCE_RECONCILIATION_REQUIRED")
+            except TimeoutError:
+                return error(504, "SOURCE_ACTIVATION_TIMEOUT")
+            except Exception:
+                return error(503, "SOURCE_RECONCILIATION_REQUIRED")
 
         @router.post("/v1/source-control/{site_id}/{camera_id}/prepare", include_in_schema=False)
         async def prepare_source(request: Request, site_id: str, camera_id: str) -> JSONResponse:

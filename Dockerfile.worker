@@ -1,0 +1,35 @@
+FROM python:3.12.13-slim-bookworm AS builder
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+COPY contracts ./contracts
+# Both profiles already belong to uv.lock; weights are supplied separately.
+ARG VISION_EXTRA=vision
+RUN case "$VISION_EXTRA" in vision|cuda126) ;; *) exit 1 ;; esac \
+    && uv sync --frozen --extra "$VISION_EXTRA" --no-dev --no-editable
+
+FROM python:3.12.13-slim-bookworm AS runtime
+ARG SOURCE_REVISION=unknown
+LABEL org.opencontainers.image.title="SmartSite camera AI worker" \
+    org.opencontainers.image.source="https://github.com/smartsite-sep490/smartsite-ai" \
+    org.opencontainers.image.revision="$SOURCE_REVISION"
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    SMARTSITE_AI_ENVIRONMENT=production SMARTSITE_AI_HOST=0.0.0.0 \
+    PATH="/app/.venv/bin:$PATH" YOLO_CONFIG_DIR=/tmp/ultralytics \
+    XDG_CACHE_HOME=/tmp/cache MPLCONFIGDIR=/tmp/matplotlib
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --create-home app \
+    && mkdir /state /config /models \
+    && chown app:app /state /config /models
+WORKDIR /app
+COPY --from=builder /app/.venv /app/.venv
+USER 10001:10001
+# A running API is not evidence that this explicit camera worker is healthy.
+HEALTHCHECK NONE
+ENTRYPOINT ["smartsite-ai-camera-runtime"]
+CMD ["--help"]

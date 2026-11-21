@@ -99,6 +99,30 @@ jobs:
           uv pip install --python .runtime-venv/bin/python dist/*.whl
           .runtime-venv/bin/python -c "from smartsite_ai.app import create_app; assert create_app().title == 'SmartSite AI'"
 
+  camera-worker-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build locked CPU camera worker
+        run: docker build -f Dockerfile.worker --build-arg SOURCE_REVISION=${{ github.sha }} --tag smartsite-ai-worker:ci .
+      - name: Verify offline non-root vision runtime
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=268435456 --cap-drop ALL --security-opt no-new-privileges:true --entrypoint python smartsite-ai-worker:ci -c "import os, torch, cv2, ultralytics; from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner; from smartsite_ai.runtime.manifest import load_manifest_bytes; assert os.getuid() == 10001; assert torch.version.cuda is None; assert not UltralyticsYoloRunner.concurrent_inference_safe"
+          docker run --rm --network none --read-only --tmpfs /tmp smartsite-ai-worker:ci --help
+          docker run --rm --network none --read-only --tmpfs /tmp --mount type=bind,source="$PWD/deploy/runtime.example.json",target=/run/runtime.json,readonly --entrypoint python smartsite-ai-worker:ci -c "from pathlib import Path; from smartsite_ai.runtime.manifest import load_manifest_bytes; m=load_manifest_bytes(Path('/run/runtime.json').read_bytes()); assert len(m.cameras)==1 and m.cameras[0].tracked_v17 is not None"
+      - name: Reject absent operator manifest without inference
+        run: |
+          set +e
+          docker run --rm --network none --read-only --tmpfs /tmp smartsite-ai-worker:ci --manifest /config/absent.json > worker-result.txt 2>&1
+          status=$?
+          set -e
+          test "$status" -ne 0
+          grep -q 'manifest' worker-result.txt
+          ! grep -q Traceback worker-result.txt
+
   container:
     runs-on: ubuntu-latest
     timeout-minutes: 15

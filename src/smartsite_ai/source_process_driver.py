@@ -20,6 +20,7 @@ class SourceProcessDriver:
         generation_file: Path,
         environment: Mapping[str, str],
         ready: Callable[[str], Awaitable[bool]],
+        resume_command: tuple[str, ...] | None = None,
         resume_camera_id: str | None = None,
         resume_manifest_supported: bool = False,
         resume_configuration_loader: Callable[
@@ -27,9 +28,12 @@ class SourceProcessDriver:
         ]
         | None = None,
     ) -> None:
+        inference_command = command if resume_command is None else resume_command
         if (
             not command
             or not Path(command[0]).is_absolute()
+            or not inference_command
+            or not Path(inference_command[0]).is_absolute()
             or not stop_file.is_absolute()
             or not generation_file.is_absolute()
         ):
@@ -39,6 +43,7 @@ class SourceProcessDriver:
             raise ValueError("Worker must not receive database credentials")
         self.scope = scope
         self.command = command
+        self.resume_command = inference_command
         self.stop_file = stop_file
         self.generation_file = generation_file
         self.environment = dict(environment)
@@ -53,6 +58,7 @@ class SourceProcessDriver:
         self.process: asyncio.subprocess.Process | None = None
         self._current_source: str | None = None
         self._owned_generation: dict[str, str] | None = None
+        self._reconciliation_required = False
 
     @property
     def current_source(self) -> str | None:
@@ -90,14 +96,21 @@ class SourceProcessDriver:
     async def stop(self, scope: Scope) -> None:
         if not self.supports(scope):
             raise SourceActivationError()
+        if self._reconciliation_required:
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
         self.stop_file.write_text("stop", encoding="ascii")
         if self.process is not None:
             try:
                 async with asyncio.timeout(15):
                     await self.process.wait()
             except TimeoutError:
+                # Forced termination is containment, not proof of a cooperative
+                # capture/lease drain. Preserve ownership and block replacement,
+                # including if termination or waiting is cancelled or fails.
+                self._reconciliation_required = True
                 self.process.kill()
                 await self.process.wait()
+                raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED") from None
             self.process = None
         self._current_source = None
         self._owned_generation = None
@@ -110,6 +123,8 @@ class SourceProcessDriver:
     async def start_resume(
         self, scope: Scope, source: str, generation: Mapping[str, str], manifest: ResumeManifest
     ) -> None:
+        if self._reconciliation_required:
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
         if not self.supports_resume(scope) or not isinstance(manifest, ResumeManifest):
             raise SourceActivationError("CONFIGURATION_RESUME_UNAVAILABLE")
         manifest = ResumeManifest.model_validate(manifest.model_dump())
@@ -135,6 +150,8 @@ class SourceProcessDriver:
         generation: Mapping[str, str],
         manifest: ResumeManifest | None = None,
     ) -> None:
+        if self._reconciliation_required:
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
         if not self.supports(scope) or self.process is not None:
             raise SourceActivationError()
         self.stop_file.unlink(missing_ok=True)
@@ -146,7 +163,7 @@ class SourceProcessDriver:
         if manifest is not None:
             env["SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION"] = manifest.model_dump_json()
         self.process = await asyncio.create_subprocess_exec(
-            *self.command,
+            *(self.resume_command if manifest is not None else self.command),
             env=env,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
@@ -158,7 +175,8 @@ class SourceProcessDriver:
 
     async def is_running(self, scope: Scope, generation_id: str) -> bool:
         if (
-            not self.supports(scope)
+            self._reconciliation_required
+            or not self.supports(scope)
             or self.process is None
             or self._owned_generation is None
             or self._owned_generation.get("workerGenerationId") != generation_id

@@ -104,7 +104,9 @@ class CameraManifestEntry(_StrictModel):
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
-        if self.private_evidence_upload and (self.tracked_v17 is None or not self.live or self.evidence_dir is None):
+        if self.private_evidence_upload and (
+            self.tracked_v17 is None or not self.live or self.evidence_dir is None
+        ):
             raise ValueError("camera runtime manifest is invalid")
         if self.tracked_v17 is not None and (
             not self.live

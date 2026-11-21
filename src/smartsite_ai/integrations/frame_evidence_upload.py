@@ -27,7 +27,10 @@ class TrackedFrameEvidenceUploader:
             raise ValueError("Tracked evidence envelope is invalid")
         try:
             envelope = json.loads(wire, object_pairs_hook=_reject_duplicate_json_keys)
-            if set(envelope) != {"schemaVersion", "event", "context"} or envelope["schemaVersion"] != "1.0.0":
+            if (
+                set(envelope) != {"schemaVersion", "event", "context"}
+                or envelope["schemaVersion"] != "1.0.0"
+            ):
                 raise ValueError()
             event = envelope["event"]
             TrackedObservationEvent.model_validate(event)
@@ -58,7 +61,9 @@ class TrackedFrameEvidenceUploader:
             if is_link_like(target) or target.resolve(strict=True).parent != self._root:
                 raise ValueError()
             before = target.stat()
-            descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(
+                target, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
             with os.fdopen(descriptor, "rb") as handle:
                 opened = os.fstat(handle.fileno())
                 if not stat.S_ISREG(opened.st_mode) or not 4 <= opened.st_size <= 1_048_576:

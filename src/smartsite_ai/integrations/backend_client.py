@@ -1,6 +1,6 @@
 import asyncio
-import json
 import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -12,11 +12,11 @@ from smartsite_ai.config import Settings
 from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
 from smartsite_ai.domain.configuration_bundle import _reject_duplicate_json_keys
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
+from smartsite_ai.domain.frame_evidence_receipt import FrameEvidenceReceipt
 from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
 from smartsite_ai.domain.tracked_frame_result import TrackedFrameResult
 from smartsite_ai.domain.tracked_observations import TrackedObservationEvent
 from smartsite_ai.domain.tracked_raw_receipt import TrackedRawReceipt
-from smartsite_ai.domain.frame_evidence_receipt import FrameEvidenceReceipt
 from smartsite_ai.integrations.worker_generation import WorkerGenerationCredential
 
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
@@ -349,7 +349,10 @@ class BackendClient:
             raise ValueError("Frame evidence is invalid")
         try:
             envelope = json.loads(wire, object_pairs_hook=_reject_duplicate_json_keys)
-            if set(envelope) != {"schemaVersion", "context", "event"} or envelope["schemaVersion"] != "1.0.0":
+            if (
+                set(envelope) != {"schemaVersion", "context", "event"}
+                or envelope["schemaVersion"] != "1.0.0"
+            ):
                 raise ValueError()
             event = envelope["event"]
             TrackedObservationEvent.model_validate(event)
@@ -371,7 +374,9 @@ class BackendClient:
             or credential.stream_session_id != context.stream_session_id
             or event["streamSessionId"].lower() != context.stream_session_id
         ):
-            raise BoundDeliveryCredentialUnavailable("Original generation credential is unavailable")
+            raise BoundDeliveryCredentialUnavailable(
+                "Original generation credential is unavailable"
+            )
         headers = self._get_headers()
         headers.pop("Content-Type", None)
         headers.pop("content-type", None)
@@ -391,12 +396,16 @@ class BackendClient:
             files={"frame": ("frame.jpg", image, "image/jpeg")},
             follow_redirects=False,
         ) as response:
-            body = await self._read_tracked_json(response, limit=4096, label="Frame evidence receipt")
+            body = await self._read_tracked_json(
+                response, limit=4096, label="Frame evidence receipt"
+            )
         try:
             receipt = FrameEvidenceReceipt.model_validate(
                 json.loads(body, object_pairs_hook=_reject_duplicate_json_keys)
             )
-            receipt.require_match(event_id, payload_hash, context.binding_hash(payload_hash), digest)
+            receipt.require_match(
+                event_id, payload_hash, context.binding_hash(payload_hash), digest
+            )
         except ValueError:
             raise ValueError("Frame evidence receipt is invalid or does not match") from None
         return receipt

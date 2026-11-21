@@ -1,6 +1,7 @@
 """A private storage receipt is not a raw event receipt or frame admission."""
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator
 
@@ -21,9 +22,11 @@ class FrameEvidenceReceipt(_StrictFrozenModel):
     def validate_event_id(cls, value: str) -> str:
         return _validate_lowercase_uuid(value, field_name="receipt eventId")
 
-    def require_match(self, event_id: str, payload_hash: str, binding_hash: str, sha256: str) -> None:
+    def require_match(
+        self, event_id: str, payload_hash: str, binding_hash: str, sha256: str
+    ) -> None:
         if (
-            self.event_id != event_id
+            self.event_id != str(UUID(event_id))
             or self.payload_hash != payload_hash
             or self.binding_hash != binding_hash
             or self.sha256 != sha256

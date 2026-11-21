@@ -1104,7 +1104,8 @@ class OutboxDispatcher:
         retry_max: timedelta = timedelta(minutes=5),
         generation_credential: WorkerGenerationCredential | None = None,
         tracked_batch_limit: int | None = None,
-        tracked_evidence_upload: Callable[[WorkerGenerationCredential, bytes], Awaitable[None]] | None = None,
+        tracked_evidence_upload: Callable[[WorkerGenerationCredential, bytes], Awaitable[None]]
+        | None = None,
     ) -> None:
         if retry_base <= timedelta(0):
             raise ValueError("dispatcher retry_base must be positive")

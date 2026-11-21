@@ -14,7 +14,6 @@ from smartsite_ai.core.region_configuration_store import RegionConfigurationStor
 from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
 from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
-from smartsite_ai.integrations.frame_evidence_upload import TrackedFrameEvidenceUploader
 from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile, experimental_ppe_profile
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.config import StreamConfig
@@ -24,6 +23,7 @@ from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
+from smartsite_ai.integrations.frame_evidence_upload import TrackedFrameEvidenceUploader
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.integrations.worker_generation import (
     GenerationBoundSource,
@@ -253,7 +253,9 @@ def assemble_sessions(
                 tracked_batch_limit=tracked_capture.max_pending
                 if tracked_capture is not None
                 else None,
-                tracked_evidence_upload=TrackedFrameEvidenceUploader(delivery_backend, camera.evidence_dir)
+                tracked_evidence_upload=TrackedFrameEvidenceUploader(
+                    delivery_backend, camera.evidence_dir
+                )
                 if camera.entry.private_evidence_upload and camera.evidence_dir is not None
                 else None,
             ),

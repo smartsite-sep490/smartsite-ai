@@ -312,3 +312,31 @@ def test_windows_profile_cannot_publish_plaintext_credential(tmp_path, monkeypat
             expected=expected,
         )
     assert path.read_bytes() == original
+
+
+def test_source_control_cli_keeps_preview_and_resume_options_together(tmp_path, monkeypatch):
+    from smartsite_ai.tools import run_camera_runtime as runtime
+
+    received = {}
+
+    async def capture_manifest(manifest, **options):
+        received.update(options)
+        return 0
+
+    monkeypatch.setattr(runtime, "run_manifest", capture_manifest)
+    assert (
+        runtime.run(
+            [
+                "--manifest",
+                str(tmp_path / "runtime.json"),
+                "--source-control-profile",
+                str(tmp_path / "host.json"),
+                "--preview-port",
+                "8123",
+                "--require-resume-manifest",
+            ]
+        )
+        == 0
+    )
+    assert received["preview_port"] == 8123
+    assert received["require_resume_manifest"] is True

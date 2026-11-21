@@ -279,6 +279,7 @@ def run(argv: list[str] | None = None) -> int:
                     expected_camera_id=args.expected_camera_id,
                     generation_credential_file=args.generation_credential_file,
                     expected_outbox=args.expected_outbox,
+                    **preview_options,
                     **resume_options,
                 )
             )

@@ -65,8 +65,20 @@ class OpenCvFrameSource:
         *,
         monotonic_clock: Callable[[], float] = monotonic,
         sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        live_read_attempts: int = 1,
+        live_read_retry_delay: float = 0.1,
     ) -> None:
+        if type(live_read_attempts) is not int or not 1 <= live_read_attempts <= 5:
+            raise ValueError("live_read_attempts must be an integer in [1, 5]")
+        if (
+            type(live_read_retry_delay) not in (int, float)
+            or not math.isfinite(live_read_retry_delay)
+            or not 0 < live_read_retry_delay <= 1
+        ):
+            raise ValueError("live_read_retry_delay must be finite in (0, 1]")
         self.config = config
+        self._live_read_attempts = live_read_attempts
+        self._live_read_retry_delay = float(live_read_retry_delay)
         self._capture: Any | None = None
         self._release_error: str | None = None
         self._session_id: UUID | None = None
@@ -244,13 +256,22 @@ class OpenCvFrameSource:
             if not self._is_connected or self._capture is None:
                 raise SourceReadError("OpenCV source is not connected")
 
-            try:
-                ok, frame = await _drain_native_call(self._capture.read)
-            except Exception as exc:
-                raise SourceReadError(f"OpenCV failed to read frame: {type(exc).__name__}") from exc
-
-            if not ok or frame is None:
-                return None
+            # A transient empty LIVE read is not a reconnect. Keep the same
+            # capture/session and assign a sequence only to an actual frame.
+            attempts = self._live_read_attempts if self.config.is_live else 1
+            for attempt in range(attempts):
+                try:
+                    ok, frame = await _drain_native_call(self._capture.read)
+                except Exception as exc:
+                    raise SourceReadError(
+                        f"OpenCV failed to read frame: {type(exc).__name__}"
+                    ) from exc
+                if ok and frame is not None:
+                    break
+                if attempt + 1 == attempts:
+                    return None
+                # Cancellable, bounded wait under the existing read/close lock.
+                await self._sleeper(self._live_read_retry_delay)
 
             pos_msec: float | None = None
             if not self.config.is_live:

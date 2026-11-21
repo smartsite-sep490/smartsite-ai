@@ -1,5 +1,19 @@
 # Tích hợp SmartSite Backend
 
+## Opt-in empty LIVE read budget
+
+`OpenCvFrameSource` defaults to one native read. An explicitly composed worker may
+set `live_read_attempts=3` and `live_read_retry_delay=0.1` to tolerate transient
+empty reads on the **same open capture**. Attempts are bounded to 1–5 and delay is
+finite in (0, 1] seconds. No network/camera reopen, new session or synthetic frame is
+created. Real frames retain their actual capture time and consecutive sequences.
+Replay EOF remains immediate; native exceptions and corrupt frames still fail.
+Exhaustion returns `None` through the existing worker failure path. Cancellation
+propagates, and native reads still drain before release. The retry count/backoff
+does not bound the duration of a blocked native read; that existing limitation
+requires process-level supervision. No worker opts in automatically, and this is
+not evidence of physical-camera, reconnection or production acceptance.
+
 Nguồn chuẩn: `contracts/schemas/v1/technical-observation-event.json` tại commit bất biến ghi trong `contracts/metadata.json` của repository `smartsite`.
 
 Phiên bản event contract đang dùng: **1.0.0**. Schema và golden vectors được vendor nguyên bytes; CI tải đúng source commit và fail nếu có drift.

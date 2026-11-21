@@ -23,6 +23,7 @@ from smartsite_ai.ingestion.worker import StreamWorker
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
 from smartsite_ai.integrations.configuration_poller import CameraConfigurationPoller
+from smartsite_ai.integrations.frame_evidence_upload import TrackedFrameEvidenceUploader
 from smartsite_ai.integrations.outbox import OutboxDispatcher, SqliteEventOutbox
 from smartsite_ai.integrations.worker_generation import (
     GenerationBoundSource,
@@ -203,6 +204,7 @@ def assemble_sessions(
             tracked_v17=tracked_capture is not None,
         )
         outbox = SqliteEventOutbox(camera.outbox)
+        delivery_backend = backend_client_factory()
         source = source_factory(camera.source_config)
         if plan.generation is not None:
             plan.generation.ensure_current(datetime.now(UTC))
@@ -244,12 +246,17 @@ def assemble_sessions(
             outbox=outbox,
             dispatcher=OutboxDispatcher(
                 outbox,
-                backend_client_factory(),
+                delivery_backend,
                 generation_credential=plan.generation
                 if tracked_capture is not None or camera.entry.generation_bound_event_delivery
                 else None,
                 tracked_batch_limit=tracked_capture.max_pending
                 if tracked_capture is not None
+                else None,
+                tracked_evidence_upload=TrackedFrameEvidenceUploader(
+                    delivery_backend, camera.evidence_dir
+                )
+                if camera.entry.private_evidence_upload and camera.evidence_dir is not None
                 else None,
             ),
             tracked_capture=tracked_capture,

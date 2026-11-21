@@ -6,7 +6,7 @@ import asyncio
 import json
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -1104,6 +1104,8 @@ class OutboxDispatcher:
         retry_max: timedelta = timedelta(minutes=5),
         generation_credential: WorkerGenerationCredential | None = None,
         tracked_batch_limit: int | None = None,
+        tracked_evidence_upload: Callable[[WorkerGenerationCredential, bytes], Awaitable[None]]
+        | None = None,
     ) -> None:
         if retry_base <= timedelta(0):
             raise ValueError("dispatcher retry_base must be positive")
@@ -1120,6 +1122,7 @@ class OutboxDispatcher:
         self._retry_base = retry_base
         self._retry_max = retry_max
         self._generation_credential = generation_credential
+        self._tracked_evidence_upload = tracked_evidence_upload
 
     async def drain_tracked_once(self, *, limit: int) -> int:
         """Send one bounded batch. A failed part leaves the full frame retryable."""
@@ -1131,6 +1134,8 @@ class OutboxDispatcher:
         for frame_id, parts in await self._outbox.ready_tracked_parts(credential, limit=limit):
             receipts = []
             for part in parts:
+                if self._tracked_evidence_upload is not None:
+                    await self._tracked_evidence_upload(credential, part)
                 receipts.append(await self._backend.post_tracked_part(credential, part))
             if await self._outbox.confirm_tracked_parts_stored(
                 credential, frame_id, tuple(receipts)

@@ -74,7 +74,15 @@ be mapped explicitly as a device after operator review. Approved video mounts ca
 use the existing runtime source path with `live:false`; tracked-v1.7 LIVE delivery
 cannot be reused as a fabricated replay generation.
 
-Events and images are separate: the current local evidence writer writes under
-`/state`, which a cloud Backend cannot read as its own filesystem. Shared media,
-source-control gateway and real two-client acceptance must be completed before
-calling the deployed MF05/MF06 flow ready. API health alone is not camera health.
+Events and images are separate: a cloud Backend cannot read the worker's `/state`
+volume. The optional `privateEvidenceUpload: true` camera entry sends original
+tracked LIVE frames to private Backend storage before raw observations. It requires
+the paired Backend release, reviewed tracked runtime profile and storage flag;
+see [private frame upload](private-frame-upload.md) for receipt semantics,
+historical-media migration and rollback. Leave the option absent until these
+conditions are qualified. Upload does not expose live preview or enable source
+control across a network.
+
+The source-control gateway and real two-client acceptance must still be completed
+before calling the deployed MF05/MF06 flow ready. API health alone is not camera
+health.

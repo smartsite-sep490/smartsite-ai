@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -11,6 +12,7 @@ from smartsite_ai.config import Settings
 from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
 from smartsite_ai.domain.configuration_bundle import _reject_duplicate_json_keys
 from smartsite_ai.domain.event_delivery_context import EventDeliveryContext
+from smartsite_ai.domain.frame_evidence_receipt import FrameEvidenceReceipt
 from smartsite_ai.domain.observations import TechnicalObservationEvent, validate_uuid_str
 from smartsite_ai.domain.tracked_frame_result import TrackedFrameResult
 from smartsite_ai.domain.tracked_observations import TrackedObservationEvent
@@ -330,6 +332,82 @@ class BackendClient:
             receipt.require_match(event_id, payload_hash, context.binding_hash(payload_hash))
         except ValueError:
             raise ValueError("Tracked raw receipt is invalid or does not match") from None
+        return receipt
+
+    async def upload_tracked_frame(
+        self, credential: WorkerGenerationCredential, wire: bytes, image: bytes
+    ) -> FrameEvidenceReceipt:
+        """Upload once; the durable tracked outbox owns retries and raw event admission."""
+        if not isinstance(wire, bytes) or len(wire) > 1024 * 1024:
+            raise ValueError("Tracked part must be bounded original bytes")
+        if (
+            not isinstance(image, bytes)
+            or not 4 <= len(image) <= 1_048_576
+            or not image.startswith(b"\xff\xd8")
+            or not image.endswith(b"\xff\xd9")
+        ):
+            raise ValueError("Frame evidence is invalid")
+        try:
+            envelope = json.loads(wire, object_pairs_hook=_reject_duplicate_json_keys)
+            if (
+                set(envelope) != {"schemaVersion", "context", "event"}
+                or envelope["schemaVersion"] != "1.0.0"
+            ):
+                raise ValueError()
+            event = envelope["event"]
+            TrackedObservationEvent.model_validate(event)
+            context = EventDeliveryContext.model_validate(envelope["context"])
+            event_id = validate_uuid_str(event["eventId"], "eventId")
+            payload_hash = compute_canonical_payload_hash(event)
+            digest = hashlib.sha256(image).hexdigest()
+            if context.source_kind != "LIVE" or not any(
+                item.get("kind") == "FRAME" and item.get("sha256") == digest
+                for item in event.get("evidence", [])
+            ):
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Tracked evidence envelope is invalid") from None
+        if (
+            not isinstance(credential, WorkerGenerationCredential)
+            or credential.camera_id != context.camera_id
+            or credential.worker_generation_id != context.worker_generation_id
+            or credential.stream_session_id != context.stream_session_id
+            or event["streamSessionId"].lower() != context.stream_session_id
+        ):
+            raise BoundDeliveryCredentialUnavailable(
+                "Original generation credential is unavailable"
+            )
+        headers = self._get_headers()
+        headers.pop("Content-Type", None)
+        headers.pop("content-type", None)
+        headers["x-worker-generation-secret"] = credential.secret.get_secret_value()
+        headers["accept-encoding"] = "identity"
+        origin = self._base_url.removesuffix(INGESTION_ENDPOINT_PATH)
+        client = await self._get_client()
+        async with client.stream(
+            "POST",
+            f"{origin}/api/v1/integrations/ai/tracked-parts/evidence",
+            headers=headers,
+            data={
+                "schemaVersion": "1.0.0",
+                "event": json.dumps(event, ensure_ascii=False, allow_nan=False),
+                "context": json.dumps(envelope["context"], ensure_ascii=False, allow_nan=False),
+            },
+            files={"frame": ("frame.jpg", image, "image/jpeg")},
+            follow_redirects=False,
+        ) as response:
+            body = await self._read_tracked_json(
+                response, limit=4096, label="Frame evidence receipt"
+            )
+        try:
+            receipt = FrameEvidenceReceipt.model_validate(
+                json.loads(body, object_pairs_hook=_reject_duplicate_json_keys)
+            )
+            receipt.require_match(
+                event_id, payload_hash, context.binding_hash(payload_hash), digest
+            )
+        except ValueError:
+            raise ValueError("Frame evidence receipt is invalid or does not match") from None
         return receipt
 
     @staticmethod

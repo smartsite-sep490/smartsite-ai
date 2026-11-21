@@ -65,6 +65,14 @@ jobs:
             git -C "$source_checkout" show "${tracked_commit}:${tracked_path}" > "$RUNNER_TEMP/source-tracked-bytes.json"
             cmp "$tracked_path" "$RUNNER_TEMP/source-tracked-bytes.json"
           done
+          evidence_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["aiFrameEvidenceReceipt"]["sourceCommitSha"])')
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$evidence_commit"
+          for evidence_path in \
+            contracts/schemas/v1/ai-frame-evidence-receipt.json \
+            contracts/examples/v1/ai-frame-evidence-receipt.json; do
+            git -C "$source_checkout" show "${evidence_commit}:${evidence_path}" > "$RUNNER_TEMP/source-evidence-bytes.json"
+            cmp "$evidence_path" "$RUNNER_TEMP/source-evidence-bytes.json"
+          done
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .
@@ -92,6 +100,8 @@ jobs:
           for version in ("1.5", "1.6", "1.7"):
               assert f"smartsite_ai/contracts/schemas/v{version}/technical-observation-event.json" in names
           assert "smartsite_ai/contracts/examples/v1.7/one-person-camera-ppe.json" in names
+          assert "smartsite_ai/contracts/schemas/v1/ai-frame-evidence-receipt.json" in names
+          assert "smartsite_ai/contracts/examples/v1/ai-frame-evidence-receipt.json" in names
           PY
       - name: Verify minimal runtime package
         run: |

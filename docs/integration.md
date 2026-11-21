@@ -159,3 +159,63 @@ mixed-version canary against a widened v1.7 schema. Local unit/mock transport pr
 do not qualify a model, physical camera, production rollout or end-to-end alert flow.
 
 AI có version/image riêng. Mỗi release ghi model version, cấu hình có ảnh hưởng, phiên bản contract và Backend đã kiểm thử cùng. Thay model không mặc nhiên đồng nghĩa API thay đổi; cần chạy lại đo chất lượng và ca nghiệm thu.
+
+## Shared capture preview and setup images (explicit runtime opt-in)
+
+`smartsite-ai-camera-runtime --manifest /absolute/private/runtime.json --preview-port 8123`
+opts into the media host. Without `--preview-port`, the runtime keeps its previous inference-only
+construction. Configure `SMARTSITE_AI_PREVIEW_SERVICE_TOKEN` server-side to match the Backend's
+`SMARTSITE_AI_SERVICE_TOKEN`. The token is never a browser credential or a CLI argument.
+The host uses `SMARTSITE_AI_HOST` (default127.0.0.1). Its socket is bound before runtime preflight
+or model/camera activation, so a port conflict cannot leave a second camera owner running.
+
+Configure the Backend's existing `SMARTSITE_AI_PREVIEW_SOURCES` allowlist for the camera's external
+ID and this host's origin. Loopback is appropriate only when reachable from the Backend host;
+remote operation still requires reviewed TLS/network routing and secret management. This source
+addition does not configure a tunnel, change the website, or deploy either service.
+
+The opt-in assembly gives each StreamWorker a `PreviewFrameQueue()` and one CameraPreviewObserver.
+Validated immutable frames enter this single-slot lane before inference sampling. A slow encoder
+or viewer cannot steal inference frames, block capture on a consumer, or open another camera.
+Source release replaces the preview generation; stopped/failed streams invalidate cached images.
+An encoding that completes after invalidation is discarded. Runtime completion/cancellation drains
+owned preview encoding after worker/poller cleanup. Previously delivered pixels remain client-held
+bytes; the API and Backend recheck freshness for each new response.
+
+The observer-only routes use the server Bearer token and accept exactly one cameraExternalId query:
+
+- `/v1/realtime/video-stream`: existing Backend-compatible9-key CameraMediaFrame NDJSON, at most640px
+  per side and180000characters per image data URL. Images contain original session/sequence/capture
+  metadata and no detections, Worker identity or business conclusion. The API reserves at most2
+  viewers per camera/4per runtime; response lifetime includes stalled ASGI sends and is bounded by
+  600seconds plus at most50ms for a final empty body. Browser disconnect releases a viewer slot,
+  not the capture owner.
+- `/v1/realtime/configuration-image`: the same capture observer provides a fresh image with purpose
+  REGION_CONFIGURATION, explicit LIVE/REPLAY source kind and SHA256 of the exact JPEG bytes. It
+  does not start the separate capture-only configuration runtime. Manager/Site authorization and
+  version/reference persistence remain in the Backend's existing configuration-image flow.
+
+Encoding is off the event loop, at most10encodes/second per camera, with at most one pending frame.
+When no current raw frame is available, the route returns503; a request never activates a camera/model. Raw display pixels
+are not retained evidence and are not an AI overlay. The analyzed-frame `/preview/latest` surface is now supplied by the same opt-in host.
+Physical camera/browser acceptance, independent detection quality and rollout remain separate gates.
+### Exact analyzed-frame overlay
+
+`/v1/realtime/preview/latest?cameraExternalId=...` requires the same server token and camera scope
+as the raw stream. It returns the existing `{sourceKind,frame}` response expected by the Backend.
+The processing worker offers an immutable packet after detector/frame binding, configuration guards
+and temporal processing. One pending packet and one off-loop encoder retain original pixels,
+capture time, sequence, observations and confirmed Zone occupancy. They do not borrow a newer raw
+frame. Configuration/session/freshness are checked before/after encoding and again on API reads.
+When no current analyzed frame is available, the route returns503, including during warmup. Raw preview remains independent.
+
+Expanded v2 policies resolve each person's bottom-center location using the same geometry helper
+and canonical Camera/Region PPE resolver. Required PPE with no observation remains UNKNOWN;
+COMPLIANT requires a nonempty required set with every item observed PRESENT. DISABLED does not
+become a safety-compliance conclusion. Track IDs remain local technical tracks. TemporalCONFIRMED
+preview is technical evidence status, not a Backend-approved case, Worker identity or Zone permission.
+The immutable occupancy snapshot keeps people visibly inside between entry transitions.
+
+A preview sink failure is logged using a fixed safe diagnostic and the sink is retired until restart;
+it does not interrupt durable event handling. Preview/API availability does not prove successful
+Backend ingestion, persistence, recipient notification or independent model accuracy.

@@ -10,7 +10,7 @@ from uuid import UUID
 from smartsite_ai.ingestion.backoff import ExponentialBackoff
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
-from smartsite_ai.ingestion.queue import BoundedFrameQueue
+from smartsite_ai.ingestion.queue import BoundedFrameQueue, PreviewFrameQueue
 from smartsite_ai.ingestion.source import (
     FrameIntegrityError,
     FrameSource,
@@ -36,10 +36,19 @@ class StreamWorker:
         source: FrameSource | None = None,
         sleeper: Callable[[float], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] | None = None,
+        *,
+        preview_frames: PreviewFrameQueue | None = None,
     ) -> None:
+        if preview_frames is not None and (
+            not isinstance(preview_frames, PreviewFrameQueue) or preview_frames.is_closed
+        ):
+            raise ValueError("Preview requires an open, single-frame queue")
         self.config = config
         self.source = source
         self.queue = BoundedFrameQueue(maxsize=config.max_queue_size)
+        # The runtime owns the observer/encoder. Capture only offers immutable
+        # validated frames; it never waits for preview or inference consumers.
+        self._preview_frames = preview_frames
         self.backoff = ExponentialBackoff(
             initial_delay=config.reconnect_initial_delay,
             max_delay=config.reconnect_max_delay,
@@ -112,6 +121,7 @@ class StreamWorker:
         """Finalize worker state on any terminal exit path exactly once."""
         self._has_stopped = True
         self._stop_event.set()
+        self._invalidate_preview(terminal=True)
         if not await self._close_source_safely():
             self.state = StreamState.ERROR
         self.queue.close()
@@ -133,8 +143,15 @@ class StreamWorker:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
 
+    def _invalidate_preview(self, *, terminal: bool = False) -> None:
+        if self._preview_frames is not None:
+            self._preview_frames.clear()
+            if terminal:
+                self._preview_frames.close()
+
     async def _close_source_safely(self) -> bool:
         """Close the owned attempt, returning false when release cannot be proven."""
+        self._invalidate_preview()
         async with self._source_close_lock:
             if self.source is None or not self._source_attempt_active:
                 return not self._source_release_failed
@@ -269,6 +286,11 @@ class StreamWorker:
                             self.consecutive_failures = 0
                             self.backoff.reset()
 
+                        # Preview is independent of inference sampling. Both
+                        # lanes share this one source read and immutable frame.
+                        if self._preview_frames is not None and not self._preview_frames.is_closed:
+                            self._preview_frames.put(frame)
+
                         # 4. Deterministic Sampling (target_fps limit)
                         if self.config.target_fps is not None:
                             min_interval = 1.0 / self.config.target_fps
@@ -331,6 +353,7 @@ class StreamWorker:
 
         # Unblock any downstream consumers waiting on queue.get()
         self.queue.close()
+        self._invalidate_preview(terminal=True)
 
         # Actively close the source first to unblock any hung network/socket read_frame()
         close_succeeded = await self._close_source_safely()
@@ -380,6 +403,18 @@ class StreamWorker:
     async def get_frame(self) -> FrameEnvelope:
         """Asynchronously retrieve the next frame envelope from the bounded queue."""
         return await self.queue.get()
+
+    def owns_current_frame(self, frame: FrameEnvelope) -> bool:
+        """Check source lineage for observer publication; this is not Worker identity."""
+        return (
+            self.state == StreamState.STREAMING
+            and not self._first_frame_in_connection
+            and frame.stream_id == self.config.stream_id
+            and frame.camera_external_id == self.config.camera_external_id
+            and frame.session_id == self._current_session_id
+            and self._last_sequence_number is not None
+            and frame.sequence_number <= self._last_sequence_number
+        )
 
     def snapshot(self) -> StreamStatus:
         """Return an immutable status snapshot of this stream."""

@@ -148,3 +148,73 @@ class BoundedFrameQueue:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+
+class PreviewFrameQueue:
+    """Single-frame observer lane; source invalidation also fences pending getters."""
+
+    def __init__(self) -> None:
+        self._current = BoundedFrameQueue(maxsize=1)
+        self._revision = 0
+        self._closed = False
+        self._enqueued_count = 0
+        self._dequeued_count = 0
+        self._dropped_count = 0
+
+    @property
+    def revision(self) -> int:
+        return self._revision
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    @property
+    def enqueued_count(self) -> int:
+        return self._enqueued_count
+
+    @property
+    def dequeued_count(self) -> int:
+        return self._dequeued_count
+
+    @property
+    def dropped_count(self) -> int:
+        return self._dropped_count
+
+    def put(self, frame: FrameEnvelope) -> FrameEnvelope | None:
+        dropped = self._current.put(frame)
+        self._enqueued_count += 1
+        self._dropped_count += int(dropped is not None)
+        return dropped
+
+    def empty(self) -> bool:
+        return self._current.empty()
+
+    def clear(self) -> None:
+        self._revision += 1
+        previous = self._current
+        if not self._closed:
+            self._current = BoundedFrameQueue(maxsize=1)
+        previous.clear()
+        previous.close()
+
+    def close(self) -> None:
+        self._closed = True
+        self.clear()
+
+    async def get(self) -> FrameEnvelope:
+        while True:
+            current = self._current
+            try:
+                frame = await current.get()
+            except QueueClosedError:
+                if self._closed:
+                    raise
+                continue
+            if self.is_closed:
+                raise QueueClosedError("Preview queue is closed")
+            if current is self._current:
+                self._dequeued_count += 1
+                return frame
+            # The old generation may have dequeued pixels before clear(). Retry
+            # against the replacement queue, retaining its first fresh frame.

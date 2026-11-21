@@ -863,6 +863,10 @@ Tests must not depend on paid external API calls, production credentials, live c
 
 ## Docker
 
+For the explicit YOLO camera worker image, operator configuration and shared-Backend
+limits, see [edge worker container](docs/edge-worker-container.md). The API image
+below remains separate and does not include vision inference.
+
 Build and run:
 
 ```sh

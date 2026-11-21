@@ -1,0 +1,30 @@
+services:
+  camera-worker:
+    image: ${SMARTSITE_AI_WORKER_IMAGE:?Set a reviewed worker image tag or digest}
+    init: true
+    restart: "no"
+    env_file:
+      - ${SMARTSITE_AI_WORKER_ENV_FILE:?Set the private environment file path}
+    command: ["--manifest", "/config/runtime.json", "--preview-port", "8001"]
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - type: bind
+        source: ${SMARTSITE_AI_CONFIG_DIR:?Set the reviewed config directory}
+        target: /config
+        read_only: true
+      - type: bind
+        source: ${SMARTSITE_AI_MODEL_DIR:?Set the approved local model directory}
+        target: /models
+        read_only: true
+      - worker-state:/state
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=268435456,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    stop_grace_period: 30s
+
+volumes:
+  worker-state:

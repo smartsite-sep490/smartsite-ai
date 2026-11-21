@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1",
+  "modelSpec": "/config/model-spec.json",
+  "observationSchemaVersion": "1.1.0",
+  "pollIntervalSeconds": 5,
+  "staleAfterSeconds": 60,
+  "deliveryIntervalSeconds": 0.25,
+  "evidenceMaxBytes": 1048576,
+  "cameras": [
+    {
+      "streamId": "edge-camera-01",
+      "cameraId": "11111111-1111-4111-8111-111111111111",
+      "cameraExternalId": "REPLACE-WITH-BACKEND-CAMERA",
+      "ppeRegionId": "22222222-2222-4222-8222-222222222222",
+      "source": { "kind": "env", "name": "SMARTSITE_AI_CAMERA_SOURCE" },
+      "live": true,
+      "targetFps": 5,
+      "outbox": "/state/camera-01.sqlite3",
+      "generationCredentialFile": "/state/generation.json",
+      "evidenceDir": "/state/evidence-camera-01",
+      "trackedV17": {
+        "siteId": "33333333-3333-4333-8333-333333333333",
+        "profileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "pendingSeconds": 30.0,
+        "predecessorWaitSeconds": 20.0,
+        "maxPending": 8,
+        "maxBytes": 1000000
+      }
+    }
+  ]
+}

@@ -36,6 +36,7 @@ from smartsite_ai.runtime.source_control_child import (
     GENERATION_ENV,
     SOURCE_ENV,
     bind_source_control_child,
+    bind_source_control_child_memory,
 )
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
@@ -82,10 +83,6 @@ async def run_manifest(
     require_resume_manifest: bool = False,
     source_control_profile: Path | None = None,
 ) -> int:
-    if source_control_profile is not None and os.name == "nt":
-        raise CameraRuntimeError(
-            "Source-control child profile unavailable on Windows: private credential gate"
-        )
     if source_control_profile is None and any(
         key in os.environ for key in (SOURCE_ENV, GENERATION_ENV)
     ):
@@ -119,6 +116,7 @@ async def run_manifest(
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())
+    generation_override = None
     if source_control_profile is not None:
         if (
             expected_camera_id is None
@@ -135,14 +133,23 @@ async def run_manifest(
         if len(profile_bytes) > 65_536:
             raise CameraRuntimeError("Source-control profile is too large")
         host = HostManifest.model_validate_json(profile_bytes)
-        manifest = bind_source_control_child(
-            manifest,
-            policy=SourcePolicy(host.webcams, host.videos, host.networks),
-            scopes=set(host.scopes),
-            camera_id=expected_camera_id,
-            environ=os.environ,
-            expected=expected_resume,
-        )
+        binding_options = {
+            "policy": SourcePolicy(host.webcams, host.videos, host.networks),
+            "scopes": set(host.scopes),
+            "camera_id": expected_camera_id,
+            "environ": os.environ,
+            "expected": expected_resume,
+        }
+        if os.name == "nt":
+            try:
+                manifest, generation_override = bind_source_control_child_memory(
+                    manifest, **binding_options
+                )
+            finally:
+                # Do not inherit the new generation secret into further children.
+                os.environ.pop(GENERATION_ENV, None)
+        else:
+            manifest = bind_source_control_child(manifest, **binding_options)
     else:
         manifest = bind_generation_manifest(
             manifest, generation_credential_file, expected_camera_id, expected_outbox
@@ -162,6 +169,7 @@ async def run_manifest(
             policy_v2_client_factory=lambda: BackendConfigurationClient.from_settings(
                 runtime_settings, policy_v2=True
             ),
+            generation_override=generation_override,
         )
         plans.extend(prepared)
         if failure is None and expected_resume is not None:

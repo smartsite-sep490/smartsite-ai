@@ -95,11 +95,36 @@ def bind_source_control_child(
     environ: Mapping[str, str],
     expected: ResumeManifest,
 ) -> CameraRuntimeManifest:
+    """POSIX adapter: bind trusted input and publish to the private fixed file."""
+    bound, credential = bind_source_control_child_memory(
+        manifest,
+        policy=policy,
+        scopes=scopes,
+        camera_id=camera_id,
+        environ=environ,
+        expected=expected,
+    )
+    try:
+        _persist_credential(Path(bound.cameras[0].generation_credential_file), credential)
+        return bound
+    except (ValueError, RuntimeError, OSError, TypeError):
+        raise CameraRuntimeError("Source-control child binding is unavailable or invalid") from None
+
+
+def bind_source_control_child_memory(
+    manifest: CameraRuntimeManifest,
+    *,
+    policy: SourcePolicy,
+    scopes: set[tuple[str, str]],
+    camera_id: UUID,
+    environ: Mapping[str, str],
+    expected: ResumeManifest,
+) -> tuple[CameraRuntimeManifest, WorkerGenerationCredential]:
     """Consume trusted driver env; no capture/model/Backend/DB calls and no bootstrap adoption.
 
     Source replacement and fresh-reference authoring are separate. This profile requires an
-    accepted bundle, one tracked LIVE camera, and its already-reviewed credential destination.
-    A failed later startup leaves the issued credential in place for explicit reconciliation.
+    accepted bundle, one tracked LIVE camera, and its already-reviewed runtime manifest.
+    The result keeps the credential in memory; it never publishes a plaintext file.
     """
     try:
         if len(manifest.cameras) != 1:
@@ -144,7 +169,6 @@ def bind_source_control_child(
         document = manifest.model_dump(mode="json", by_alias=True)
         document["cameras"][0]["source"] = {"kind": "env", "name": SOURCE_ENV}
         bound = parse_manifest(document)
-        _persist_credential(Path(entry.generation_credential_file), credential)
-        return bound
+        return bound, credential
     except (ValueError, RuntimeError, OSError, KeyError, TypeError):
         raise CameraRuntimeError("Source-control child binding is unavailable or invalid") from None

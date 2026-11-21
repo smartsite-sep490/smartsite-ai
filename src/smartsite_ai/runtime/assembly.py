@@ -65,12 +65,27 @@ async def preflight_manifest(
     *,
     configuration_client_factory: ConfigurationClientFactory,
     policy_v2_client_factory: ConfigurationClientFactory | None = None,
+    generation_override: WorkerGenerationCredential | None = None,
 ) -> tuple[tuple[CameraOutcome, ...] | None, tuple[CameraPlan, ...]]:
     """Confirm every camera region before a model or source is opened."""
 
     plans: list[CameraPlan] = []
     identities = [(camera.stream_id, camera.camera_external_id) for camera in bound.cameras]
     try:
+        if generation_override is not None:
+            # Only the explicit source-control child supplies this private value.
+            # Revalidate even model_construct/model_copy instances before using it.
+            generation_override = WorkerGenerationCredential.model_validate(
+                generation_override.model_dump(by_alias=True)
+            )
+            if (
+                len(bound.cameras) != 1
+                or bound.cameras[0].entry.tracked_v17 is None
+                or not bound.cameras[0].source_config.is_live
+                or generation_override.camera_id != str(bound.cameras[0].entry.camera_id)
+            ):
+                raise CameraRuntimeError("Source-control generation binding is invalid")
+            generation_override.ensure_current(datetime.now(UTC))
         for camera in bound.cameras:
             tracked = camera.entry.tracked_v17 is not None
             factory = policy_v2_client_factory if tracked else configuration_client_factory
@@ -78,13 +93,14 @@ async def preflight_manifest(
                 raise CameraRuntimeError("Tracked v1.7 requires an explicit v2 client")
             client = factory()
             try:
-                generation = None
-                if camera.entry.generation_credential_file is not None:
+                generation = generation_override
+                if generation is None and camera.entry.generation_credential_file is not None:
                     generation = load_worker_generation(
                         Path(camera.entry.generation_credential_file),
                         camera.entry.camera_id,
                         now=datetime.now(UTC),
                     )
+                if generation is not None:
                     await SqliteEventOutbox(camera.outbox).claim_worker_session(
                         camera.entry.camera_id,
                         UUID(generation.worker_generation_id),

@@ -204,9 +204,9 @@ def test_canonical_entry_profile_validates_binding_before_model(tmp_path, monkey
     )
     with pytest.raises(RuntimeError):
         asyncio.run(runtime.run_manifest(manifest_path, **kwargs))
-    starts = mode == "exact" and os.name != "nt"
+    starts = mode == "exact"
     assert calls == (["model"] if starts else [])
-    if starts:
+    if starts and os.name != "nt":
         assert (
             load_worker_generation(
                 path, UUID(bundle.camera_id), now=datetime.now(UTC)

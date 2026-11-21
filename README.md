@@ -991,6 +991,39 @@ The AI service emits technical detection evidence through `POST /api/v1/integrat
 
 ## Security and Privacy
 
+### Experimental source connection tests
+
+Run `python -m smartsite_ai.tools.run_source_control --manifest <operator-file>`
+with `SMARTSITE_AI_SOURCE_CONTROL_TOKEN` supplied server-side. The opt-in service
+binds loopback port 62035 and does not start inference. A trusted TLS gateway is
+required for remote use. The manifest defines `host_id`, `label`, `scopes`
+(Site/camera external ID pairs), `webcams` (opaque ID to index), `videos` (opaque
+ID to approved absolute file), `networks` (permitted literal-IP RTSP CIDRs), and
+optional `active_sources` (existing camera owner, source, and trusted preview
+origin). A Site wildcard camera scope delegates selection to the authenticated
+Backend. Declare every capture owner; a matching test reuses its fresh preview
+and refuses another camera's device rather than opening a duplicate reader.
+
+Authenticated capabilities and bounded tests are exposed at
+`/v1/source-control/{siteId}/{cameraExternalId}/capabilities` and `/probe`.
+RTSP credentials are separate fields; browser file paths, embedded credentials,
+DNS targets and destinations outside the configured policy are rejected. A test
+returns a short-lived JPEG and LIVE/REPLAY label. Disconnect/timeout cancels and
+reaps its decode child. It does not save a source, issue a generation, start AI,
+or create a business alert. The stock command is test-only (`applySupported=false`).
+An explicit operator composition may attach `SourceActivator`, an encrypted
+single-writer `SourceRegistry`, and `SourceProcessDriver` with fixed reviewed
+commands/environment. Tests issue short-lived scope-bound receipts; Backend
+prepare stops the prior owner before issuing a fresh generation and commit starts
+the new process. Uncertain STOPPING/STARTING states require operator reconciliation;
+they are not silently replayed as running. Host restart does not adopt unknown
+processes. Source/generation secrets stay in encrypted state and filtered child
+environment, never browser responses or command arguments. The configured runtime
+must expose a fresh session-matching preview and wait for new geometry/PPE before
+inference. Replay activation and browser ingestion remain unavailable.
+Native RTSP redirects/SDP egress still require external network enforcement and
+real-device validation; the URL allowlist alone is not a production egress fence.
+
 Gate presence mode (`gatePresenceSession`, 64 hex characters scoped by Backend) cannot carry templates or enrollment targets. It returns only technical presence reasons, never identities/authorization. Two stable observations trigger a new-face signal; the same face suppresses duplicate gate verification. Confirmed absence (2 seconds) permits reentry. Continuity embeddings stay in bounded transient RAM (128 sessions, 30-second idle expiry), with no DB/file writes. Similarity thresholds 0.55 (same/stable) and 0.45 (definitely different) are demo heuristics, not calibrated person-change accuracy or liveness.
 
 AI and biometric data must be treated as sensitive. Important principles include secrets outside source control, least-privilege service authentication, encrypted transport, controlled evidence access, explicit biometric retention rules, auditability, and no identity assignment below the approved confidence policy.

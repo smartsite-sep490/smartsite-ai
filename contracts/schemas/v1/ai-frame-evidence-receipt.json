@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.example/schemas/v1/ai-frame-evidence-receipt.json",
+  "title": "AI frame evidence storage receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "eventId", "payloadHash", "bindingHash", "sha256"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "EVIDENCE_STORED" },
+    "eventId": { "type": "string", "pattern": "^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$" },
+    "payloadHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "bindingHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

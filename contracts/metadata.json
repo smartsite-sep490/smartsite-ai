@@ -82,5 +82,16 @@
       "sourceExamplePath": "contracts/examples/v1.7/one-person-camera-ppe.json",
       "exampleSha256": "587b77a737837c00022b110d83bb5575d45a75018ee6196dbace5e1047f4770f"
     }
-  ]
+  ],
+  "aiFrameEvidenceReceipt": {
+    "schemaVersion": "1.0.0",
+    "sourceRepository": "smartsite-sep490/smartsite",
+    "sourceCommitSha": "b0917fd31a88bb840d0591ea97b2f82fdf4aacd5",
+    "path": "contracts/schemas/v1/ai-frame-evidence-receipt.json",
+    "sourcePath": "contracts/schemas/v1/ai-frame-evidence-receipt.json",
+    "schemaSha256": "f5d1d35ed177dc79b25bdb80d3509782de0abf4ce27c3bd936e282bb6c2f0957",
+    "examplePath": "contracts/examples/v1/ai-frame-evidence-receipt.json",
+    "sourceExamplePath": "contracts/examples/v1/ai-frame-evidence-receipt.json",
+    "exampleSha256": "9779e3d899b8f3f850f2717e50d09d1f70c01f73912d6b9757b928918c70bb95"
+  }
 }

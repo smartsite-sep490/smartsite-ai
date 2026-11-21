@@ -61,9 +61,11 @@ class TrackedFrame:
     persons: tuple[TrackedPerson, ...]
     subject_segments: tuple[SubjectSegment, ...] = ()
     retired_segments: tuple[RetiredSegment, ...] = ()
+    provisional_persons: tuple[TrackedPerson, ...] = ()
 
     def __post_init__(self) -> None:
-        if len({person.track_id for person in self.persons}) != len(self.persons):
+        people = self.persons + self.provisional_persons
+        if len({person.track_id for person in people}) != len(people):
             raise ValueError("person track IDs must be unique within a frame")
 
 

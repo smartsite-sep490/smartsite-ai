@@ -37,6 +37,8 @@ class _MutableTrack:
     track_id: int
     detection: NormalizedDetection
     missed_frames: int = 0
+    confirmation_streak: int = 0
+    confirmed: bool = False
 
 
 class IoUPersonTracker:
@@ -55,6 +57,7 @@ class IoUPersonTracker:
         max_segment_gap: timedelta | None = None,
         association_iou_margin: float | None = None,
         new_track_confidence: float | None = None,
+        new_track_confirmation_frames: int = 1,
     ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0 and 1")
@@ -75,11 +78,17 @@ class IoUPersonTracker:
             raise ValueError("new_track_confidence must be finite in (0, 1] or None")
         if not normalized_names:
             raise ValueError("person_class_names must not be empty")
+        if (
+            type(new_track_confirmation_frames) is not int
+            or not 1 <= new_track_confirmation_frames <= 64
+        ):
+            raise ValueError("new_track_confirmation_frames must be an integer in [1, 64]")
 
         self._iou_threshold = iou_threshold
         self._max_missed_frames = max_missed_frames
         self._association_iou_margin = association_iou_margin
         self._new_track_confidence = new_track_confidence
+        self._confirmation_frames = new_track_confirmation_frames
         self._person_class_names = normalized_names
         self._source_key: tuple[str, UUID] | None = None
         self._camera_external_id: str | None = None
@@ -111,6 +120,11 @@ class IoUPersonTracker:
             # Keep the allocation counter: old IDs must not resurrect in this session.
             self._tracks.clear()
         self._view_revision = view_revision
+        if self._confirmation_frames > 1 and self._segments.discontinuity_reason(
+            batch, view_revision=view_revision
+        ):
+            # Downstream temporal gates key numeric IDs, so never reuse one across a gap.
+            self._tracks.clear()
 
         person_detections = tuple(
             detection
@@ -126,12 +140,21 @@ class IoUPersonTracker:
             detection_index = assignments.get(track_id)
             if detection_index is None:
                 track.missed_frames += 1
-                if track.missed_frames > self._max_missed_frames:
+                if self._confirmation_frames > 1 or track.missed_frames > self._max_missed_frames:
                     del self._tracks[track_id]
                 continue
 
             track.detection = person_detections[detection_index]
             track.missed_frames = 0
+            if not track.confirmed:
+                strong = (
+                    self._new_track_confidence is None
+                    or track.detection.confidence >= self._new_track_confidence
+                )
+                track.confirmation_streak = (
+                    min(self._confirmation_frames, track.confirmation_streak + 1) if strong else 0
+                )
+                track.confirmed = track.confirmation_streak >= self._confirmation_frames
 
         new_track_ids: set[int] = set()
         for detection_index, detection in enumerate(person_detections):
@@ -144,7 +167,12 @@ class IoUPersonTracker:
                 continue
             track_id = self._next_track_id
             self._next_track_id += 1
-            self._tracks[track_id] = _MutableTrack(track_id=track_id, detection=detection)
+            self._tracks[track_id] = _MutableTrack(
+                track_id=track_id,
+                detection=detection,
+                confirmation_streak=1,
+                confirmed=self._confirmation_frames == 1,
+            )
             new_track_ids.add(track_id)
 
         self._last_sequence = batch.sequence_number
@@ -152,9 +180,17 @@ class IoUPersonTracker:
         current_persons = tuple(
             TrackedPerson(track_id=track_id, detection=self._tracks[track_id].detection)
             for track_id in sorted(current_track_ids)
+            if self._tracks[track_id].confirmed
+        )
+        provisional_persons = tuple(
+            TrackedPerson(track_id=track_id, detection=self._tracks[track_id].detection)
+            for track_id in sorted(current_track_ids)
+            if not self._tracks[track_id].confirmed
         )
         return self._segments.observe(
-            TrackedFrame(batch=batch, persons=current_persons),
+            TrackedFrame(
+                batch=batch, persons=current_persons, provisional_persons=provisional_persons
+            ),
             view_revision=view_revision,
             ambiguous_track_ids=retired_track_ids,
         )

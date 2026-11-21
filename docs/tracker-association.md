@@ -38,3 +38,28 @@ rule can omit a real occluded low-confidence person; it must not be presented as
 a complete count of people. Empty frames and ambiguous ownership still end segment
 continuity. Both options default to `None` and need an explicit evaluated profile;
 neither establishes a Worker identity or bridges missing observations.
+
+## Optional consecutive admission
+
+`new_track_confirmation_frames` is a strict integer from 1 to 64, defaulting to 1
+so existing assembly remains unchanged. Values above 1 require consecutive,
+unambiguous observations meeting `new_track_confidence` (when configured) before
+admitting a Person/segment to PPE, Zone or durable evidence processing. Weak
+observations can sustain an already confirmed track, but cannot confirm a new one.
+Absence, ambiguity and the existing source/view/profile/time/sequence discontinuity
+boundaries reset confirmation. An admitted segment begins at the actual confirming
+frame, with no backfill or connection to a retired subject.
+In this opt-in mode, absence or discontinuity also retires the numeric track ID,
+even within `max_missed_frames`, so downstream track-keyed temporal gates cannot
+inherit a previous subject's state. Default-1 missed-frame behavior stays unchanged.
+
+Pending tracks remain internal provisional competitors for PPE association; they
+cannot receive PPE observations and cannot make shared PPE belong to a confirmed
+neighbor. The original detector batch is unchanged. Captured frames with only
+pending tracks retain the empty-observation lifecycle, which is not a safe-scene
+or no-people assertion. Confirmed observations are not a total count of real people.
+
+The option delays admission and can miss brief real people; persistent false
+detections can still confirm. No runtime profile enables it automatically. A
+reviewed profile and bounded physical/crowd/latency evaluation are required before
+operational adoption; synthetic tests alone do not establish an accuracy gain.

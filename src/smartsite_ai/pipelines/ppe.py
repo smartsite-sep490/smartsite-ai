@@ -224,7 +224,7 @@ class PpePipeline:
             candidates: list[tuple[float, TrackedPerson]] = []
             detection_center = box_center(detection.bounding_box)
             # Region membership controls emission, not who could own this PPE.
-            for person in tracked_frame.persons:
+            for person in tracked_frame.persons + tracked_frame.provisional_persons:
                 coverage = intersection_over_second(person.bounding_box, detection.bounding_box)
                 if coverage < self._minimum_association_coverage:
                     continue

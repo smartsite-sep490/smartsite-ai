@@ -1,8 +1,10 @@
 """Conservative internal continuity; no wire admission or tracker qualification."""
 
 from datetime import timedelta
+from typing import Literal
 from uuid import uuid4
 
+from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment, TrackedFrame
 
 
@@ -18,11 +20,11 @@ class SegmentLifecycle:
         self._previous: TrackedFrame | None = None
         self._view_revision: int | None = None
 
-    def observe(
-        self, frame: TrackedFrame, *, view_revision: int | None, ambiguous_track_ids: set[int]
-    ) -> TrackedFrame:
+    def discontinuity_reason(
+        self, batch: DetectionBatch, *, view_revision: int | None
+    ) -> Literal["RECONNECT", "VIEW_CHANGE", "PROFILE_CHANGE", "FRAME_DISCONTINUITY"] | None:
+        """Share the same continuity boundary with new-track admission."""
         previous = self._previous
-        batch = frame.batch
         scope_changed = previous is not None and (
             previous.batch.stream_id != batch.stream_id
             or previous.batch.session_id != batch.session_id
@@ -53,10 +55,17 @@ class SegmentLifecycle:
                 )
             ):
                 reason = "FRAME_DISCONTINUITY"
+        return reason
+
+    def observe(
+        self, frame: TrackedFrame, *, view_revision: int | None, ambiguous_track_ids: set[int]
+    ) -> TrackedFrame:
+        previous = self._previous
+        reason = self.discontinuity_reason(frame.batch, view_revision=view_revision)
         # Never publish old source/session retirements under the new scope.
         old = (
             {}
-            if previous is None or scope_changed
+            if previous is None or reason == "RECONNECT"
             else {subject.track_id: subject for subject in previous.subject_segments}
         )
         current_ids = {person.track_id for person in frame.persons}
@@ -88,7 +97,9 @@ class SegmentLifecycle:
                     reason=None if prior_subject else (reason or "INITIAL"),
                 )
             )
-        result = TrackedFrame(frame.batch, frame.persons, tuple(subjects), tuple(retired))
+        result = TrackedFrame(
+            frame.batch, frame.persons, tuple(subjects), tuple(retired), frame.provisional_persons
+        )
         self._previous = result
         self._view_revision = view_revision
         return result

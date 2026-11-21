@@ -28,3 +28,13 @@ reviewed profile must bind the margin and temporal limits, and evaluation must
 measure wrong-person transfers, crowd/crossing/occlusion behavior and notification
 rate against independent permitted ground truth. No model-quality, identity,
 camera-performance or production acceptance follows from this internal option.
+
+An independent optional `new_track_confidence` admits new tracks only from
+observations at or above that threshold. Existing owners first match high-confidence
+observations, then may match weaker observations geometrically. Weak observations
+cannot create a new track or take ownership when they overlap current high boxes
+or the prior boxes of owners assigned/retired in the first pass. This conservative
+rule can omit a real occluded low-confidence person; it must not be presented as
+a complete count of people. Empty frames and ambiguous ownership still end segment
+continuity. Both options default to `None` and need an explicit evaluated profile;
+neither establishes a Worker identity or bridges missing observations.

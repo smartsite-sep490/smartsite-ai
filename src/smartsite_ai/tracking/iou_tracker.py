@@ -54,6 +54,7 @@ class IoUPersonTracker:
         person_class_names: frozenset[str] | set[str] = _DEFAULT_PERSON_CLASS_NAMES,
         max_segment_gap: timedelta | None = None,
         association_iou_margin: float | None = None,
+        new_track_confidence: float | None = None,
     ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0 and 1")
@@ -66,12 +67,19 @@ class IoUPersonTracker:
         ):
             raise ValueError("association_iou_margin must be finite in (0, 1] or None")
         normalized_names = frozenset(name.casefold() for name in person_class_names)
+        if new_track_confidence is not None and (
+            type(new_track_confidence) not in (int, float)
+            or not isfinite(new_track_confidence)
+            or not 0 < new_track_confidence <= 1
+        ):
+            raise ValueError("new_track_confidence must be finite in (0, 1] or None")
         if not normalized_names:
             raise ValueError("person_class_names must not be empty")
 
         self._iou_threshold = iou_threshold
         self._max_missed_frames = max_missed_frames
         self._association_iou_margin = association_iou_margin
+        self._new_track_confidence = new_track_confidence
         self._person_class_names = normalized_names
         self._source_key: tuple[str, UUID] | None = None
         self._camera_external_id: str | None = None
@@ -109,7 +117,7 @@ class IoUPersonTracker:
             for detection in batch.detections
             if detection.class_name.casefold() in self._person_class_names
         )
-        assignments, retired_track_ids = self._match(person_detections)
+        assignments, retired_track_ids = self._associate(person_detections)
         for track_id in retired_track_ids:
             del self._tracks[track_id]
         matched_detection_indexes = set(assignments.values())
@@ -129,6 +137,11 @@ class IoUPersonTracker:
         for detection_index, detection in enumerate(person_detections):
             if detection_index in matched_detection_indexes:
                 continue
+            if (
+                self._new_track_confidence is not None
+                and detection.confidence < self._new_track_confidence
+            ):
+                continue
             track_id = self._next_track_id
             self._next_track_id += 1
             self._tracks[track_id] = _MutableTrack(track_id=track_id, detection=detection)
@@ -146,12 +159,50 @@ class IoUPersonTracker:
             ambiguous_track_ids=retired_track_ids,
         )
 
-    def _match(
+    def _associate(
         self, detections: tuple[NormalizedDetection, ...]
+    ) -> tuple[dict[int, int], set[int]]:
+        if self._new_track_confidence is None:
+            return self._match(detections)
+        high = tuple(
+            i for i, d in enumerate(detections) if d.confidence >= self._new_track_confidence
+        )
+        low = tuple(
+            i for i, d in enumerate(detections) if d.confidence < self._new_track_confidence
+        )
+        high_matches, retired = self._match(tuple(detections[i] for i in high))
+        assignments = {track: high[index] for track, index in high_matches.items()}
+        remaining = set(self._tracks) - assignments.keys() - retired
+        # Removing an assigned owner must not make its competing weak box look unique.
+        blocked_boxes = tuple(detections[i].bounding_box for i in high) + tuple(
+            self._tracks[track].detection.bounding_box for track in set(self._tracks) - remaining
+        )
+        low = tuple(
+            i
+            for i in low
+            if not any(
+                (overlap := bounding_box_iou(detections[i].bounding_box, box)) > 0
+                and overlap >= self._iou_threshold
+                for box in blocked_boxes
+            )
+        )
+        low_matches, low_retired = self._match(
+            tuple(detections[i] for i in low), eligible_track_ids=remaining
+        )
+        assignments.update((track, low[index]) for track, index in low_matches.items())
+        return assignments, retired | low_retired
+
+    def _match(
+        self,
+        detections: tuple[NormalizedDetection, ...],
+        *,
+        eligible_track_ids: set[int] | None = None,
     ) -> tuple[dict[int, int], set[int]]:
         candidates: list[tuple[int, int]] = []
         scores: dict[tuple[int, int], float] = {}
         for track_id, track in self._tracks.items():
+            if eligible_track_ids is not None and track_id not in eligible_track_ids:
+                continue
             for detection_index, detection in enumerate(detections):
                 iou = bounding_box_iou(track.detection.bounding_box, detection.bounding_box)
                 # Zero overlap provides no continuity, even at the lowest threshold.

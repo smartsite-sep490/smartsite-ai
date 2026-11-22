@@ -1068,6 +1068,14 @@ Main application platform: [smartsite-sep490/smartsite](https://github.com/smart
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development and review conventions.
 
+## PPE confirmation in analyzed previews
+
+Analyzed camera previews retain the temporal gate's confirmed PPE items for the
+current track and source session until explicit clearing or the existing scope/
+expiry reset. A preview does not revert to pending merely because no new delivery
+candidate is emitted on that frame. This presentation state does not emit another
+event or replace Backend review and authorization.
+
 ## Academic Context
 
 SmartSite AI is developed as part of the SmartSite SEP490 capstone project. The service is currently a prototype and engineering platform; it must not be interpreted as a certified safety system or as a replacement for qualified safety personnel.

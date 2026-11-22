@@ -540,3 +540,383 @@ async def test_ppe_confirmation_resets_when_region_geometry_changes(tmp_path: Pa
     assert result.frames_processed == 5
     assert result.events_enqueued == 1
     assert result.outbox.delivered == 1
+
+
+@pytest.mark.anyio
+async def test_analysis_preview_retains_confirmed_ppe_until_cleared_and_isolates_resets(
+    tmp_path: Path,
+) -> None:
+    session_b = UUID("33333333-3333-4333-8333-333333333333")
+    deliveries: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        deliveries.append(body)
+        return httpx.Response(
+            202,
+            json={"eventId": body["eventId"], "status": "PROCESSED", "alertIds": []},
+        )
+
+    def frame_for(sequence: int, session_id: UUID = SESSION_ID) -> FrameEnvelope:
+        return FrameEnvelope(
+            stream_id="gate-stream",
+            session_id=session_id,
+            camera_external_id="CAM-GATE-01",
+            captured_at=datetime(2026, 9, 27, 10, 0, tzinfo=UTC) + timedelta(seconds=sequence),
+            width=2,
+            height=2,
+            sequence_number=sequence,
+            payload=b"\x00" * 12,
+        )
+
+    class SequencePpePipeline:
+        def __init__(self, statuses_by_seq: dict[int, str]) -> None:
+            self._statuses = statuses_by_seq
+
+        def process(
+            self,
+            batch: DetectionBatch,
+            *,
+            region_configuration: CameraRegionConfiguration,
+            event_id: str,
+        ) -> TechnicalObservationEvent:
+            status = self._statuses[batch.sequence_number]
+            return TechnicalObservationEvent.create(
+                event_id=event_id,
+                camera_external_id=batch.camera_external_id,
+                stream_session_id=str(batch.session_id),
+                captured_at=batch.captured_at.isoformat(),
+                frame_dimensions={"width": batch.frame_width, "height": batch.frame_height},
+                observations=[
+                    {
+                        "type": "PERSON",
+                        "trackId": 7,
+                        "confidence": 0.9,
+                        "boundingBox": {
+                            "x1": 0.1,
+                            "y1": 0.1,
+                            "x2": 0.6,
+                            "y2": 0.9,
+                            "coordinateSpace": "NORMALIZED_0_1",
+                        },
+                    },
+                    {
+                        "type": "PPE",
+                        "trackId": 7,
+                        "ppeItem": "HARD_HAT",
+                        "status": status,
+                        "regionId": REGION_ID,
+                        "geometryVersion": region_configuration.configuration_version,
+                        "confidence": 0.9,
+                    },
+                    {
+                        "type": "PPE",
+                        "trackId": 7,
+                        "ppeItem": "SAFETY_VEST",
+                        "status": status,
+                        "regionId": REGION_ID,
+                        "geometryVersion": region_configuration.configuration_version,
+                        "confidence": 0.9,
+                    },
+                ],
+            )
+
+    expected = frozenset({(7, "HARD_HAT"), (7, "SAFETY_VEST")})
+
+    # Frames 0..4: MISSING (confirm at 2; keep preview at 3..4, single delivery)
+    # Frames 5..6: PRESENT x2 (still retained after frame 5, cleared after frame 6)
+    # Frame 7..9: MISSING in new session_b (confirm at frame 9; frame 7 starts clean with no bleed)
+    frames = [
+        *(frame_for(i, SESSION_ID) for i in range(7)),
+        *(frame_for(i, session_b) for i in range(7, 10)),
+    ]
+    statuses = {
+        0: "MISSING",
+        1: "MISSING",
+        2: "MISSING",
+        3: "MISSING",
+        4: "MISSING",
+        5: "PRESENT",
+        6: "PRESENT",
+        7: "MISSING",
+        8: "MISSING",
+        9: "MISSING",
+    }
+    analyzed: list[tuple[int, UUID, frozenset[tuple[int, str]]]] = []
+    store = RegionConfigurationStore()
+    await store.apply(_configuration(1))
+    stream = FakeStream(frames)
+    outbox = SqliteEventOutbox((tmp_path / "outbox-retained.sqlite3").resolve())
+
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(handler),
+    ) as backend:
+        worker = HeadlessCameraProcessingWorker(
+            stream=stream,  # type: ignore[arg-type]
+            detector=FakeDetector(),
+            pipeline=SequencePpePipeline(statuses),
+            ppe_region_id=REGION_ID,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=OutboxDispatcher(outbox, backend),
+            delivery_interval_seconds=0.01,
+            analysis_observer=lambda item: analyzed.append(
+                (item.frame.sequence_number, item.frame.session_id, item.confirmed_ppe_items)
+            ),
+        )
+        result = await worker.run()
+
+    assert result.frames_processed == 10
+    # Exactly 1 confirmed delivery per session (frame 2 in SESSION_ID, frame 9 in session_b)
+    assert result.events_enqueued == 2
+    assert result.outbox.delivered == 2
+    assert len(deliveries) == 2
+    assert analyzed == [
+        (0, SESSION_ID, frozenset()),
+        (1, SESSION_ID, frozenset()),
+        (2, SESSION_ID, expected),
+        (3, SESSION_ID, expected),
+        (4, SESSION_ID, expected),
+        (5, SESSION_ID, expected),
+        (6, SESSION_ID, frozenset()),
+        (7, session_b, frozenset()),
+        (8, session_b, frozenset()),
+        (9, session_b, expected),
+    ]
+
+    # Geometry/configuration reset must also clear prior confirmed preview state (no bleed).
+    reset_analyzed: list[tuple[int, frozenset[tuple[int, str]]]] = []
+    reset_store = RegionConfigurationStore()
+    await reset_store.apply(_configuration(1))
+
+    class ResetDetector(FakeDetector):
+        async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+            if frame.sequence_number == 3:
+                await reset_store.apply(_configuration(2))
+            return await super().detect(frame)
+
+    reset_deliveries: list[dict[str, object]] = []
+
+    def reset_handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        reset_deliveries.append(body)
+        return httpx.Response(
+            202,
+            json={"eventId": body["eventId"], "status": "PROCESSED", "alertIds": []},
+        )
+
+    reset_outbox = SqliteEventOutbox((tmp_path / "outbox-reset.sqlite3").resolve())
+    async with BackendClient(
+        "http://backend:3000",
+        "token",
+        transport=httpx.MockTransport(reset_handler),
+    ) as backend:
+        reset_worker = HeadlessCameraProcessingWorker(
+            stream=FakeStream([frame_for(i, SESSION_ID) for i in range(7)]),  # type: ignore[arg-type]
+            detector=ResetDetector(),
+            pipeline=SequencePpePipeline({i: "MISSING" for i in range(7)}),
+            ppe_region_id=REGION_ID,
+            configurations=reset_store,
+            outbox=reset_outbox,
+            dispatcher=OutboxDispatcher(reset_outbox, backend),
+            delivery_interval_seconds=0.01,
+            analysis_observer=lambda item: reset_analyzed.append(
+                (item.frame.sequence_number, item.confirmed_ppe_items)
+            ),
+        )
+        reset_result = await reset_worker.run()
+
+    assert reset_result.frames_processed == 7
+    assert reset_result.events_enqueued == 2
+    assert len(reset_deliveries) == 2
+    assert reset_analyzed == [
+        (0, frozenset()),
+        (1, frozenset()),
+        (2, expected),
+        (3, expected),
+        (4, frozenset()),
+        (5, frozenset()),
+        (6, expected),
+    ]
+
+
+@pytest.mark.anyio
+async def test_v2_policy_bundle_preview_retains_confirmed_ppe_and_isolates_gap_reset(
+    tmp_path: Path,
+) -> None:
+    from test_mf05_mf06_bundle_policy import detection, scene_batch
+    from test_tracked_policy_pipeline import pipeline, policy_bundle
+    from test_tracked_transport import packet
+
+    from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
+    from smartsite_ai.processing_worker import TrackedCapturePolicy
+
+    bundle = policy_bundle(outside=True)
+    store = RegionConfigurationStore(allow_policy_v2=True)
+    await store.apply_bundle(bundle)
+    template = scene_batch()
+    _, old_context, old_credential, *_ = packet()
+    context = old_context.model_copy(
+        update={
+            "camera_id": bundle.camera_id,
+            "stream_session_id": str(template.session_id),
+            "configuration_version": bundle.configuration_version,
+            "view_revision": bundle.view_revision,
+            "bundle_sha256": bundle.bundle_sha256,
+            "source_kind": "LIVE",
+        }
+    )
+    credential = old_credential.model_copy(
+        update={
+            "camera_id": bundle.camera_id,
+            "stream_session_id": str(template.session_id),
+        }
+    )
+    site_id = "00000000-0000-4000-8000-000000000077"
+    scope = compute_canonical_payload_hash(
+        {
+            **context.model_dump(by_alias=True, exclude={"schema_version", "receipt_command_id"}),
+            "siteId": site_id,
+            "profileSha256": "b" * 64,
+        }
+    )
+    outbox = SqliteEventOutbox((tmp_path / "outbox-v2.sqlite").resolve())
+    delivered_missing_ppe: list[list[tuple[str, str, str | None]]] = []
+    seals: dict[str, dict[str, object]] = {}
+
+    class SequenceV2Detector:
+        async def detect(self, source: FrameEnvelope) -> DetectionBatch:
+            head_cls = "helmet" if source.sequence_number in {6, 7} else "no-hardhat"
+            return template.model_copy(
+                update={
+                    "sequence_number": source.sequence_number,
+                    "captured_at": source.captured_at,
+                    "detections": (
+                        template.detections[0],
+                        detection(head_cls, (0.40, 0.22, 0.48, 0.30)),
+                        detection("vest", (0.38, 0.32, 0.52, 0.50)),
+                    ),
+                }
+            )
+
+    async def issue(_bundle, _frame, _kind):
+        return context
+
+    def backend(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=seals[request.url.path.rsplit("/", 2)[-2]])
+        original = json.loads(request.content)["event"]
+        delivered_missing_ppe.append(
+            [
+                (item["ppeItem"], item["status"], item.get("scope"))
+                for item in original["observations"]
+                if item["type"] == "PPE" and item["status"] == "MISSING"
+            ]
+        )
+        partition = original["framePartition"]
+        digest = compute_canonical_payload_hash(original)
+        seals[partition["frameId"]] = {
+            "kind": "ADMITTED_TRACKED_FRAME",
+            "scopeSha256": scope,
+            "sequenceNumber": partition["sequenceNumber"],
+            "subjects": [
+                {
+                    "segmentId": item["segmentId"],
+                    "eventId": original["eventId"],
+                    "personObservationIndex": item["personObservationIndex"],
+                }
+                for item in original["continuity"]["subjects"]
+            ],
+            "retiredSegmentIds": [
+                item["segmentId"] for item in original["continuity"]["retiredSegments"]
+            ],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "kind": "RAW_STORED",
+                "eventId": original["eventId"],
+                "payloadHash": digest,
+                "bindingHash": context.binding_hash(digest),
+            },
+        )
+
+    analyzed: list[tuple[int, frozenset[tuple[int, str]]]] = []
+    async with BackendClient(
+        "https://backend.example",
+        "synthetic-service",
+        transport=httpx.MockTransport(backend),
+    ) as client:
+        dispatcher = OutboxDispatcher(
+            outbox, client, generation_credential=credential, tracked_batch_limit=4
+        )
+        worker = HeadlessCameraProcessingWorker(
+            stream=SimpleNamespace(config=SimpleNamespace(is_live=True)),  # type: ignore[arg-type]
+            detector=SequenceV2Detector(),
+            pipeline=pipeline(),
+            ppe_region_id=bundle.regions[0].region_id,
+            configurations=store,
+            outbox=outbox,
+            dispatcher=dispatcher,
+            delivery_context_provider=issue,
+            tracked_capture=TrackedCapturePolicy(credential, site_id, "b" * 64, 30, 1, 8, 100_000),
+            analysis_observer=lambda item: analyzed.append(
+                (item.frame.sequence_number, item.confirmed_ppe_items)
+            ),
+        )
+        for offset, sequence in (
+            (1, 1),
+            (2, 2),
+            (3, 3),
+            (4, 4),
+            (5, 5),
+            (6, 6),
+            (7, 7),
+            (16, 8),
+            (17, 9),
+            (18, 10),
+            (20, 12),
+        ):
+            source = FrameEnvelope(
+                stream_id=template.stream_id,
+                session_id=template.session_id,
+                camera_external_id=template.camera_external_id,
+                captured_at=datetime(2026, 10, 27, 12, 0, offset, tzinfo=UTC),
+                sequence_number=sequence,
+                width=640,
+                height=480,
+                payload=bytes([20, 40, 60]) * 640 * 480,
+            )
+            await worker._process_frame(source)
+            await dispatcher.drain_once()
+            await dispatcher.drain_once()
+
+    expected = frozenset({(1, "HARD_HAT")})
+    assert analyzed == [
+        (1, frozenset()),
+        (2, frozenset()),
+        (3, expected),
+        (4, expected),
+        (5, expected),
+        (6, expected),
+        (7, frozenset()),
+        (8, frozenset()),
+        (9, frozenset()),
+        (10, expected),
+        (12, frozenset()),
+    ]
+    assert delivered_missing_ppe == [
+        [],
+        [],
+        [("HARD_HAT", "MISSING", "CAMERA")],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [("HARD_HAT", "MISSING", "CAMERA")],
+        [],
+    ]

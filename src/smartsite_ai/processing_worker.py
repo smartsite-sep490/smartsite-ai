@@ -502,6 +502,24 @@ class HeadlessCameraProcessingWorker:
             )
         if self._analysis_observer is not None:
             try:
+                # Preview shows retained confirmation, not only new delivery candidates.
+                preview_gates = (
+                    tuple(
+                        self._region_gates[(region.region_id, region.geometry_version)]
+                        for region in configuration.regions
+                    )
+                    if isinstance(configuration, CameraConfigurationBundle)
+                    else (self._temporal_gate,)
+                )
+                confirmed_preview_items = frozenset(
+                    item
+                    for gate in preview_gates
+                    for item in gate.confirmed_track_items(
+                        stream_id=batch.stream_id,
+                        session_id=batch.session_id,
+                        active_track_ids=active_track_ids,
+                    )
+                )
                 occupancy = getattr(self._pipeline, "occupied_zone_track_regions", None)
                 occupied_zone_regions = (
                     occupancy(
@@ -518,10 +536,7 @@ class HeadlessCameraProcessingWorker:
                         observation=event,
                         configuration=configuration,
                         ppe_region_id=self._ppe_region_id,
-                        confirmed_ppe_items=frozenset(
-                            (candidate.track_id, candidate.ppe_item)
-                            for candidate in confirmed_candidates
-                        ),
+                        confirmed_ppe_items=confirmed_preview_items,
                         occupied_zone_regions=frozenset(occupied_zone_regions),
                     )
                 )

@@ -44,7 +44,16 @@ def build_source_control_app(
     *,
     activator: SourceActivator | None = None,
     owned_source: Callable[[tuple[str, str]], str | None] | None = None,
+    preview_service_token: SecretStr | None = None,
 ) -> FastAPI:
+    preview_token = preview_service_token if preview_service_token is not None else token
+    raw_preview_token = preview_token.get_secret_value()
+    if (
+        not 32 <= len(raw_preview_token) <= 4096
+        or not raw_preview_token.isascii()
+        or any(c.isspace() for c in raw_preview_token)
+    ):
+        raise ValueError("Invalid server-only preview token")
     for active in manifest.active_sources:
         url = urlsplit(active.preview_origin)
         if (
@@ -89,7 +98,7 @@ def build_source_control_app(
                 "GET",
                 active.preview_origin.rstrip("/") + "/v1/realtime/configuration-image",
                 params={"cameraExternalId": active.camera_external_id},
-                headers={"Authorization": "Bearer " + token.get_secret_value()},
+                headers={"Authorization": "Bearer " + raw_preview_token},
             ) as response,
         ):
             if (

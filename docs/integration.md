@@ -219,3 +219,37 @@ The immutable occupancy snapshot keeps people visibly inside between entry trans
 A preview sink failure is logged using a fixed safe diagnostic and the sink is retired until restart;
 it does not interrupt durable event handling. Preview/API availability does not prove successful
 Backend ingestion, persistence, recipient notification or independent model accuracy.
+
+### Explicit single-camera source operator
+
+`python -m smartsite_ai.tools.source_operator --profile ABSOLUTE_PROFILE_PATH --port 62035`
+composes the reviewed source-control driver with capture-only setup and generation-bound
+inference resume. It binds control HTTP to loopback; an external gateway and Backend host
+allowlist remain separate deployment requirements. Importing the module or constructing its
+app starts no camera, inference, subprocess or network request.
+
+The profile has schemaVersion `1.0.0`, Site UUID, Camera UUID, cameraExternalId,
+absolute hostManifest/captureManifest/runtimeManifest paths, an existing private
+stateDirectory, and a distinct previewPort. The manifests must describe the same single
+LIVE tracked camera and Site. The capture manifest uses sourceEnv
+`SMARTSITE_AI_SOURCE_RUNTIME_SOURCE` and tokenEnv `SMARTSITE_AI_PREVIEW_SERVICE_TOKEN`.
+Keep the profile, manifests, encrypted registry and lock directory outside Git.
+
+Server environment requires separate source-control, preview and Backend service tokens,
+`SMARTSITE_AI_SOURCE_REGISTRY_KEY` (persistent Fernet key), and
+`SMARTSITE_AI_BACKEND_INGESTION_URL`. Never put them in browser settings. Only the selected
+source, generation credential and bounded required runtime values reach the owned child;
+registry encryption and control credentials do not. Missing/corrupt ownership state is
+not repaired by adopting an unknown process. Do not delete the registry or STOP latch to
+recover a running camera; reconcile ownership through the existing lifecycle.
+
+Setup explicitly starts the existing model-free capture runtime. Resume verifies the
+Backend v2 configuration revision, view and hash before invoking the existing tracked
+runtime. Both modes acquire the same resource lease. Readiness requires an authenticated,
+fresh image from the expected generation; an open port alone is insufficient. Parent
+shutdown stops its owned child on the same event loop. Cooperative stop drains native
+cleanup before releasing the resource; uncertainty keeps recovery fail-closed.
+
+This composition does not qualify model accuracy, authorize Zone access, deploy a gateway,
+or prove event delivery, R2 evidence, grouped cases or recipient notifications. Those
+require an actual authorized Backend/camera release and separate end-to-end acceptance.

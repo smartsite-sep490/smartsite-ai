@@ -291,7 +291,15 @@ def source_control_router(
                     result = await activator.prepare(
                         (site_id, camera_id), command, receipt, body["expectedRevision"]
                     )
-                return JSONResponse({"schemaVersion": "1.0.0", **result}, headers=headers)
+                version = (
+                    "1.1.0"
+                    if result["state"] == "PREPARED"
+                    and result["sourceKind"] == "LIVE"
+                    and result["sourceRevision"] == 0
+                    and result["currentGenerationId"] is None
+                    else "1.0.0"
+                )
+                return JSONResponse({"schemaVersion": version, **result}, headers=headers)
             except (ValueError, TypeError, KeyError):
                 return error(409, "SOURCE_ACTIVATION_CONFLICT")
             except TimeoutError:

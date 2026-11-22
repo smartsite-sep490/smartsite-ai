@@ -57,3 +57,23 @@ the expected generation while still owning the live child. A listening port or
 HTTP 200 alone does not prove that a newly started owner is ready. The header is
 technical lifecycle evidence, never a Worker identity, access authorization or
 proof that inference, delivery and business alert evaluation succeeded.
+
+## Explicit first-source preparation
+
+An operator composition may set `allow_unowned_start=True` when a registered
+Camera has never had a worker owner. The default remains false. This permits a
+missing seed file only when the driver has no child, no in-memory owner and no
+reconciliation latch; unreadable/corrupt files and dangling links still fail.
+The activator also requires an entirely absent registry entry and revision zero.
+Losing the seed of a previously RUNNING or STOPPED source is not first startup.
+
+The authenticated scoped `/prepare` route emits `1.1.0` only for this explicit
+PREPARED/LIVE/revision-zero/null-owner state. Backend must support the paired
+canonical contract and issue the real first generation. Successful RUNNING and
+owned PREPARED responses retain `1.0.0`; missing identity never becomes permission.
+Uncertainty is persisted before stopping, and failed starts/commits require
+reconciliation rather than another bootstrap. Completed commands remain idempotent.
+
+This does not enable the default source-control CLI: its apply capability remains
+disabled until an explicit reviewed operator composition supplies the actual
+capture/inference lifecycle, resource lease and generation-bound readiness.

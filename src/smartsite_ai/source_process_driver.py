@@ -20,6 +20,7 @@ class SourceProcessDriver:
         generation_file: Path,
         environment: Mapping[str, str],
         ready: Callable[[str], Awaitable[bool]],
+        allow_unowned_start: bool = False,
         resume_command: tuple[str, ...] | None = None,
         resume_camera_id: str | None = None,
         resume_manifest_supported: bool = False,
@@ -48,6 +49,7 @@ class SourceProcessDriver:
         self.generation_file = generation_file
         self.environment = dict(environment)
         self.ready = ready
+        self.allow_unowned_start = allow_unowned_start is True
         if (resume_camera_id is None) != (resume_configuration_loader is None):
             raise ValueError("Resume requires a Camera binding and guarded configuration loader")
         self.resume_camera_id = str(UUID(resume_camera_id)) if resume_camera_id else None
@@ -87,14 +89,24 @@ class SourceProcessDriver:
             and self._owned_generation.get("streamSessionId") == binding.streamSessionId
         )
 
-    async def generation_id(self, scope: Scope) -> str:
+    async def generation_id(self, scope: Scope) -> str | None:
         if not self.supports(scope):
             raise SourceActivationError()
         if self._reconciliation_required:
             raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
         if self._owned_generation is not None:
             return str(self._owned_generation["workerGenerationId"])
-        data = json.loads(self.generation_file.read_bytes())
+        try:
+            raw = self.generation_file.read_bytes()
+        except FileNotFoundError:
+            if (
+                self.allow_unowned_start
+                and self.process is None
+                and not self.generation_file.is_symlink()
+            ):
+                return None
+            raise
+        data = json.loads(raw)
         return str(data["workerGenerationId"])
 
     async def stop(self, scope: Scope) -> None:

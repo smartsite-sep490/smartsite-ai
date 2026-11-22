@@ -49,6 +49,36 @@ Không dùng API readiness để bật nghiệp vụ PPE/Zone. Headless/multi-ca
 
 Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit schema trước, sau đó vendor bytes và cập nhật source SHA/checksums ở repo này. Không sửa schema vendored trước.
 
+## Opt-in Person tracking admission
+
+The headless camera manifest may separately specify `personModelSpec`, an absolute
+path to a reviewed local COCO-80 YOLO11 artifact specification. Its full class map,
+provider metadata and weight checksum are verified by the explicit Person loader;
+the existing PPE artifact loader still rejects that taxonomy.
+Both models receive the same source frame through `PersonAnchoredPpeDetector`.
+Only the reference model's Person detections are retained; every non-Person PPE
+detection from the PPE model is preserved. Non-Person COCO detections are discarded.
+Batch metadata uses the adapter's existing two-artifact composition fingerprint.
+Both runners share one serialized inference lane and are closed on failure/shutdown.
+An opted-in Person model failure never falls back to the PPE model's Person boxes.
+Omitting `personModelSpec` keeps the original single-model lifecycle.
+
+Each camera in the runtime manifest may supply `personTracking` with
+`newTrackConfidence` (finite number in `(0, 1]`),
+`newTrackConfirmationFrames` (integer in `[1, 64]`) and
+`associationIouMargin` (finite number in `(0, 1]`). All three fields are required
+when the object is present. Unknown fields, booleans and numeric strings are rejected.
+Omitting the object preserves existing tracker defaults.
+
+These settings connect the existing Person tracker admission, confirmation and
+unambiguous association controls to the headless camera runtime. They do not
+change detector/PPE thresholds, Zone geometry, access policy, or Worker identity.
+Weak detections cannot start tracks below the selected admission confidence;
+new tracks require the selected confirmation window. Ambiguous crossings still
+retire unresolved tracks. The settings do not suppress persistent high-confidence
+false Person detections or establish detector accuracy. Include selected settings
+in the reviewed runtime/profile release and use a new generation when changing them.
+
 ## Explicit Camera PPE policy bundle v2
 
 The default legacy event and configuration routes are unchanged. The separately opted-in

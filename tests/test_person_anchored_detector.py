@@ -6,6 +6,7 @@ import pytest
 
 from smartsite_ai.inference.models import DetectionBatch, NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.inference.person_anchored import PersonAnchoredPpeDetector
+from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
 
@@ -127,4 +128,92 @@ def test_person_provider_failure_never_falls_back_to_duplicate_ppe_people(error)
                 ppe=FakeDetector((detection("Person"), detection("Person", 0.2))),
                 persons=FailedPersons(),
             ).detect(frame())
+        )
+
+
+def test_composite_fingerprint_changes_when_artifact_role_order_id_or_version_changes():
+    source = frame()
+
+    class NamedDetector:
+        def __init__(self, artifact_id: str, version: str, sha: str) -> None:
+            self._artifact_id = artifact_id
+            self._version = version
+            self._sha = sha
+
+        async def detect(self, current: FrameEnvelope) -> DetectionBatch:
+            return DetectionBatch.from_frame(
+                current,
+                model_artifact_id=self._artifact_id,
+                model_version=self._version,
+                model_sha256=self._sha,
+                detections=(),
+            )
+
+    first = NamedDetector("ppe-artifact", "v1", "a" * 64)
+    second = NamedDetector("coco-person", "v2", "b" * 64)
+    adapter = PersonAnchoredPpeDetector(ppe=first, persons=second)
+    assert isinstance(adapter, DetectorProtocol)
+
+    normal = asyncio.run(adapter.detect(source)).model_sha256
+    swapped = asyncio.run(
+        PersonAnchoredPpeDetector(ppe=second, persons=first).detect(source)
+    ).model_sha256
+    renamed = asyncio.run(
+        PersonAnchoredPpeDetector(
+            ppe=NamedDetector("ppe-artifact-other", "v1", "a" * 64),
+            persons=second,
+        ).detect(source)
+    ).model_sha256
+    reversioned = asyncio.run(
+        PersonAnchoredPpeDetector(
+            ppe=first,
+            persons=NamedDetector("coco-person", "v3", "b" * 64),
+        ).detect(source)
+    ).model_sha256
+
+    assert len({normal, swapped, renamed, reversioned}) == 4
+
+
+def test_primary_non_person_ppe_detections_are_preserved_verbatim_and_primary_failure_propagates():
+    source = frame()
+    hardhat = NormalizedDetection(
+        class_id=1,
+        class_name="Hardhat",
+        confidence=0.91,
+        bounding_box=NormalizedBoundingBox(x1=0.12, y1=0.05, x2=0.25, y2=0.18),
+    )
+    no_vest = NormalizedDetection(
+        class_id=4,
+        class_name="NO-Safety Vest",
+        confidence=0.67,
+        bounding_box=NormalizedBoundingBox(x1=0.15, y1=0.35, x2=0.45, y2=0.72),
+    )
+    coco_person = NormalizedDetection(
+        class_id=0,
+        class_name="person",
+        confidence=0.93,
+        bounding_box=NormalizedBoundingBox(x1=0.1, y1=0.05, x2=0.5, y2=0.95),
+    )
+
+    result = asyncio.run(
+        PersonAnchoredPpeDetector(
+            ppe=FakeDetector(
+                (detection("Person", 0.0), detection("person", 0.5), hardhat, no_vest)
+            ),
+            persons=FakeDetector((coco_person, detection("couch", 0.0)), sha="b" * 64),
+        ).detect(source)
+    )
+
+    assert result.detections == (coco_person, hardhat, no_vest)
+
+    class FailedPpe:
+        async def detect(self, current: FrameEnvelope) -> DetectionBatch:
+            raise RuntimeError("primary ppe failed")
+
+    with pytest.raises(RuntimeError, match="primary ppe failed"):
+        asyncio.run(
+            PersonAnchoredPpeDetector(
+                ppe=FailedPpe(),
+                persons=FakeDetector((coco_person,), sha="b" * 64),
+            ).detect(source)
         )

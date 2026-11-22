@@ -10,7 +10,8 @@ from pathlib import Path
 from uuid import UUID
 
 from smartsite_ai.config import Settings
-from smartsite_ai.inference.loading import load_yolo11_detector
+from smartsite_ai.inference.loading import load_yolo11_detector, load_yolo11_person_detector
+from smartsite_ai.inference.person_anchored import PersonAnchoredPpeDetector
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
@@ -24,7 +25,7 @@ from smartsite_ai.runtime.assembly import (
     preflight_manifest,
 )
 from smartsite_ai.runtime.generation_manifest import bind_generation_manifest
-from smartsite_ai.runtime.inference_lane import share_detector
+from smartsite_ai.runtime.inference_lane import SerializingDetector, share_detector
 from smartsite_ai.runtime.manifest import (
     CameraRuntimeError,
     bind_manifest,
@@ -158,6 +159,7 @@ async def run_manifest(
     plans: list[CameraPlan] = []
     backend_clients: list[BackendClient] = []
     runner: UltralyticsYoloRunner | None = None
+    person_runner: UltralyticsYoloRunner | None = None
     observers: dict[str, CameraPreviewObserver] = {}
 
     async def preflight() -> tuple[object, ...] | None:
@@ -204,25 +206,46 @@ async def run_manifest(
         return failure
 
     async def open_model() -> DetectorProtocol:
-        nonlocal runner
+        nonlocal runner, person_runner
         detector, loaded_runner, _artifact, _class_map = load_yolo11_detector(
             bound.model_spec,
             runner_factory=UltralyticsYoloRunner,
             experimental_profile=bound.manifest.experimental_model_profile,
         )
+        loaded_person_runner = None
         try:
             if not isinstance(loaded_runner, UltralyticsYoloRunner):
                 raise TypeError("runtime detector loader returned an unexpected runner")
-            shared = share_detector(detector, loaded_runner)
+            if bound.person_model_spec is not None:
+                persons, loaded_person_runner, _, _ = load_yolo11_person_detector(
+                    bound.person_model_spec, runner_factory=UltralyticsYoloRunner
+                )
+                if not isinstance(loaded_person_runner, UltralyticsYoloRunner):
+                    raise TypeError("runtime person loader returned an unexpected runner")
+                detector = PersonAnchoredPpeDetector(ppe=detector, persons=persons)
+            shared = (
+                SerializingDetector(detector)
+                if loaded_person_runner is not None
+                else share_detector(detector, loaded_runner)
+            )
         except BaseException:
-            loaded_runner.close()
+            try:
+                if loaded_person_runner is not None:
+                    loaded_person_runner.close()
+            finally:
+                loaded_runner.close()
             raise
         runner = loaded_runner
+        person_runner = loaded_person_runner
         return shared
 
     async def close_model() -> None:
-        if runner is not None:
-            runner.close()
+        try:
+            if person_runner is not None:
+                person_runner.close()
+        finally:
+            if runner is not None:
+                runner.close()
 
     def build_sessions(detector: DetectorProtocol) -> tuple[CameraSession, ...]:
         def backend_client_factory() -> BackendClient:

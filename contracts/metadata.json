@@ -93,5 +93,16 @@
     "examplePath": "contracts/examples/v1/ai-frame-evidence-receipt.json",
     "sourceExamplePath": "contracts/examples/v1/ai-frame-evidence-receipt.json",
     "exampleSha256": "9779e3d899b8f3f850f2717e50d09d1f70c01f73912d6b9757b928918c70bb95"
+  },
+  "cameraSourceActivationState": {
+    "schemaVersion": "1.1.0",
+    "sourceRepository": "smartsite-sep490/smartsite",
+    "sourceCommitSha": "6bcecad9d15729cfa61f08603b08e33135ea6634",
+    "path": "contracts/schemas/v1.1/source-activation-state.json",
+    "sourcePath": "contracts/schemas/v1.1/source-activation-state.json",
+    "schemaSha256": "eec9839184c594879dde077ca8e799d6cf5322908144efb96b1ebf1129285dc1",
+    "examplePath": "contracts/examples/v1.1/source-unowned-prepared.json",
+    "sourceExamplePath": "contracts/examples/v1.1/source-unowned-prepared.json",
+    "exampleSha256": "68bab3bf0f3a211472fc13f70242ac34b75f7ebaf1497919d52cbe9ff71738bf"
   }
 }

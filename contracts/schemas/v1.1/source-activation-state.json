@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.example/schemas/v1.1/source-activation-state.json",
+  "title": "Camera source activation state with explicit unowned preparation",
+  "oneOf": [{ "$ref": "#/$defs/owned" }, { "$ref": "#/$defs/unownedPrepared" }],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$"
+    },
+    "owned": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "state",
+        "commandId",
+        "sourceRevision",
+        "sourceKind",
+        "currentGenerationId"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.0.0" },
+        "state": { "enum": ["PREPARED", "RUNNING"] },
+        "commandId": { "$ref": "#/$defs/uuid" },
+        "sourceRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "sourceKind": { "const": "LIVE" },
+        "currentGenerationId": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "unownedPrepared": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "state",
+        "commandId",
+        "sourceRevision",
+        "sourceKind",
+        "currentGenerationId"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.1.0" },
+        "state": { "const": "PREPARED" },
+        "commandId": { "$ref": "#/$defs/uuid" },
+        "sourceRevision": { "const": 0 },
+        "sourceKind": { "const": "LIVE" },
+        "currentGenerationId": { "type": "null" }
+      }
+    }
+  }
+}

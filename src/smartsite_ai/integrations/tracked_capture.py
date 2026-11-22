@@ -17,6 +17,7 @@ from smartsite_ai.integrations.worker_generation import WorkerGenerationCredenti
 from smartsite_ai.pipelines.observation_frame import ObservationFrame
 from smartsite_ai.pipelines.ppe_temporal import ConfirmedPpeCandidate, tracked_delivery_frame
 from smartsite_ai.pipelines.tracked_frame_encoder import encode_complete_tracked_frame
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 
 
 async def stage_tracked_capture(
@@ -36,6 +37,7 @@ async def stage_tracked_capture(
     predecessor_wait_seconds: float | None = None,
     poll_interval_seconds: float = 0.25,
     before_enqueue: Callable[[], Awaitable[None]] | None = None,
+    continuity_policy: FrameContinuityPolicy | None = None,
     on_staged: Callable[[int], None] | None = None,
 ) -> TrackedFrameReferences:
     """Bind a complete observation to its original context and queue exact parts."""
@@ -60,14 +62,26 @@ async def stage_tracked_capture(
         and sequence > 0
         and any(subject.previous_sequence_number is not None for subject in frame.subject_segments)
     ):
-        predecessor = await outbox.read_tracked_predecessor(scope_sha256, str(sequence - 1))
+        previous_sequences = {
+            subject.previous_sequence_number
+            for subject in frame.subject_segments
+            if subject.previous_sequence_number is not None
+        }
+        if len(previous_sequences) != 1:
+            raise ValueError("Tracked continuation requires one exact processed predecessor")
+        previous_sequence = next(iter(previous_sequences))
+        if not (continuity_policy or FrameContinuityPolicy()).allows_sequence(
+            previous_sequence, sequence
+        ):
+            raise ValueError("Tracked continuation exceeds the configured sequence bound")
+        predecessor = await outbox.read_tracked_predecessor(scope_sha256, str(previous_sequence))
         if predecessor is None and predecessor_wait_seconds is not None:
             try:
                 async with asyncio.timeout(predecessor_wait_seconds):
                     while predecessor is None:
                         await asyncio.sleep(poll_interval_seconds)
                         predecessor = await outbox.read_tracked_predecessor(
-                            scope_sha256, str(sequence - 1)
+                            scope_sha256, str(previous_sequence)
                         )
             except TimeoutError:
                 raise TimeoutError("Timed out waiting for the tracked predecessor") from None
@@ -76,6 +90,7 @@ async def stage_tracked_capture(
         scope_sha256=scope_sha256,
         profile_sha256=profile_sha256,
         predecessor=predecessor,
+        continuity_policy=continuity_policy,
     )
     if source_frame is not None and evidence_publisher is not None:
         for part in parts:

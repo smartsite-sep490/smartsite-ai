@@ -12,6 +12,7 @@ from smartsite_ai.domain.tracked_frame_result import (
 )
 from smartsite_ai.domain.tracked_observations import TrackedObservationEvent
 from smartsite_ai.pipelines.observation_frame import ObservationFrame, PartSubjectReference
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 
 CapturedCoverageReason = Literal["INFERENCE_ERROR", "AMBIGUOUS_PROCESSING", "FRAME_DROPPED"]
 
@@ -88,6 +89,7 @@ def encode_complete_tracked_frame(
     scope_sha256: str,
     profile_sha256: str,
     predecessor: TrackedFrameResult | None = None,
+    continuity_policy: FrameContinuityPolicy | None = None,
 ) -> tuple[tuple[dict[str, Any], ...], TrackedFrameReferences]:
     """Encode a complete captured frame and the references expected from its seal."""
     sequence = _source_sequence(frame, profile_sha256)
@@ -122,7 +124,9 @@ def encode_complete_tracked_frame(
         predecessor.subject_references()
         if isinstance(predecessor, TrackedFrameResult)
         and predecessor.scope_sha256 == scope_sha256
-        and int(predecessor.sequence_number) + 1 == sequence
+        and (continuity_policy or FrameContinuityPolicy()).allows_sequence(
+            int(predecessor.sequence_number), sequence
+        )
         else {}
     )
     for index, (event, refs) in enumerate(parts):
@@ -135,7 +139,12 @@ def encode_complete_tracked_frame(
                 link = {"kind": "START", "reason": subject.reason}
             else:
                 prior = prior_subjects.get(segment_id)
-                if prior is None or subject.previous_sequence_number != sequence - 1:
+                if (
+                    prior is None
+                    or not isinstance(predecessor, TrackedFrameResult)
+                    or type(subject.previous_sequence_number) is not int
+                    or subject.previous_sequence_number != int(predecessor.sequence_number)
+                ):
                     raise ValueError("Tracked continuation requires the exact admitted predecessor")
                 previous_event_id, previous_person_index = prior
                 if previous_event_id == event_id:

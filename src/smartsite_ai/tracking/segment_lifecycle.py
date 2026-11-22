@@ -5,18 +5,29 @@ from typing import Literal
 from uuid import uuid4
 
 from smartsite_ai.inference.models import DetectionBatch
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment, TrackedFrame
 
 
 class SegmentLifecycle:
-    """A missing processed frame ends a segment, even if a numeric ID survives."""
+    """End segments outside reviewed continuity bounds; consecutive frames by default."""
 
-    def __init__(self, *, max_segment_gap: timedelta | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_segment_gap: timedelta | None = None,
+        continuity_policy: FrameContinuityPolicy | None = None,
+    ) -> None:
+        if continuity_policy is not None and not isinstance(
+            continuity_policy, FrameContinuityPolicy
+        ):
+            raise ValueError("Invalid segment continuity policy")
         if max_segment_gap is not None and (
             type(max_segment_gap) is not timedelta or max_segment_gap <= timedelta(0)
         ):
             raise ValueError("max_segment_gap must be a positive timedelta or None")
         self._max_segment_gap = max_segment_gap
+        self._continuity_policy = continuity_policy or FrameContinuityPolicy()
         self._previous: TrackedFrame | None = None
         self._view_revision: int | None = None
 
@@ -46,13 +57,9 @@ class SegmentLifecycle:
                 batch.model_sha256,
             ):
                 reason = "PROFILE_CHANGE"
-            elif (
-                batch.sequence_number != prior.sequence_number + 1
-                or batch.captured_at <= prior.captured_at
-                or (
-                    self._max_segment_gap is not None
-                    and batch.captured_at - prior.captured_at > self._max_segment_gap
-                )
+            elif not self._continuity_policy.allows(prior, batch) or (
+                self._max_segment_gap is not None
+                and batch.captured_at - prior.captured_at > self._max_segment_gap
             ):
                 reason = "FRAME_DISCONTINUITY"
         return reason

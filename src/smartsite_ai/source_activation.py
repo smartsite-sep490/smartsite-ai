@@ -25,7 +25,7 @@ class SourceActivationError(ValueError):
 
 class SourceDriver(Protocol):
     def supports(self, scope: Scope) -> bool: ...
-    async def generation_id(self, scope: Scope) -> str: ...
+    async def generation_id(self, scope: Scope) -> str | None: ...
     async def stop(self, scope: Scope) -> None: ...
     async def start(self, scope: Scope, source: str, generation: Mapping[str, str]) -> None: ...
     async def is_running(self, scope: Scope, generation_id: str) -> bool: ...
@@ -155,7 +155,11 @@ class SourceActivator:
                 # The tracked operational pipeline must not relabel replay as live.
                 raise SourceActivationError("REPLAY_ACTIVATION_UNAVAILABLE")
             generation = await self.driver.generation_id(scope)
-            UUID(generation)
+            if generation is None:
+                if old is not None or revision != 0:
+                    raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+            else:
+                UUID(generation)
             row = {
                 "state": "STOPPING",
                 "commandId": command,

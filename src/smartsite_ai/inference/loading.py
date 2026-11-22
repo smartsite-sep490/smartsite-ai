@@ -39,8 +39,50 @@ from smartsite_ai.ingestion.envelope import FrameEnvelope
 
 CANONICAL_PPE_CLASS_MAP: tuple[tuple[int, str], ...] = LEGACY_PPE_5_PROFILE.class_map
 
+_COCO_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat"),
+    ("traffic light", "fire hydrant", "stop sign", "parking meter", "bench"),
+    ("bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"),
+    ("backpack", "umbrella", "handbag", "tie", "suitcase"),
+    (
+        "frisbee",
+        "skis",
+        "snowboard",
+        "sports ball",
+        "kite",
+        "baseball bat",
+        "baseball glove",
+        "skateboard",
+        "surfboard",
+        "tennis racket",
+    ),
+    ("bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl"),
+    (
+        "banana",
+        "apple",
+        "sandwich",
+        "orange",
+        "broccoli",
+        "carrot",
+        "hot dog",
+        "pizza",
+        "donut",
+        "cake",
+    ),
+    ("chair", "couch", "potted plant", "bed", "dining table", "toilet"),
+    ("tv", "laptop", "mouse", "remote", "keyboard", "cell phone"),
+    ("microwave", "oven", "toaster", "sink", "refrigerator"),
+    ("book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"),
+)
+CANONICAL_COCO_80_CLASS_MAP: tuple[tuple[int, str], ...] = tuple(
+    enumerate(name for group in _COCO_GROUPS for name in group)
+)
+
 _CANONICAL_PPE_JSON_CLASS_MAP = {
     str(class_id): class_name for class_id, class_name in CANONICAL_PPE_CLASS_MAP
+}
+_CANONICAL_COCO_80_JSON_CLASS_MAP = {
+    str(class_id): class_name for class_id, class_name in CANONICAL_COCO_80_CLASS_MAP
 }
 _MAX_SPEC_BYTES = 256 * 1024
 _NO_NUL_PATTERN = r"^[^\x00]+$"
@@ -139,7 +181,12 @@ class _ArtifactSpecDocument(_StrictFrozenModel):
     def validate_canonical_class_map(
         cls, value: dict[str, str], info: ValidationInfo
     ) -> dict[str, str]:
-        profile = (info.context or {}).get("experimental_profile")
+        context = info.context or {}
+        if context.get("taxonomy") == "coco-80-person":
+            if value != _CANONICAL_COCO_80_JSON_CLASS_MAP:
+                raise ValueError("classMap must match the exact canonical COCO 80 taxonomy")
+            return value
+        profile = context.get("experimental_profile")
         if profile is None:
             if value != _CANONICAL_PPE_JSON_CLASS_MAP:
                 raise ValueError("classMap must contain exactly the five canonical PPE classes")
@@ -205,27 +252,14 @@ LoadedDetectorStack = tuple[
 ]
 
 
-def load_artifact_spec(
-    path: Path, *, experimental_profile: ExperimentalPpeProfile | None = None
-) -> ModelArtifactSpec:
-    """Read a strict artifact, optionally opting into a known experimental taxonomy.
-
-    The default remains the five-class serving contract. Opt-in only declares
-    detector labels; it grants no model acceptance or expanded wire capability.
-    """
-
-    if experimental_profile not in (None, "native-ppe-10", "unified-ppe-15"):
-        raise ArtifactValidationError("unsupported experimental PPE profile")
-
+def _load_validated_spec(path: Path, *, context: dict[str, object]) -> ModelArtifactSpec:
     raw = _read_bounded_json(path)
     _reject_secret_fields(raw)
     if not isinstance(raw, dict):
         raise ArtifactValidationError("artifact spec must be a JSON object")
 
     try:
-        document = _ArtifactSpecDocument.model_validate(
-            raw, context={"experimental_profile": experimental_profile}
-        )
+        document = _ArtifactSpecDocument.model_validate(raw, context=context)
         return ModelArtifactSpec.model_validate(
             {
                 "artifact_id": document.artifact_id,
@@ -248,6 +282,27 @@ def load_artifact_spec(
         raise ArtifactValidationError(f"invalid artifact spec: {error}") from error
 
 
+def load_artifact_spec(
+    path: Path, *, experimental_profile: ExperimentalPpeProfile | None = None
+) -> ModelArtifactSpec:
+    """Read a strict artifact, optionally opting into a known experimental taxonomy.
+
+    The default remains the five-class serving contract. Opt-in only declares
+    detector labels; it grants no model acceptance or expanded wire capability.
+    """
+
+    if experimental_profile not in (None, "native-ppe-10", "unified-ppe-15"):
+        raise ArtifactValidationError("unsupported experimental PPE profile")
+
+    return _load_validated_spec(path, context={"experimental_profile": experimental_profile})
+
+
+def load_person_artifact_spec(path: Path) -> ModelArtifactSpec:
+    """Read a strict local COCO 80 person-detector artifact specification."""
+
+    return _load_validated_spec(path, context={"taxonomy": "coco-80-person"})
+
+
 def load_yolo11_detector(
     path: Path,
     *,
@@ -257,6 +312,21 @@ def load_yolo11_detector(
     """Verify and load a YOLO11 detector through an injected explicit provider boundary."""
 
     spec = load_artifact_spec(path, experimental_profile=experimental_profile)
+    return load_detector_artifact(
+        spec,
+        runner_factory=runner_factory,
+        require_yolo11_metadata=True,
+    )
+
+
+def load_yolo11_person_detector(
+    path: Path,
+    *,
+    runner_factory: RunnerFactory,
+) -> LoadedDetectorStack:
+    """Verify and load an opted-in canonical COCO 80 YOLO11 person detector."""
+
+    spec = load_person_artifact_spec(path)
     return load_detector_artifact(
         spec,
         runner_factory=runner_factory,

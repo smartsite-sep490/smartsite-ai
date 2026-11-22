@@ -224,8 +224,22 @@ def assemble_sessions(
                 bind_content_hash=camera.entry.partitioned_frame_delivery
                 or tracked_capture is not None,
             )
+        person_tracking = camera.entry.person_tracking
         pipeline = Mf05Mf06Pipeline(
-            tracker=IoUPersonTracker(continuity_policy=continuity_policy),
+            tracker=IoUPersonTracker(
+                continuity_policy=continuity_policy,
+                new_track_confidence=(
+                    person_tracking.new_track_confidence if person_tracking is not None else None
+                ),
+                new_track_confirmation_frames=(
+                    person_tracking.new_track_confirmation_frames
+                    if person_tracking is not None
+                    else 1
+                ),
+                association_iou_margin=(
+                    person_tracking.association_iou_margin if person_tracking is not None else None
+                ),
+            ),
             ppe=PpePipeline.for_model_profile(profile),
             zones=RestrictedZonePipeline(continuity_policy=continuity_policy),
             ppe_region_id=str(camera.entry.ppe_region_id),

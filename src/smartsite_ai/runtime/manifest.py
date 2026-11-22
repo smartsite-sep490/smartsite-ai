@@ -82,6 +82,18 @@ class SampledContinuityManifest(_StrictModel):
     max_capture_gap_ms: int = Field(alias="maxCaptureGapMs", strict=True, ge=1, le=2000)
 
 
+class PersonTrackingManifest(_StrictModel):
+    new_track_confidence: float = Field(
+        alias="newTrackConfidence", strict=True, gt=0, le=1, allow_inf_nan=False
+    )
+    new_track_confirmation_frames: int = Field(
+        alias="newTrackConfirmationFrames", strict=True, ge=1, le=64
+    )
+    association_iou_margin: float = Field(
+        alias="associationIouMargin", strict=True, gt=0, le=1, allow_inf_nan=False
+    )
+
+
 class CameraManifestEntry(_StrictModel):
     stream_id: str = Field(alias="streamId", pattern=_STREAM_ID_RE.pattern)
     camera_id: UUID = Field(alias="cameraId")
@@ -108,6 +120,7 @@ class CameraManifestEntry(_StrictModel):
     sampled_continuity: SampledContinuityManifest | None = Field(
         default=None, alias="sampledContinuity"
     )
+    person_tracking: PersonTrackingManifest | None = Field(default=None, alias="personTracking")
     private_evidence_upload: bool = Field(default=False, alias="privateEvidenceUpload", strict=True)
 
     @model_validator(mode="after")
@@ -143,6 +156,9 @@ class CameraManifestEntry(_StrictModel):
 class CameraRuntimeManifest(_StrictModel):
     schema_version: Literal["1"] = Field(alias="schemaVersion")
     model_spec: str = Field(alias="modelSpec", min_length=1, max_length=1024)
+    person_model_spec: str | None = Field(
+        default=None, alias="personModelSpec", min_length=1, max_length=1024
+    )
     experimental_model_profile: ExperimentalPpeProfile | None = Field(
         default=None, alias="experimentalModelProfile"
     )
@@ -172,6 +188,10 @@ class CameraRuntimeManifest(_StrictModel):
             raise ValueError("camera runtime manifest is invalid")
         _reject_duplicates(self.cameras)
         if not _is_portable_absolute_path(self.model_spec):
+            raise ValueError("camera runtime manifest is invalid")
+        if self.person_model_spec is not None and not _is_portable_absolute_path(
+            self.person_model_spec
+        ):
             raise ValueError("camera runtime manifest is invalid")
         return self
 
@@ -210,10 +230,12 @@ class BoundManifest:
         cameras: tuple[BoundCamera, ...],
         *,
         model_spec: Path,
+        person_model_spec: Path | None = None,
     ) -> None:
         self.manifest = manifest
         self.cameras = cameras
         self.model_spec = model_spec
+        self.person_model_spec = person_model_spec
 
 
 def parse_manifest(document: object) -> CameraRuntimeManifest:
@@ -242,6 +264,11 @@ def bind_manifest(
     """Resolve env-backed sources and require isolated absolute runtime paths."""
 
     model_spec = _existing_file(Path(manifest.model_spec), "model spec")
+    person_model_spec = (
+        _existing_file(Path(manifest.person_model_spec), "person model spec")
+        if manifest.person_model_spec is not None
+        else None
+    )
     bound: list[BoundCamera] = []
     seen_sources: set[str] = set()
     for entry in manifest.cameras:
@@ -277,7 +304,9 @@ def bind_manifest(
                 evidence_dir=evidence_dir,
             )
         )
-    return BoundManifest(manifest, tuple(bound), model_spec=model_spec)
+    return BoundManifest(
+        manifest, tuple(bound), model_spec=model_spec, person_model_spec=person_model_spec
+    )
 
 
 def _reject_duplicates(cameras: tuple[CameraManifestEntry, ...]) -> None:

@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1045,3 +1046,154 @@ def test_source_operator_cli_main_parent_child_sanitizes_errors(
     monkeypatch.setattr(op, "run_operator_child", fake_child)
     assert op.main(["--profile", str(profile_path), "--child"]) == 0
     assert delegated == [profile_path] or delegated == [profile_path.resolve()]
+
+
+def test_build_operator_app_forwards_windows_user_dirs_and_excludes_secrets_and_pythonpath(
+    tmp_path: Path,
+) -> None:
+    op = _op()
+    profile_path, _doc, environ = _operator_bundle(tmp_path)
+    user_profile = tmp_path / "user-profile"
+    appdata = user_profile / "AppData" / "Roaming"
+    local_appdata = user_profile / "AppData" / "Local"
+    temp_dir = local_appdata / "Temp"
+    for directory in (user_profile, appdata, local_appdata, temp_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    full_env = {
+        **environ,
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+        "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+        "TEMP": str(temp_dir),
+        "TMP": str(temp_dir),
+        "USERPROFILE": str(user_profile),
+        "APPDATA": str(appdata),
+        "LOCALAPPDATA": str(local_appdata),
+        "DATABASE_URL": "postgres://secret:db@localhost/smartsite",
+        "TEST_DATABASE_URL": "postgres://secret:test@localhost/smartsite_test",
+        "PGPASSWORD": "db-password-never-forward",
+        "PGUSER": "postgres",
+        "PYTHONPATH": str(tmp_path / "injected-pythonpath"),
+        "OPENAI_API_KEY": "sk-never-forward",
+        "ARBITRARY_SECRET": "never-forward",
+    }
+
+    _app, driver = op.build_operator_app(profile_path, full_env)
+
+    assert driver.environment["USERPROFILE"] == str(user_profile)
+    assert driver.environment["APPDATA"] == str(appdata)
+    assert driver.environment["LOCALAPPDATA"] == str(local_appdata)
+
+    for forbidden in (
+        "DATABASE_URL",
+        "TEST_DATABASE_URL",
+        "PGPASSWORD",
+        "PGUSER",
+        "SMARTSITE_AI_SOURCE_CONTROL_TOKEN",
+        "SMARTSITE_AI_SOURCE_REGISTRY_KEY",
+        "PYTHONPATH",
+        "OPENAI_API_KEY",
+        "ARBITRARY_SECRET",
+    ):
+        assert forbidden not in driver.environment
+
+    allowed = {
+        "PATH",
+        "Path",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "SMARTSITE_AI_PREVIEW_SERVICE_TOKEN",
+        "SMARTSITE_AI_BACKEND_SERVICE_TOKEN",
+        "SMARTSITE_AI_BACKEND_INGESTION_URL",
+        "SMARTSITE_AI_REALTIME_DEVICE",
+    }
+    assert set(driver.environment) <= allowed
+
+
+def test_windows_operator_forwarded_env_resolves_home_for_offline_model_import(
+    tmp_path: Path,
+) -> None:
+    op = _op()
+    profile_path, _doc, environ = _operator_bundle(tmp_path)
+    user_profile = tmp_path / "home-profile"
+    appdata = user_profile / "AppData" / "Roaming"
+    local_appdata = user_profile / "AppData" / "Local"
+    temp_dir = local_appdata / "Temp"
+    for directory in (user_profile, appdata, local_appdata, temp_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    parent_env = {
+        **environ,
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", r"C:\Windows"),
+        "WINDIR": os.environ.get("WINDIR", r"C:\Windows"),
+        "TEMP": str(temp_dir),
+        "TMP": str(temp_dir),
+        "USERPROFILE": str(user_profile),
+        "APPDATA": str(appdata),
+        "LOCALAPPDATA": str(local_appdata),
+        "PYTHONPATH": str(tmp_path / "never-forward"),
+        "DATABASE_URL": "postgres://secret:db@localhost/smartsite",
+    }
+    _app, driver = op.build_operator_app(profile_path, parent_env)
+
+    # Confirm the exact stripped-env failure mode on Windows when USERPROFILE is absent.
+    if sys.platform == "win32":
+        stripped_without_home = {
+            k: v
+            for k, v in driver.environment.items()
+            if k not in {"USERPROFILE", "APPDATA", "LOCALAPPDATA"}
+        }
+        stripped_probe = subprocess.run(
+            [sys.executable, "-c", "from pathlib import Path; Path.home()"],
+            env=stripped_without_home,
+            cwd=str(temp_dir),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert stripped_probe.returncode != 0
+        assert "Could not determine home directory" in stripped_probe.stderr
+
+    # Verify the forwarded child environment resolves Windows home/config paths offline.
+    probe = "\n".join(
+        (
+            "import importlib.util, json, ntpath, os, sys",
+            "from pathlib import Path",
+            "home = str(Path.home()) if sys.platform == 'win32' else ntpath.expanduser('~')",
+            "ultralytics_ok = None",
+            "if importlib.util.find_spec('ultralytics') is not None:",
+            "    os.environ['YOLO_AUTOINSTALL'] = 'false'",
+            "    import ultralytics",
+            "    ultralytics_ok = bool(ultralytics.__version__)",
+            "print(json.dumps({",
+            "    'home': home,",
+            "    'appdata': os.environ.get('APPDATA'),",
+            "    'localAppdata': os.environ.get('LOCALAPPDATA'),",
+            "    'ultralyticsOk': ultralytics_ok,",
+            "}))",
+        )
+    )
+    child_probe = subprocess.run(
+        [sys.executable, "-c", probe],
+        env=driver.environment,
+        cwd=str(temp_dir),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert child_probe.returncode == 0, child_probe.stderr
+    payload = json.loads(child_probe.stdout.strip().splitlines()[-1])
+    assert payload["home"] == str(user_profile)
+    assert payload["appdata"] == str(appdata)
+    assert payload["localAppdata"] == str(local_appdata)
+    assert payload["ultralyticsOk"] in (None, True)

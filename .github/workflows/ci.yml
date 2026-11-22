@@ -35,19 +35,23 @@ jobs:
           set -euo pipefail
           source_repository=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceRepository"])')
           source_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["sourceCommitSha"])')
+          policy_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["cameraPolicyConfigurationBundle"]["sourceCommitSha"])')
+          tracked_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["trackedTechnicalObservationVersions"][-1]["sourceCommitSha"])')
+          evidence_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["aiFrameEvidenceReceipt"]["sourceCommitSha"])')
           source_checkout="$RUNNER_TEMP/smartsite-contract-source"
           git init --quiet "$source_checkout"
-          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$source_commit"
-          git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1/technical-observation-event.json > "$RUNNER_TEMP/source-schema.json"
-          git -C "$source_checkout" show FETCH_HEAD:contracts/test/golden-vectors.json > "$RUNNER_TEMP/source-golden-vectors.json"
-          git -C "$source_checkout" show FETCH_HEAD:contracts/schemas/v1/camera-region-configuration.json > "$RUNNER_TEMP/source-camera-region-schema.json"
-          git -C "$source_checkout" show FETCH_HEAD:contracts/test/camera-region-configuration-vectors.json > "$RUNNER_TEMP/source-camera-region-vectors.json"
+          # Fetch every immutable source in one operation, avoiding repeated shallow
+          # boundary updates. Every comparison below still selects its exact SHA.
+          mapfile -t source_commits < <(printf '%s\n' "$source_commit" "$policy_commit" "$tracked_commit" "$evidence_commit" | sort -u)
+          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "${source_commits[@]}"
+          git -C "$source_checkout" show "${source_commit}:contracts/schemas/v1/technical-observation-event.json" > "$RUNNER_TEMP/source-schema.json"
+          git -C "$source_checkout" show "${source_commit}:contracts/test/golden-vectors.json" > "$RUNNER_TEMP/source-golden-vectors.json"
+          git -C "$source_checkout" show "${source_commit}:contracts/schemas/v1/camera-region-configuration.json" > "$RUNNER_TEMP/source-camera-region-schema.json"
+          git -C "$source_checkout" show "${source_commit}:contracts/test/camera-region-configuration-vectors.json" > "$RUNNER_TEMP/source-camera-region-vectors.json"
           cmp contracts/schemas/v1/technical-observation-event.json "$RUNNER_TEMP/source-schema.json"
           cmp contracts/golden-vectors.json "$RUNNER_TEMP/source-golden-vectors.json"
           cmp contracts/schemas/v1/camera-region-configuration.json "$RUNNER_TEMP/source-camera-region-schema.json"
           cmp contracts/camera-region-configuration-vectors.json "$RUNNER_TEMP/source-camera-region-vectors.json"
-          policy_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["cameraPolicyConfigurationBundle"]["sourceCommitSha"])')
-          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$policy_commit"
           for policy_path in \
             contracts/schemas/v2/camera-policy-configuration-bundle.json \
             contracts/schemas/v2/examples/camera-policy-configuration-bundle.json \
@@ -55,8 +59,6 @@ jobs:
             git -C "$source_checkout" show "${policy_commit}:${policy_path}" > "$RUNNER_TEMP/source-policy-bytes.json"
             cmp "$policy_path" "$RUNNER_TEMP/source-policy-bytes.json"
           done
-          tracked_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["trackedTechnicalObservationVersions"][-1]["sourceCommitSha"])')
-          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$tracked_commit"
           for tracked_path in \
             contracts/schemas/v1.5/technical-observation-event.json \
             contracts/schemas/v1.6/technical-observation-event.json \
@@ -65,8 +67,6 @@ jobs:
             git -C "$source_checkout" show "${tracked_commit}:${tracked_path}" > "$RUNNER_TEMP/source-tracked-bytes.json"
             cmp "$tracked_path" "$RUNNER_TEMP/source-tracked-bytes.json"
           done
-          evidence_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["aiFrameEvidenceReceipt"]["sourceCommitSha"])')
-          git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "$evidence_commit"
           for evidence_path in \
             contracts/schemas/v1/ai-frame-evidence-receipt.json \
             contracts/examples/v1/ai-frame-evidence-receipt.json; do

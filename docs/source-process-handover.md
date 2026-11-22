@@ -13,6 +13,13 @@ generation remain child environment bindings; the expected resume manifest is
 removed for ordinary activation and included for validated resume. No shell is
 used and the worker receives no database credentials.
 
+While this driver owns a child, generation lookup uses that child's bound
+generation in memory, including after a validated resume. The operator's seed
+file is only the fallback before ownership or after explicit clean cleanup; it
+is not rewritten with a plaintext credential and cannot override the current
+owner during another source change. Reconciliation-required lookup fails closed
+instead of returning the seed. This does not recover or adopt another process.
+
 Stopping an owned child first writes its cooperative stop file and waits for the
 existing deadline. If that deadline expires, the driver marks reconciliation
 required **before** terminating the child. Forced termination does not count as

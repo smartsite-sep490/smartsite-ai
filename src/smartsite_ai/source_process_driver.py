@@ -90,6 +90,10 @@ class SourceProcessDriver:
     async def generation_id(self, scope: Scope) -> str:
         if not self.supports(scope):
             raise SourceActivationError()
+        if self._reconciliation_required:
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+        if self._owned_generation is not None:
+            return str(self._owned_generation["workerGenerationId"])
         data = json.loads(self.generation_file.read_bytes())
         return str(data["workerGenerationId"])
 

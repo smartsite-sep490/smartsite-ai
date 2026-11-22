@@ -77,6 +77,11 @@ class TrackedV17Manifest(_StrictModel):
     max_bytes: int = Field(alias="maxBytes", strict=True, ge=1, le=20_000_000)
 
 
+class SampledContinuityManifest(_StrictModel):
+    max_source_sequence_gap: int = Field(alias="maxSourceSequenceGap", strict=True, ge=1, le=64)
+    max_capture_gap_ms: int = Field(alias="maxCaptureGapMs", strict=True, ge=1, le=2000)
+
+
 class CameraManifestEntry(_StrictModel):
     stream_id: str = Field(alias="streamId", pattern=_STREAM_ID_RE.pattern)
     camera_id: UUID = Field(alias="cameraId")
@@ -100,6 +105,9 @@ class CameraManifestEntry(_StrictModel):
     )
 
     tracked_v17: TrackedV17Manifest | None = Field(default=None, alias="trackedV17")
+    sampled_continuity: SampledContinuityManifest | None = Field(
+        default=None, alias="sampledContinuity"
+    )
     private_evidence_upload: bool = Field(default=False, alias="privateEvidenceUpload", strict=True)
 
     @model_validator(mode="after")
@@ -108,6 +116,8 @@ class CameraManifestEntry(_StrictModel):
             self.tracked_v17 is None or not self.live or self.evidence_dir is None
         ):
             raise ValueError("camera runtime manifest is invalid")
+        if self.sampled_continuity is not None and (not self.live or self.tracked_v17 is None):
+            raise ValueError("Sampled continuity requires a tracked LIVE camera")
         if self.tracked_v17 is not None and (
             not self.live
             or self.evidence_dir is None

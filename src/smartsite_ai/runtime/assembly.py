@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from uuid import UUID
@@ -44,6 +44,7 @@ from smartsite_ai.runtime.supervisor import (
     _finish_cleanup,
     startup_outcomes,
 )
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
 SourceFactory = Callable[[StreamConfig], object]
@@ -184,6 +185,17 @@ def assemble_sessions(
     for plan in plans:
         camera = plan.bound
         tracked_options = camera.entry.tracked_v17
+        sampled = camera.entry.sampled_continuity
+        if sampled is not None and (tracked_options is None or not camera.source_config.is_live):
+            raise CameraRuntimeError("Sampled continuity requires a tracked LIVE camera")
+        continuity_policy = (
+            FrameContinuityPolicy(
+                max_source_sequence_gap=sampled.max_source_sequence_gap,
+                max_capture_gap=timedelta(milliseconds=sampled.max_capture_gap_ms),
+            )
+            if sampled is not None
+            else None
+        )
         tracked_capture = None
         if tracked_options is not None:
             if (
@@ -202,6 +214,7 @@ def assemble_sessions(
                 predecessor_wait_seconds=tracked_options.predecessor_wait_seconds,
                 max_pending=tracked_options.max_pending,
                 max_bytes=tracked_options.max_bytes,
+                continuity_policy=continuity_policy,
             )
         evidence_publisher = None
         if camera.evidence_dir is not None:
@@ -212,9 +225,9 @@ def assemble_sessions(
                 or tracked_capture is not None,
             )
         pipeline = Mf05Mf06Pipeline(
-            tracker=IoUPersonTracker(),
+            tracker=IoUPersonTracker(continuity_policy=continuity_policy),
             ppe=PpePipeline.for_model_profile(profile),
-            zones=RestrictedZonePipeline(),
+            zones=RestrictedZonePipeline(continuity_policy=continuity_policy),
             ppe_region_id=str(camera.entry.ppe_region_id),
             schema_version=observation_schema_version,
             tracked_v17=tracked_capture is not None,

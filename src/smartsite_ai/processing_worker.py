@@ -36,6 +36,7 @@ from smartsite_ai.pipelines.ppe_temporal import (
     TemporalPpeCandidateGate,
     events_for_delivery,
 )
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,8 +93,13 @@ class TrackedCapturePolicy:
     predecessor_wait_seconds: float
     max_pending: int
     max_bytes: int
+    continuity_policy: FrameContinuityPolicy | None = None
 
     def __post_init__(self) -> None:
+        if self.continuity_policy is not None and not isinstance(
+            self.continuity_policy, FrameContinuityPolicy
+        ):
+            raise ValueError("Invalid tracked continuity policy")
         if not (
             type(self.pending_seconds) in (int, float)
             and type(self.predecessor_wait_seconds) in (int, float)
@@ -161,9 +167,10 @@ class HeadlessCameraProcessingWorker:
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
-        self._temporal_gate = TemporalPpeCandidateGate()
+        self._temporal_gate = self._new_temporal_gate()
         self._region_gates: dict[tuple[str, int], TemporalPpeCandidateGate] = {}
         self._last_tracked_sequence: int | None = None
+        self._last_tracked_batch: DetectionBatch | None = None
         self._active_snapshot: CameraRegionConfiguration | CameraBundle | None = None
         self._started = False
 
@@ -283,6 +290,7 @@ class HeadlessCameraProcessingWorker:
             self._current_ppe_geometry_version,
             self._active_snapshot,
             self._last_tracked_sequence,
+            self._last_tracked_batch,
         )
         self._discard_frame = False
         self._durably_committed = False
@@ -300,7 +308,19 @@ class HeadlessCameraProcessingWorker:
                     self._current_ppe_geometry_version,
                     self._active_snapshot,
                     self._last_tracked_sequence,
+                    self._last_tracked_batch,
                 ) = previous
+
+    def _new_temporal_gate(self) -> TemporalPpeCandidateGate:
+        policy = (
+            self._tracked_capture.continuity_policy if self._tracked_capture is not None else None
+        )
+        expiry = (
+            max(timedelta(seconds=1), policy.max_capture_gap)
+            if policy is not None and policy.max_capture_gap is not None
+            else timedelta(seconds=1)
+        )
+        return TemporalPpeCandidateGate(track_expiry=expiry)
 
     async def _process_frame_once(self, frame: FrameEnvelope) -> None:
         self._last_frame_enqueued = False
@@ -386,7 +406,9 @@ class HeadlessCameraProcessingWorker:
             self._current_session_id = batch.session_id
             self._active_snapshot = configuration
             self._current_ppe_geometry_version = ppe_region.geometry_version if ppe_region else None
-            self._temporal_gate = TemporalPpeCandidateGate()
+            self._temporal_gate = self._new_temporal_gate()
+            self._last_tracked_sequence = None
+            self._last_tracked_batch = None
             self._region_gates = {}
 
         observe = getattr(
@@ -429,12 +451,15 @@ class HeadlessCameraProcessingWorker:
                 or not event.requires_tracked_wire
             ):
                 raise ProcessingWorkerSourceError("PPE policy v2 requires tracked v1.7 capture")
-            if (
-                self._last_tracked_sequence is not None
-                and batch.sequence_number != self._last_tracked_sequence + 1
+            if self._last_tracked_sequence is not None and (
+                not self._tracked_capture.continuity_policy.allows(self._last_tracked_batch, batch)
+                if self._tracked_capture.continuity_policy is not None
+                and self._last_tracked_batch is not None
+                else batch.sequence_number != self._last_tracked_sequence + 1
             ):
-                self._temporal_gate = TemporalPpeCandidateGate()
+                self._temporal_gate = self._new_temporal_gate()
             self._last_tracked_sequence = batch.sequence_number
+            self._last_tracked_batch = batch
             confirmed_candidates = self._temporal_gate.update(
                 stream_id=batch.stream_id,
                 session_id=batch.session_id,
@@ -565,6 +590,7 @@ class HeadlessCameraProcessingWorker:
                 poll_interval_seconds=self._delivery_interval_seconds,
                 before_enqueue=check_context,
                 on_staged=on_staged,
+                continuity_policy=tracked.continuity_policy,
             )
             return
 

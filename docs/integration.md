@@ -1,5 +1,24 @@
 # Tích hợp SmartSite Backend
 
+## Explicit sampled LIVE continuity
+
+A tracked LIVE camera manifest may opt into `sampledContinuity` with both
+`maxSourceSequenceGap` (strict integer 1–64) and `maxCaptureGapMs` (strict
+integer 1–2000). Omission preserves strict consecutive-sequence behavior. This
+trusted operator setting must agree with the Backend's reviewed tracking head
+bounds and profile digest; changing it requires a new reviewed profile and worker
+generation, not a worker-supplied authorization decision.
+
+The same bounded policy governs subject segments, Zone/PPE temporal state and
+tracked predecessor encoding. Raw capture sequence numbers, frame timestamps,
+event IDs and evidence hashes remain unchanged. A continuation references the
+exact previous processed sequence and its Backend-admitted subject/event, never
+an arbitrary older frame or a raw-storage acknowledgement. Missing admission,
+scope/view/session/model changes, ambiguous association and bounds exceeded still
+break continuity. This tracks an unambiguous visible subject; it does not identify
+a Worker, prove actions during omitted frames, or grant Zone permission. Real
+camera stability and duplicate-alert acceptance require a separate runtime check.
+
 ## Opt-in empty LIVE read budget
 
 `OpenCvFrameSource` defaults to one native read. An explicitly composed worker may

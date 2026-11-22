@@ -6,7 +6,9 @@ from uuid import UUID
 from smartsite_ai.domain.observations import ZoneEntryObservation
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.domain.tracked_observations import TrackedZoneEntryObservation
+from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.pipelines._geometry import bottom_center, point_in_polygon
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import TrackedFrame
 
 
@@ -22,6 +24,7 @@ class ZoneTemporalState:
     region_versions: dict[str, int]
     region_ids: dict[str, str]
     view_revision: int | None
+    last_batch: DetectionBatch | None = None
 
 
 class RestrictedZonePipeline:
@@ -37,7 +40,12 @@ class RestrictedZonePipeline:
         *,
         entry_confirmation_frames: int = 3,
         exit_confirmation_frames: int = 2,
+        continuity_policy: FrameContinuityPolicy | None = None,
     ) -> None:
+        if continuity_policy is not None and not isinstance(
+            continuity_policy, FrameContinuityPolicy
+        ):
+            raise ValueError("Invalid Zone continuity policy")
         if entry_confirmation_frames <= 0:
             raise ValueError("entry_confirmation_frames must be positive")
         if exit_confirmation_frames <= 0:
@@ -54,6 +62,8 @@ class RestrictedZonePipeline:
         self._region_versions: dict[str, int] = {}
         self._region_ids: dict[str, str] = {}
         self._view_revision: int | None = None
+        self._continuity_policy = continuity_policy
+        self._last_batch: DetectionBatch | None = None
 
     def checkpoint_temporal_state(self) -> ZoneTemporalState:
         """Copy confirmation state before a frame can be rejected during evidence I/O."""
@@ -68,6 +78,7 @@ class RestrictedZonePipeline:
             self._region_versions.copy(),
             self._region_ids.copy(),
             self._view_revision,
+            self._last_batch,
         )
 
     def restore_temporal_state(self, state: ZoneTemporalState) -> None:
@@ -81,6 +92,7 @@ class RestrictedZonePipeline:
         self._region_versions = state.region_versions.copy()
         self._region_ids = state.region_ids.copy()
         self._view_revision = state.view_revision
+        self._last_batch = state.last_batch
 
     def process(
         self,
@@ -108,6 +120,7 @@ class RestrictedZonePipeline:
             self._source_key = source_key
             self._camera_external_id = batch.camera_external_id
             self._last_sequence = None
+            self._last_batch = None
             self._inside.clear()
             self._inside_streaks.clear()
             self._outside_streaks.clear()
@@ -126,7 +139,11 @@ class RestrictedZonePipeline:
         if self._view_revision != view_revision or (
             include_entry_origin
             and self._last_sequence is not None
-            and batch.sequence_number != self._last_sequence + 1
+            and (
+                not self._continuity_policy.allows(self._last_batch, batch)
+                if self._continuity_policy is not None and self._last_batch is not None
+                else batch.sequence_number != self._last_sequence + 1
+            )
         ):
             self._inside.clear()
             self._inside_streaks.clear()
@@ -222,6 +239,7 @@ class RestrictedZonePipeline:
             self._absent_frames.pop(track_id, None)
 
         self._last_sequence = batch.sequence_number
+        self._last_batch = batch
         return tuple(observations)
 
     def occupied_track_regions(

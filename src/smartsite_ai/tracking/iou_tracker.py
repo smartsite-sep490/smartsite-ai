@@ -12,6 +12,7 @@ from smartsite_ai.inference.models import (
     NormalizedBoundingBox,
     NormalizedDetection,
 )
+from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 from smartsite_ai.tracking.segment_lifecycle import SegmentLifecycle
 
@@ -58,6 +59,7 @@ class IoUPersonTracker:
         association_iou_margin: float | None = None,
         new_track_confidence: float | None = None,
         new_track_confirmation_frames: int = 1,
+        continuity_policy: FrameContinuityPolicy | None = None,
     ) -> None:
         if not 0.0 <= iou_threshold <= 1.0:
             raise ValueError("iou_threshold must be between 0 and 1")
@@ -96,7 +98,9 @@ class IoUPersonTracker:
         self._view_revision: int | None = None
         self._next_track_id = 1
         self._tracks: dict[int, _MutableTrack] = {}
-        self._segments = SegmentLifecycle(max_segment_gap=max_segment_gap)
+        self._segments = SegmentLifecycle(
+            max_segment_gap=max_segment_gap, continuity_policy=continuity_policy
+        )
 
     def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Associate the person detections in ``batch`` with existing tracks."""

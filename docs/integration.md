@@ -151,6 +151,22 @@ not a fresh lease and not the shorter predecessor-polling timeout.
 Evidence keeps the original frame/part identity and JPEG SHA. Empty captured frames
 may retain lifecycle data; failed inference is not an empty safe scene.
 
+For a LIVE camera that sends evidence to a remote Backend, use
+[`deploy/runtime.example.json`](../deploy/runtime.example.json) as a template and
+set `privateEvidenceUpload: true` in that camera's private runtime manifest. Keep
+the event outbox and the private evidence directory on persistent storage. Enable
+the Backend tracked runtime and `AI_EVIDENCE_OBJECT_STORAGE_ENABLED`, and verify
+its private storage, before starting this profile. The camera worker authenticates
+to the Backend with its existing service and generation credentials. R2 credentials
+are only configured on the Backend.
+
+For a part containing FRAME evidence, the outbox sends the original JPEG first
+and checks the receipt against its event, payload, generation binding and JPEG
+hash. A temporary upload failure keeps the original part pending for retry.
+A missing or changed local file or an invalid receipt blocks delivery for that
+tracked worker for operator investigation. Parts without a FRAME skip the upload.
+The manifest field defaults to false when omitted.
+
 This tracked worker mode requires LIVE admission. Existing legacy REPLAY handling
 is preserved; Backend review-only replay receipts must not be treated as operational
 admitted seals or real safety notifications. Backend rollout must coordinate its

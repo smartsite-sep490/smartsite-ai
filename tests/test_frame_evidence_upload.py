@@ -3,6 +3,7 @@ import copy
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -97,6 +98,12 @@ def _single_live_part(evidence_dir):
         }
     )
     return single_part, context, credential, single_refs
+
+
+def test_deployment_example_opts_into_private_live_evidence():
+    path = Path(__file__).resolve().parents[1] / "deploy" / "runtime.example.json"
+    camera = parse_manifest(json.loads(path.read_bytes())).cameras[0]
+    assert camera.private_evidence_upload
 
 
 def test_manifest_private_evidence_upload_defaults_off_and_rejects_replay_or_untracked(tmp_path):

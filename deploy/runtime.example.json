@@ -18,6 +18,7 @@
       "outbox": "/state/camera-01.sqlite3",
       "generationCredentialFile": "/state/generation.json",
       "evidenceDir": "/state/evidence-camera-01",
+      "privateEvidenceUpload": true,
       "trackedV17": {
         "siteId": "33333333-3333-4333-8333-333333333333",
         "profileSha256": "0000000000000000000000000000000000000000000000000000000000000000",

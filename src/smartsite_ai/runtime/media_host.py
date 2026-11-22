@@ -3,7 +3,7 @@
 import asyncio
 import ipaddress
 import socket
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 
 import uvicorn
@@ -36,12 +36,15 @@ async def run_with_camera_preview(
     host: str,
     port: int,
     on_bound: Callable[[int], None] | None = None,
+    worker_generation_ids: Mapping[str, str] | None = None,
 ) -> RuntimeReport:
     address = ipaddress.ip_address(host)
     if type(port) is not int or not 0 <= port <= 65535:
         raise CameraRuntimeError("Preview bind port is invalid")
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
-    app.include_router(camera_media_router(observers, service_token))
+    app.include_router(
+        camera_media_router(observers, service_token, worker_generation_ids=worker_generation_ids)
+    )
     listener = socket.socket(
         socket.AF_INET6 if address.version == 6 else socket.AF_INET, socket.SOCK_STREAM
     )

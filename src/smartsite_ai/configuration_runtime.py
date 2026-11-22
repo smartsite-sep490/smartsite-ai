@@ -78,6 +78,7 @@ class ConfigurationCaptureRuntime:
         resource_id: UUID,
         lock_directory: Path,
         service_token: SecretStr,
+        worker_generation_id: str | None = None,
         source_factory: SourceFactory = _opencv_source,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         stop_timeout: float = 2.0,
@@ -94,7 +95,11 @@ class ConfigurationCaptureRuntime:
             stop_timeout=stop_timeout,
         )
         self.app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
-        self.app.include_router(configuration_image_router(self._capture, service_token))
+        self.app.include_router(
+            configuration_image_router(
+                self._capture, service_token, worker_generation_id=worker_generation_id
+            )
+        )
         self._started = False
         self._stop_requested = False
 

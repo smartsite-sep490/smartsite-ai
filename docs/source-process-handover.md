@@ -41,3 +41,19 @@ bootstrap a real Backend-issued generation when needed, and bind the inference
 runtime to the same physical resource. This driver option alone does not provide
 first-camera onboarding, Windows webcam access from Linux Docker, or live-camera
 acceptance.
+
+## Generation-bound private image readiness
+
+An explicitly owned runtime may attach `X-SmartSite-Worker-Generation` to a
+successful authenticated configuration-image response. The value is a normalized
+generation UUID supplied by trusted runtime composition, not request input. The
+image body remains unchanged. Unbound defaults, unavailable/stale images,
+authorization errors, other cameras and analysis/video endpoints do not gain this
+header. The inference CLI supplies it only from its validated source-control
+generation override; a model-free capture owner must be explicitly bound too.
+
+An operator's readiness probe must check a fresh image for the exact Camera and
+the expected generation while still owning the live child. A listening port or
+HTTP 200 alone does not prove that a newly started owner is ready. The header is
+technical lifecycle evidence, never a Worker identity, access authorization or
+proof that inference, delivery and business alert evaluation succeeded.

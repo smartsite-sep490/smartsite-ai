@@ -7,6 +7,7 @@ import secrets
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from typing import Annotated, Never
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -46,12 +47,27 @@ def camera_media_router(
     service_token: SecretStr,
     *,
     max_stream_seconds: float = 600,
+    worker_generation_ids: Mapping[str, str] | None = None,
 ) -> APIRouter:
     token = service_token.get_secret_value()
     if not 32 <= len(token) <= 4096 or not token.isascii() or any(c.isspace() for c in token):
         raise ValueError("A bounded server-only preview token is required")
     if not math.isfinite(max_stream_seconds) or not 0 < max_stream_seconds <= 600:
         raise ValueError("Preview stream duration must be bounded")
+    generations: dict[str, str] = {}
+    if worker_generation_ids is not None:
+        if not isinstance(worker_generation_ids, Mapping) or len(worker_generation_ids) > 128:
+            raise ValueError("Invalid camera generation bindings")
+        for camera, generation in worker_generation_ids.items():
+            if (
+                not isinstance(camera, str)
+                or not camera.strip()
+                or len(camera) > 128
+                or not camera.isprintable()
+                or not isinstance(generation, str)
+            ):
+                raise ValueError("Invalid camera generation binding")
+            generations[camera] = str(UUID(generation))
     expected = ("Bearer " + token).encode("ascii")
     active: dict[str, int] = {}
     router = APIRouter()
@@ -99,7 +115,10 @@ def camera_media_router(
         payload = observer.configuration_image()
         if payload is None:
             fail(503, "CONFIGURATION_IMAGE_UNAVAILABLE")
-        return JSONResponse(payload, headers=_HEADERS)
+        headers = dict(_HEADERS)
+        if observer.camera_external_id in generations:
+            headers["X-SmartSite-Worker-Generation"] = generations[observer.camera_external_id]
+        return JSONResponse(payload, headers=headers)
 
     @router.get("/v1/realtime/preview/latest", include_in_schema=False)
     async def analysis_preview(

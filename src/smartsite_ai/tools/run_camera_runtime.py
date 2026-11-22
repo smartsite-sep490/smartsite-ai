@@ -257,6 +257,13 @@ async def run_manifest(
             close_model=close_model,
             build_sessions=build_sessions,
         )
+        preview_options = {}
+        if source_control_profile is not None and expected_resume is not None:
+            preview_options["worker_generation_ids"] = {
+                bound.cameras[
+                    0
+                ].camera_external_id: expected_resume.generationBinding.workerGenerationId
+            }
         if preview_port is None:
             report = await execute_runtime(plan)
         else:
@@ -266,6 +273,7 @@ async def run_manifest(
                 runtime_settings.preview_service_token,
                 host=str(runtime_settings.host),
                 port=preview_port,
+                **preview_options,
             )
     finally:
         await _finish_cleanup(close_clients())

@@ -1,6 +1,7 @@
 """Mountable observer-only configuration route; no application or worker startup."""
 
 import secrets
+from uuid import UUID
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -12,7 +13,10 @@ _HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
 def configuration_image_router(
-    capture: ConfigurationCapture, service_token: SecretStr
+    capture: ConfigurationCapture,
+    service_token: SecretStr,
+    *,
+    worker_generation_id: str | None = None,
 ) -> APIRouter:
     """The explicit runtime owner mounts this router; requests only observe it.
 
@@ -23,6 +27,11 @@ def configuration_image_router(
     if not 32 <= len(token) <= 4096 or not token.isascii() or any(c.isspace() for c in token):
         raise ValueError("A bounded server-only configuration service token is required")
     expected = f"Bearer {token}".encode("ascii")
+    success_headers = dict(_HEADERS)
+    if worker_generation_id is not None:
+        if not isinstance(worker_generation_id, str):
+            raise ValueError("Invalid worker generation binding")
+        success_headers["X-SmartSite-Worker-Generation"] = str(UUID(worker_generation_id))
     router = APIRouter()
 
     def error(status: int, code: str) -> JSONResponse:
@@ -46,6 +55,6 @@ def configuration_image_router(
         snapshot = capture.latest()
         if snapshot is None:
             return error(503, "CONFIGURATION_IMAGE_UNAVAILABLE")
-        return JSONResponse(snapshot, headers=_HEADERS)
+        return JSONResponse(snapshot, headers=success_headers)
 
     return router

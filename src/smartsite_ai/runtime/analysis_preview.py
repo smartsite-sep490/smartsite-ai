@@ -13,6 +13,8 @@ from smartsite_ai.runtime.supervisor import _finish_cleanup
 
 
 def encode_analysis_frame(item: AnalysisFrame) -> dict[str, Any]:
+    if item.zone_anchor not in ("BOTTOM_CENTER", "BOX_CENTER"):
+        raise ValueError("Invalid Zone preview anchor")
     # Keep the existing technical preview mapping, without starting its socket
     # runtime, model, camera, or Backend delivery loop.
     from smartsite_ai.realtime import build_realtime_preview
@@ -25,6 +27,8 @@ def encode_analysis_frame(item: AnalysisFrame) -> dict[str, Any]:
         confirmed_ppe_items=item.confirmed_ppe_items,
         occupied_zone_regions=item.occupied_zone_regions,
     )
+    if item.zone_anchor == "BOX_CENTER":
+        payload["zoneAnchor"] = item.zone_anchor
     if isinstance(item.configuration, CameraPolicyConfigurationBundle):
         for person in payload["detections"]:
             box = person.get("boundingBox")

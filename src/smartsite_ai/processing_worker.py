@@ -538,6 +538,7 @@ class HeadlessCameraProcessingWorker:
                         ppe_region_id=self._ppe_region_id,
                         confirmed_ppe_items=confirmed_preview_items,
                         occupied_zone_regions=frozenset(occupied_zone_regions),
+                        zone_anchor=getattr(self._pipeline, "zone_anchor", "BOTTOM_CENTER"),
                     )
                 )
             except Exception:

@@ -50,6 +50,10 @@ class Mf05Mf06Pipeline:
             tuple[str, str, UUID, int, str, int, int, int, str, str, str] | None
         ) = None
 
+    @property
+    def zone_anchor(self) -> Literal["BOTTOM_CENTER", "BOX_CENTER"]:
+        return self._zones.anchor
+
     def checkpoint_temporal_state(self) -> ZoneTemporalState:
         return self._zones.checkpoint_temporal_state()
 

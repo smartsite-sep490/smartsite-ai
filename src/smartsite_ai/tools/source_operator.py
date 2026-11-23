@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import uvicorn
@@ -43,6 +43,7 @@ from smartsite_ai.tools.run_source_control import (
     HostManifest,
     build_source_control_app,
 )
+from smartsite_ai.training.dataset_integrity import DatasetIntegrityError, is_link_like
 
 
 class OperatorProfile(BaseModel):
@@ -388,12 +389,18 @@ def _validate_runtime_outcome_path(path: Path) -> Path:
     if (
         not path.is_absolute()
         or str(path).startswith("\\\\")
-        or path.is_symlink()
-        or any(parent.is_symlink() for parent in path.parents)
         or not path.parent.is_dir()
         or path.parent.resolve(strict=True) != path.parent
-        or path.is_dir()
+        or path.is_symlink()
     ):
+        raise ValueError("Invalid runtime outcome path")
+    try:
+        link_detected = any(is_link_like(parent) for parent in path.parents) or (
+            os.path.lexists(path) and (is_link_like(path) or path.is_dir())
+        )
+    except DatasetIntegrityError as error:
+        raise ValueError("Invalid runtime outcome path") from error
+    if link_detected:
         raise ValueError("Invalid runtime outcome path")
     return path
 
@@ -407,26 +414,35 @@ def _write_runtime_outcome(
     )
     if sanitized is None:
         return
-    tmp = path.with_name(f".{path.name}.tmp")
-    if tmp.is_symlink() or tmp.is_dir():
-        raise ValueError("Invalid runtime outcome staging path")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex[:12]}.tmp")
     data = (json.dumps(sanitized, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(
-        tmp,
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_TRUNC
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0),
-        0o600,
-    )
+    fd: int | None = None
+    created = False
     try:
+        fd = os.open(
+            tmp,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        created = True
         written = 0
         while written < len(data):
             written += os.write(fd, data[written:])
-    finally:
         os.close(fd)
-    os.replace(tmp, path)
+        fd = None
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:
+            with suppress(OSError):
+                os.close(fd)
+        if created:
+            with suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        raise
 
 
 async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | None = None) -> int:
@@ -507,7 +523,8 @@ async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | No
             lease = ConfigurationProcessLease(capture.lock_directory, capture.resource_id)
             lease.acquire()
             assert outcome_path is not None
-            outcome_path.unlink(missing_ok=True)
+            with suppress(OSError):
+                outcome_path.unlink(missing_ok=True)
         watcher = asyncio.create_task(_watch_stop_file(stop_file, requested))
         if raw_resume is None:
             result = await serve_host(

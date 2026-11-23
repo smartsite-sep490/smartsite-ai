@@ -987,3 +987,78 @@ def test_expanded_assembly_refuses_old_consumer_before_opening_resources(
             experimental_model_profile=profile,
             observation_schema_version="1.0.0",
         )
+
+
+@pytest.mark.anyio
+async def test_run_manifest_reports_payload_and_exception_class_via_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from smartsite_ai.config import Settings
+    from smartsite_ai.runtime.supervisor import CameraOutcome, RuntimeReport
+    from smartsite_ai.tools import run_camera_runtime as runtime_mod
+
+    video_a = _video(tmp_path, "diag.mp4")
+    doc = _document(
+        tmp_path,
+        [
+            _entry(
+                "gate-01",
+                CAMERA_A,
+                "CAM-A",
+                source={"kind": "path", "path": video_a},
+                outbox=str(tmp_path / "diag.sqlite3"),
+            )
+        ],
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(doc), encoding="utf-8")
+    settings = Settings(_env_file=None)
+
+    report = RuntimeReport(
+        cameras=(
+            CameraOutcome(
+                stream_id="gate-01",
+                camera_external_id="CAM-A",
+                status="failed",
+                frames_processed=5,
+                events_enqueued=3,
+                outbox=OutboxCounts(pending=1, delivered=2, terminal=0),
+                error_class="OutboxOverflow",
+            ),
+        ),
+        model_loaded=True,
+        model_closed=True,
+    )
+
+    async def fake_execute(_plan: object) -> RuntimeReport:
+        return report
+
+    monkeypatch.setattr(runtime_mod, "execute_runtime", fake_execute)
+    callbacks: list[dict[str, object]] = []
+    code = await runtime_mod.run_manifest(
+        manifest_path,
+        settings=settings,
+        report_callback=callbacks.append,
+    )
+    assert code == 1
+    assert callbacks == [report_payload(report)]
+
+    async def failing_execute(_plan: object) -> RuntimeReport:
+        raise CameraRuntimeError("secret rtsp://user:secret-pass@10.0.0.1/live")
+
+    monkeypatch.setattr(runtime_mod, "execute_runtime", failing_execute)
+    callbacks.clear()
+    with pytest.raises(CameraRuntimeError):
+        await runtime_mod.run_manifest(
+            manifest_path,
+            settings=settings,
+            report_callback=callbacks.append,
+        )
+    assert callbacks == [{"errorClass": "CameraRuntimeError"}]
+    serialized = json.dumps(callbacks)
+    for forbidden in ("secret-pass", "rtsp://", "10.0.0.1", "message"):
+        assert forbidden not in serialized
+
+    # Default (no callback) preserves prior behavior cleanly.
+    monkeypatch.setattr(runtime_mod, "execute_runtime", fake_execute)
+    assert await runtime_mod.run_manifest(manifest_path, settings=settings) == 1

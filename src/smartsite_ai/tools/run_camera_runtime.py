@@ -6,6 +6,8 @@ import argparse
 import asyncio
 import json
 import os
+from collections.abc import Callable
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
@@ -44,6 +46,7 @@ from smartsite_ai.runtime.source_control_child import (
 from smartsite_ai.runtime.supervisor import (
     CameraSession,
     RuntimePlan,
+    RuntimeReport,
     _finish_cleanup,
     execute_runtime,
     exit_code,
@@ -104,7 +107,45 @@ async def run_manifest(
     preview_port: int | None = None,
     require_resume_manifest: bool = False,
     source_control_profile: Path | None = None,
+    report_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> int:
+    if report_callback is not None and not callable(report_callback):
+        raise TypeError("report_callback must be callable")
+    try:
+        report = await _run_manifest_report(
+            manifest_path,
+            settings=settings,
+            generation_credential_file=generation_credential_file,
+            expected_camera_id=expected_camera_id,
+            expected_outbox=expected_outbox,
+            preview_port=preview_port,
+            require_resume_manifest=require_resume_manifest,
+            source_control_profile=source_control_profile,
+        )
+    except Exception as exc:
+        if report_callback is not None:
+            with suppress(Exception):
+                report_callback({"errorClass": type(exc).__name__})
+        raise
+    payload = report_payload(report)
+    if report_callback is not None:
+        with suppress(Exception):
+            report_callback(payload)
+    print(json.dumps(payload, separators=(",", ":")))
+    return exit_code(report)
+
+
+async def _run_manifest_report(
+    manifest_path: Path,
+    *,
+    settings: Settings | None = None,
+    generation_credential_file: Path | None = None,
+    expected_camera_id: UUID | None = None,
+    expected_outbox: Path | None = None,
+    preview_port: int | None = None,
+    require_resume_manifest: bool = False,
+    source_control_profile: Path | None = None,
+) -> RuntimeReport:
     if source_control_profile is None and any(
         key in os.environ for key in (SOURCE_ENV, GENERATION_ENV)
     ):
@@ -326,8 +367,7 @@ async def run_manifest(
     finally:
         await _finish_cleanup(close_clients())
 
-    print(json.dumps(report_payload(report), separators=(",", ":")))
-    return exit_code(report)
+    return report
 
 
 def run(argv: list[str] | None = None) -> int:

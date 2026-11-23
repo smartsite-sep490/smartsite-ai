@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from smartsite_ai.inference.person_anchored import PersonAnchoredPpeDetector
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
 from smartsite_ai.ingestion.config import StreamConfig
+from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
@@ -71,6 +73,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--require-resume-manifest", action="store_true")
     parser.add_argument("--source-control-profile", type=Path)
     return parser
+
+
+def _synthetic_warmup_frame(camera_external_id: str, stream_id: str) -> FrameEnvelope:
+    """Construct a synthetic 640x480 black BGR24 frame discarded after pre-capture warmup.
+
+    Matching the 4:3 VGA source aspect avoids a rectangular letterbox shape recompile
+    on the first real camera frame before CUDA/provider caches are warm.
+    """
+    return FrameEnvelope(
+        stream_id=stream_id,
+        session_id=UUID(int=0),
+        camera_external_id=camera_external_id,
+        captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+        width=640,
+        height=480,
+        sequence_number=0,
+        pixel_format="BGR24",
+        payload=bytes(640 * 480 * 3),
+    )
 
 
 async def run_manifest(
@@ -227,6 +248,10 @@ async def run_manifest(
                 SerializingDetector(detector)
                 if loaded_person_runner is not None
                 else share_detector(detector, loaded_runner)
+            )
+            warmup_camera = bound.cameras[0]
+            await shared.detect(
+                _synthetic_warmup_frame(warmup_camera.camera_external_id, warmup_camera.stream_id)
             )
         except BaseException:
             try:

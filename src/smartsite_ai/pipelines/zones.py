@@ -1,13 +1,14 @@
 """MF06 restricted-region entry detection without authorization decisions."""
 
 from dataclasses import dataclass
+from typing import Literal
 from uuid import UUID
 
 from smartsite_ai.domain.observations import ZoneEntryObservation
 from smartsite_ai.domain.regions import CameraRegionConfiguration
 from smartsite_ai.domain.tracked_observations import TrackedZoneEntryObservation
 from smartsite_ai.inference.models import DetectionBatch
-from smartsite_ai.pipelines._geometry import bottom_center, point_in_polygon
+from smartsite_ai.pipelines._geometry import bottom_center, box_center, point_in_polygon
 from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import TrackedFrame
 
@@ -41,7 +42,10 @@ class RestrictedZonePipeline:
         entry_confirmation_frames: int = 3,
         exit_confirmation_frames: int = 2,
         continuity_policy: FrameContinuityPolicy | None = None,
+        anchor: Literal["BOTTOM_CENTER", "BOX_CENTER"] = "BOTTOM_CENTER",
     ) -> None:
+        if anchor not in ("BOTTOM_CENTER", "BOX_CENTER"):
+            raise ValueError("Invalid Zone anchor")
         if continuity_policy is not None and not isinstance(
             continuity_policy, FrameContinuityPolicy
         ):
@@ -63,7 +67,12 @@ class RestrictedZonePipeline:
         self._region_ids: dict[str, str] = {}
         self._view_revision: int | None = None
         self._continuity_policy = continuity_policy
+        self._anchor = anchor
         self._last_batch: DetectionBatch | None = None
+
+    @property
+    def anchor(self) -> Literal["BOTTOM_CENTER", "BOX_CENTER"]:
+        return self._anchor
 
     def checkpoint_temporal_state(self) -> ZoneTemporalState:
         """Copy confirmation state before a frame can be rejected during evidence I/O."""
@@ -167,7 +176,11 @@ class RestrictedZonePipeline:
 
         observations: list[ZoneEntryObservation] = []
         for person in tracked_frame.persons:
-            point = bottom_center(person.bounding_box)
+            point = (
+                box_center(person.bounding_box)
+                if self._anchor == "BOX_CENTER"
+                else bottom_center(person.bounding_box)
+            )
             for region_key in sorted(current_regions):
                 region = current_regions[region_key]
                 inside = point_in_polygon(point, region.polygon.coordinates)

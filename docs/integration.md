@@ -51,6 +51,24 @@ Mọi thay đổi contract phải bắt đầu ở repo `smartsite`, commit sche
 
 ## Opt-in Person tracking admission
 
+### Zone point selection for camera views
+
+The per-camera runtime setting `zoneAnchor` accepts `BOTTOM_CENTER` (the existing
+default) or `BOX_CENTER`. The explicit center mode tests the center of the current
+Person bounding box against the configured image polygon; it is useful for a
+reviewed laptop demo view where the frame clips the lower body. It does not prove
+floor contact or Worker identity and does not change Backend access policy.
+Entry still requires three consecutive inside observations and exit requires two
+outside observations. Track/view/session/continuity resets remain in force.
+
+The selected point is immutable for that pipeline instance. Changing it requires
+a reviewed technical profile and fresh generation, preserving old event history.
+Only `BOX_CENTER` adds optional `zoneAnchor` metadata to the analyzed preview.
+Deploy the canonical Platform parser and matching Web point/help rendering before
+enabling the producer; legacy/default preview JSON remains unchanged.
+
+### Person detector and track admission
+
 The headless camera manifest may separately specify `personModelSpec`, an absolute
 path to a reviewed local COCO-80 YOLO11 artifact specification. Its full class map,
 provider metadata and weight checksum are verified by the explicit Person loader;

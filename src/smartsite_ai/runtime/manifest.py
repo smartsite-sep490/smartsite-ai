@@ -121,6 +121,9 @@ class CameraManifestEntry(_StrictModel):
         default=None, alias="sampledContinuity"
     )
     person_tracking: PersonTrackingManifest | None = Field(default=None, alias="personTracking")
+    zone_anchor: Literal["BOTTOM_CENTER", "BOX_CENTER"] = Field(
+        default="BOTTOM_CENTER", alias="zoneAnchor"
+    )
     private_evidence_upload: bool = Field(default=False, alias="privateEvidenceUpload", strict=True)
 
     @model_validator(mode="after")

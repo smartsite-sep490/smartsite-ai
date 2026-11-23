@@ -241,7 +241,9 @@ def assemble_sessions(
                 ),
             ),
             ppe=PpePipeline.for_model_profile(profile),
-            zones=RestrictedZonePipeline(continuity_policy=continuity_policy),
+            zones=RestrictedZonePipeline(
+                continuity_policy=continuity_policy, anchor=camera.entry.zone_anchor
+            ),
             ppe_region_id=str(camera.entry.ppe_region_id),
             schema_version=observation_schema_version,
             tracked_v17=tracked_capture is not None,

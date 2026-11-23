@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,13 +13,18 @@ from test_generation_runtime_claim import CAMERA, REGION, ConfigurationClient
 from test_source_control_child_profile import inputs
 
 from smartsite_ai.config import Settings
-from smartsite_ai.inference.artifacts import ArtifactValidationError
+from smartsite_ai.inference.artifacts import ArtifactValidationError, VerifiedModelArtifact
 from smartsite_ai.inference.models import (
     DetectionBatch,
     NormalizedBoundingBox,
     NormalizedDetection,
 )
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
+from smartsite_ai.inference.yolo import (
+    DetectorUnavailableError,
+    RawYoloDetection,
+    Yolo11Detector,
+)
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.integrations.outbox import OutboxCounts
 from smartsite_ai.processing_worker import ProcessingWorkerResult
@@ -491,3 +497,237 @@ def test_run_manifest_closes_runners_on_secondary_failure_without_fallback(
     assert primary_runner.close_calls == 1
     if failure_mode == "bad_runner_type":
         assert bad_runner_closed == 1
+
+
+class _WarmupRecordingRunner(UltralyticsYoloRunner):
+    def __init__(
+        self,
+        label: str,
+        events: list[str],
+        *,
+        detections: tuple[RawYoloDetection, ...] = (),
+        fail_predict: BaseException | None = None,
+    ) -> None:
+        super().__init__()
+        self._label = label
+        self._events = events
+        self._detections = detections
+        self._fail_predict = fail_predict
+        self.frames: list[FrameEnvelope] = []
+        self.close_calls = 0
+
+    def predict(self, frame: FrameEnvelope) -> tuple[RawYoloDetection, ...]:
+        self._events.append(f"predict:{self._label}")
+        self.frames.append(frame)
+        if self._fail_predict is not None:
+            raise self._fail_predict
+        return self._detections
+
+    def close(self) -> None:
+        self._events.append(f"close:{self._label}")
+        self.close_calls += 1
+
+
+def _verified_artifact(
+    tmp_path: Path, name: str, class_map: tuple[tuple[int, str], ...]
+) -> VerifiedModelArtifact:
+    weights = tmp_path / f"{name}.pt"
+    weights.write_bytes(name.encode("utf-8"))
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    return VerifiedModelArtifact.model_validate(
+        {
+            "artifact_id": name,
+            "version": "1",
+            "model_family": "yolo11s",
+            "artifact_path": weights,
+            "sha256": digest,
+            "source_url": f"https://models.example.test/{name}.pt",
+            "license": "AGPL-3.0",
+            "class_map": class_map,
+            "confidence_threshold": 0.25,
+            "iou_threshold": 0.45,
+            "image_size": (640, 640),
+            "device": "cpu",
+            "resolved_path": weights.resolve(),
+            "actual_sha256": digest,
+        }
+    )
+
+
+@pytest.mark.parametrize("with_person_model", [False, True])
+def test_run_manifest_warms_loaded_runners_before_opening_source_with_discarded_black_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, with_person_model: bool
+) -> None:
+    manifest_path, _ = _write_manifest(tmp_path, with_person_model=with_person_model)
+    events: list[str] = []
+    ppe_artifact = _verified_artifact(tmp_path, "ppe", ((0, "person"), (1, "hard_hat")))
+    person_artifact = _verified_artifact(tmp_path, "persons", ((0, "person"),))
+
+    primary_runner = _WarmupRecordingRunner(
+        "ppe",
+        events,
+        detections=(
+            RawYoloDetection(class_id=1, confidence=0.95, x1=10.0, y1=10.0, x2=50.0, y2=50.0),
+        ),
+    )
+    secondary_runner = _WarmupRecordingRunner(
+        "persons",
+        events,
+        detections=(
+            RawYoloDetection(class_id=0, confidence=0.95, x1=10.0, y1=10.0, x2=60.0, y2=90.0),
+        ),
+    )
+
+    monkeypatch.setattr(
+        runtime_cli.BackendConfigurationClient,
+        "from_settings",
+        classmethod(lambda _cls, *_a, **_kw: ConfigurationClient()),
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "load_yolo11_detector",
+        lambda *_a, **_kw: (
+            Yolo11Detector(ppe_artifact, primary_runner),
+            primary_runner,
+            ppe_artifact,
+            MappingProxyType(dict(ppe_artifact.class_map)),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "load_yolo11_person_detector",
+        lambda *_a, **_kw: (
+            Yolo11Detector(person_artifact, secondary_runner),
+            secondary_runner,
+            person_artifact,
+            MappingProxyType(dict(person_artifact.class_map)),
+        ),
+    )
+
+    class _RecordingSource:
+        def __init__(self, config: object) -> None:
+            events.append("source:construct")
+            self.config = config
+
+    monkeypatch.setattr(runtime_cli, "OpenCvFrameSource", _RecordingSource)
+    observed_workers: list[object] = []
+
+    class _AssertNoWarmupStateWorker:
+        def __init__(self, detector: object, source: object) -> None:
+            self._detector = detector
+            self._source = source
+
+        async def run(self) -> ProcessingWorkerResult:
+            events.append("worker:run")
+            # Warmup occurred before worker/source creation and left zero outbox state.
+            assert not (tmp_path / "outbox.sqlite3").exists()
+            return ProcessingWorkerResult(1, 0, OutboxCounts(0, 0, 0))
+
+    def spy_assemble(plans, detector, *, source_factory, **_kwargs):
+        events.append("assemble_sessions")
+        assert len(primary_runner.frames) == 1
+        if with_person_model:
+            assert len(secondary_runner.frames) == 1
+        src = source_factory(plans[0].bound.source_config)
+        worker = _AssertNoWarmupStateWorker(detector, src)
+        observed_workers.append(worker)
+        return (
+            CameraSession(
+                stream_id=plans[0].bound.stream_id,
+                camera_external_id=plans[0].bound.camera_external_id,
+                worker=worker,
+                poller=_StopPoller(),
+            ),
+        )
+
+    monkeypatch.setattr(runtime_cli, "assemble_sessions", spy_assemble)
+
+    status = asyncio.run(runtime_cli.run_manifest(manifest_path, settings=Settings(_env_file=None)))
+    assert status == 0
+    assert len(observed_workers) == 1
+
+    expected_predicts = ["predict:ppe", "predict:persons"] if with_person_model else ["predict:ppe"]
+    assemble_index = events.index("assemble_sessions")
+    assert events[:assemble_index] == expected_predicts
+    assert "source:construct" in events[assemble_index:]
+
+    for runner in (primary_runner, secondary_runner) if with_person_model else (primary_runner,):
+        assert len(runner.frames) == 1
+        warmup_frame = runner.frames[0]
+        assert warmup_frame.pixel_format == "BGR24"
+        assert warmup_frame.width == 640 and warmup_frame.height == 480
+        assert warmup_frame.payload == bytes(640 * 480 * 3)
+        assert runner.close_calls == 1
+    if not with_person_model:
+        assert secondary_runner.frames == []
+
+
+@pytest.mark.parametrize("fail_target", ["primary", "secondary", "secondary_unexpected_error"])
+def test_run_manifest_closes_both_runners_on_warmup_failure_before_opening_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_target: str
+) -> None:
+    manifest_path, _ = _write_manifest(tmp_path, with_person_model=True)
+    events: list[str] = []
+    ppe_artifact = _verified_artifact(tmp_path, "ppe", ((0, "person"), (1, "hard_hat")))
+    person_artifact = _verified_artifact(tmp_path, "persons", ((0, "person"),))
+
+    primary_error = (
+        DetectorUnavailableError("warmup failed on ppe") if fail_target == "primary" else None
+    )
+    if fail_target == "secondary":
+        secondary_error: BaseException | None = DetectorUnavailableError("warmup failed on persons")
+    elif fail_target == "secondary_unexpected_error":
+        secondary_error = RuntimeError("unexpected runner abort")
+    else:
+        secondary_error = None
+
+    primary_runner = _WarmupRecordingRunner("ppe", events, fail_predict=primary_error)
+    secondary_runner = _WarmupRecordingRunner("persons", events, fail_predict=secondary_error)
+
+    monkeypatch.setattr(
+        runtime_cli.BackendConfigurationClient,
+        "from_settings",
+        classmethod(lambda _cls, *_a, **_kw: ConfigurationClient()),
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "load_yolo11_detector",
+        lambda *_a, **_kw: (
+            Yolo11Detector(ppe_artifact, primary_runner),
+            primary_runner,
+            ppe_artifact,
+            MappingProxyType(dict(ppe_artifact.class_map)),
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_cli,
+        "load_yolo11_person_detector",
+        lambda *_a, **_kw: (
+            Yolo11Detector(person_artifact, secondary_runner),
+            secondary_runner,
+            person_artifact,
+            MappingProxyType(dict(person_artifact.class_map)),
+        ),
+    )
+
+    source_opened = False
+
+    def fail_assemble(*_args: object, **_kwargs: object):
+        nonlocal source_opened
+        source_opened = True
+        raise AssertionError("No camera session/source may open if model warmup fails")
+
+    def fail_source(*_args: object, **_kwargs: object):
+        nonlocal source_opened
+        source_opened = True
+        raise AssertionError("OpenCvFrameSource must not be constructed if warmup fails")
+
+    monkeypatch.setattr(runtime_cli, "assemble_sessions", fail_assemble)
+    monkeypatch.setattr(runtime_cli, "OpenCvFrameSource", fail_source)
+
+    with pytest.raises(DetectorUnavailableError):
+        asyncio.run(runtime_cli.run_manifest(manifest_path, settings=Settings(_env_file=None)))
+
+    assert not source_opened
+    assert primary_runner.close_calls == 1
+    assert secondary_runner.close_calls == 1

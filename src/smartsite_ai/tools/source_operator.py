@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import signal
 import sys
 from collections.abc import Mapping
@@ -12,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import uvicorn
@@ -42,6 +43,7 @@ from smartsite_ai.tools.run_source_control import (
     HostManifest,
     build_source_control_app,
 )
+from smartsite_ai.training.dataset_integrity import DatasetIntegrityError, is_link_like
 
 
 class OperatorProfile(BaseModel):
@@ -321,6 +323,128 @@ def build_operator_app(
     return app, driver
 
 
+_OUTCOME_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_OUTCOME_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_OUTCOME_STATUSES = frozenset({"completed", "failed", "not_started"})
+
+
+def _sanitize_runtime_outcome(
+    payload: Mapping[str, object], *, expected_camera_external_id: str | None = None
+) -> dict[str, object] | None:
+    cameras = payload.get("cameras")
+    if isinstance(cameras, list) and len(cameras) <= 3:
+        sanitized_cameras: list[dict[str, object]] = []
+        for entry in cameras:
+            if not isinstance(entry, Mapping):
+                return None
+            status = entry.get("status")
+            if not isinstance(status, str) or status not in _OUTCOME_STATUSES:
+                return None
+            item: dict[str, object] = {"status": status}
+            stream_id = entry.get("streamId")
+            if isinstance(stream_id, str) and _OUTCOME_ID_RE.fullmatch(stream_id):
+                item["streamId"] = stream_id
+            camera_external_id = entry.get("cameraExternalId")
+            if (
+                isinstance(camera_external_id, str)
+                and _OUTCOME_ID_RE.fullmatch(camera_external_id)
+                and (
+                    expected_camera_external_id is None
+                    or camera_external_id == expected_camera_external_id
+                )
+            ):
+                item["cameraExternalId"] = camera_external_id
+            for count_key in ("framesProcessed", "eventsEnqueued"):
+                val = entry.get(count_key)
+                if type(val) is int and val >= 0:
+                    item[count_key] = val
+            outbox = entry.get("outbox")
+            if isinstance(outbox, Mapping):
+                clean_outbox = {
+                    key: outbox[key]
+                    for key in ("pending", "delivered", "terminal")
+                    if type(outbox.get(key)) is int and outbox[key] >= 0
+                }
+                if len(clean_outbox) == 3:
+                    item["outbox"] = clean_outbox
+            error_class = entry.get("errorClass")
+            if isinstance(error_class, str) and _OUTCOME_IDENT_RE.fullmatch(error_class):
+                item["errorClass"] = error_class
+            sanitized_cameras.append(item)
+        result: dict[str, object] = {"cameras": sanitized_cameras}
+        for flag in ("modelLoaded", "modelClosed"):
+            val = payload.get(flag)
+            if type(val) is bool:
+                result[flag] = val
+        return result
+    error_class = payload.get("errorClass")
+    if error_class is None:
+        error_class = payload.get("error")
+    if isinstance(error_class, str) and _OUTCOME_IDENT_RE.fullmatch(error_class):
+        return {"errorClass": error_class}
+    return None
+
+
+def _validate_runtime_outcome_path(path: Path) -> Path:
+    if (
+        not path.is_absolute()
+        or str(path).startswith("\\\\")
+        or not path.parent.is_dir()
+        or path.parent.resolve(strict=True) != path.parent
+        or path.is_symlink()
+    ):
+        raise ValueError("Invalid runtime outcome path")
+    try:
+        link_detected = any(is_link_like(parent) for parent in path.parents) or (
+            os.path.lexists(path) and (is_link_like(path) or path.is_dir())
+        )
+    except DatasetIntegrityError as error:
+        raise ValueError("Invalid runtime outcome path") from error
+    if link_detected:
+        raise ValueError("Invalid runtime outcome path")
+    return path
+
+
+def _write_runtime_outcome(
+    path: Path, payload: Mapping[str, object], *, expected_camera_external_id: str | None = None
+) -> None:
+    _validate_runtime_outcome_path(path)
+    sanitized = _sanitize_runtime_outcome(
+        payload, expected_camera_external_id=expected_camera_external_id
+    )
+    if sanitized is None:
+        return
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex[:12]}.tmp")
+    data = (json.dumps(sanitized, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    fd: int | None = None
+    created = False
+    try:
+        fd = os.open(
+            tmp,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        created = True
+        written = 0
+        while written < len(data):
+            written += os.write(fd, data[written:])
+        os.close(fd)
+        fd = None
+        os.replace(tmp, path)
+    except BaseException:
+        if fd is not None:
+            with suppress(OSError):
+                os.close(fd)
+        if created:
+            with suppress(OSError):
+                tmp.unlink(missing_ok=True)
+        raise
+
+
 async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | None = None) -> int:
     """Own capture first, then inference only for an accepted exact resume binding."""
     values = dict(os.environ if environ is None else environ)
@@ -364,6 +488,23 @@ async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | No
     stop_file = profile.state_directory / "STOP"
     if stop_file.is_symlink() or stop_file.exists():
         raise ValueError("A fresh owned stop path is required")
+    outcome_path = (
+        _validate_runtime_outcome_path(profile.state_directory / "runtime-outcome.json")
+        if raw_resume is not None
+        else None
+    )
+    outcome_recorded = False
+
+    def record_outcome(payload: Mapping[str, object]) -> None:
+        nonlocal outcome_recorded
+        assert outcome_path is not None
+        _write_runtime_outcome(
+            outcome_path,
+            payload,
+            expected_camera_external_id=profile.camera_external_id,
+        )
+        outcome_recorded = True
+
     requested = asyncio.Event()
     loop = asyncio.get_running_loop()
     previous = {}
@@ -381,6 +522,9 @@ async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | No
         if raw_resume is not None:
             lease = ConfigurationProcessLease(capture.lock_directory, capture.resource_id)
             lease.acquire()
+            assert outcome_path is not None
+            with suppress(OSError):
+                outcome_path.unlink(missing_ok=True)
         watcher = asyncio.create_task(_watch_stop_file(stop_file, requested))
         if raw_resume is None:
             result = await serve_host(
@@ -423,6 +567,7 @@ async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | No
                     preview_port=profile.preview_port,
                     require_resume_manifest=True,
                     source_control_profile=profile.host_manifest,
+                    report_callback=record_outcome,
                 )
             )
             stopped = asyncio.create_task(requested.wait())
@@ -455,6 +600,15 @@ async def run_operator_child(profile_path: Path, environ: Mapping[str, str] | No
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
+    except Exception as exc:
+        if outcome_path is not None and not outcome_recorded:
+            with suppress(Exception):
+                _write_runtime_outcome(
+                    outcome_path,
+                    {"errorClass": type(exc).__name__},
+                    expected_camera_external_id=profile.camera_external_id,
+                )
+        raise
     finally:
         try:
             if watcher is not None:

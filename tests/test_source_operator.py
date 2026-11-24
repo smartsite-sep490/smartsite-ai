@@ -1197,3 +1197,252 @@ def test_windows_operator_forwarded_env_resolves_home_for_offline_model_import(
     assert payload["appdata"] == str(appdata)
     assert payload["localAppdata"] == str(local_appdata)
     assert payload["ultralyticsOk"] in (None, True)
+
+
+@pytest.mark.anyio
+async def test_run_operator_child_persists_sanitized_runtime_outcome_without_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    op = _op()
+
+    def setup(
+        name: str,
+    ) -> tuple[Path, dict[str, object], dict[str, str], Path, str]:
+        case_dir = tmp_path / name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        p_path, p_doc, p_env = _operator_bundle(case_dir)
+        s_dir = Path(str(p_doc["stateDirectory"])).resolve()
+        return p_path, p_doc, p_env, s_dir / "runtime-outcome.json", str(p_doc["cameraExternalId"])
+
+    def build_env(p_doc: dict[str, object], p_env: dict[str, str]) -> dict[str, str]:
+        return {
+            "SMARTSITE_AI_PREVIEW_SERVICE_TOKEN": p_env["SMARTSITE_AI_PREVIEW_SERVICE_TOKEN"],
+            "SMARTSITE_AI_BACKEND_SERVICE_TOKEN": p_env["SMARTSITE_AI_BACKEND_SERVICE_TOKEN"],
+            "SMARTSITE_AI_BACKEND_INGESTION_URL": p_env["SMARTSITE_AI_BACKEND_INGESTION_URL"],
+            "SMARTSITE_AI_SOURCE_RUNTIME_SOURCE": "0",
+            "SMARTSITE_AI_SOURCE_RUNTIME_GENERATION": json.dumps(_valid_child_generation()),
+            "SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION": _resume_manifest_json(
+                str(p_doc["cameraId"])
+            ),
+        }
+
+    # 1. Clean allowlisted report persistence strips untrusted keys and secrets.
+    profile_path, doc, environ, outcome_path, cam = setup("report")
+
+    async def fake_run_manifest(*_args: object, **kwargs: object) -> int:
+        callback = kwargs.get("report_callback")
+        assert callable(callback)
+        callback(
+            {
+                "token": PREVIEW_TOKEN,
+                "secret": BACKEND_TOKEN,
+                "imageDataUrl": "data:image/jpeg;base64,SECRETIMG",
+                "message": "rtsp://admin:hunter2@10.0.0.1/live",
+                "modelLoaded": True,
+                "modelClosed": True,
+                "cameras": [
+                    {
+                        "streamId": "cam-stream-1",
+                        "cameraExternalId": cam,
+                        "status": "failed",
+                        "framesProcessed": 5,
+                        "eventsEnqueued": 5,
+                        "outbox": {
+                            "pending": 0,
+                            "delivered": 5,
+                            "terminal": 0,
+                            "secret": "drop-me",
+                        },
+                        "errorClass": "TrackedOutboxCapacityReached",
+                        "message": "rtsp://admin:hunter2@10.0.0.1/live",
+                    }
+                ],
+            }
+        )
+        return 1
+
+    monkeypatch.setattr(run_camera_runtime, "run_manifest", fake_run_manifest)
+    if hasattr(op, "run_manifest"):
+        monkeypatch.setattr(op, "run_manifest", fake_run_manifest)
+
+    code = await op.run_operator_child(profile_path, build_env(doc, environ))
+    assert code == 1
+    assert outcome_path.is_file()
+    raw_outcome = outcome_path.read_text(encoding="utf-8")
+    assert json.loads(raw_outcome) == {
+        "modelLoaded": True,
+        "modelClosed": True,
+        "cameras": [
+            {
+                "streamId": "cam-stream-1",
+                "cameraExternalId": cam,
+                "status": "failed",
+                "framesProcessed": 5,
+                "eventsEnqueued": 5,
+                "outbox": {"pending": 0, "delivered": 5, "terminal": 0},
+                "errorClass": "TrackedOutboxCapacityReached",
+            }
+        ],
+    }
+    for forbidden in (PREVIEW_TOKEN, BACKEND_TOKEN, "SECRETIMG", "hunter2", "rtsp://", "drop-me"):
+        assert forbidden not in raw_outcome
+
+    # 2. Exception replaces pre-existing stale report with failure CLASS only.
+    crash_profile, crash_doc, crash_env, crash_outcome, _ = setup("crash")
+    crash_outcome.write_text(json.dumps({"stale": True}), encoding="utf-8")
+
+    async def crash_run_manifest(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError(f"boom token={BACKEND_TOKEN} rtsp://user:pass@10.0.0.9/live")
+
+    monkeypatch.setattr(run_camera_runtime, "run_manifest", crash_run_manifest)
+    if hasattr(op, "run_manifest"):
+        monkeypatch.setattr(op, "run_manifest", crash_run_manifest)
+
+    with pytest.raises(RuntimeError):
+        await op.run_operator_child(crash_profile, build_env(crash_doc, crash_env))
+    crash_raw = crash_outcome.read_text(encoding="utf-8")
+    assert json.loads(crash_raw) == {"errorClass": "RuntimeError"}
+    for forbidden in (BACKEND_TOKEN, "boom", "rtsp://", "10.0.0.9", "user:pass", "stale"):
+        assert forbidden not in crash_raw
+
+    # 3. Unsafe non-identifier errorClass in report payload is stripped cleanly.
+    dirty_profile, dirty_doc, dirty_env, dirty_outcome, dirty_cam = setup("dirty")
+
+    async def dirty_error_class_run_manifest(*_args: object, **kwargs: object) -> int:
+        callback = kwargs.get("report_callback")
+        assert callable(callback)
+        callback(
+            {
+                "modelLoaded": False,
+                "modelClosed": False,
+                "cameras": [
+                    {
+                        "streamId": "cam-stream-1",
+                        "cameraExternalId": dirty_cam,
+                        "status": "failed",
+                        "errorClass": "Bad rtsp://u:p@10.0.0.1/live",
+                    }
+                ],
+            }
+        )
+        return 1
+
+    monkeypatch.setattr(run_camera_runtime, "run_manifest", dirty_error_class_run_manifest)
+    if hasattr(op, "run_manifest"):
+        monkeypatch.setattr(op, "run_manifest", dirty_error_class_run_manifest)
+    assert await op.run_operator_child(dirty_profile, build_env(dirty_doc, dirty_env)) == 1
+    sanitized_raw = dirty_outcome.read_text(encoding="utf-8")
+    assert "errorClass" not in json.loads(sanitized_raw)["cameras"][0]
+    assert "rtsp://" not in sanitized_raw
+    assert "u:p@10.0.0.1" not in sanitized_raw
+
+    # 4. Pre-runtime lease acquisition failure records failure CLASS without leaking message.
+    lease_profile, lease_doc, lease_env, lease_outcome, _ = setup("lease")
+
+    def fail_acquire(self: ConfigurationProcessLease) -> None:
+        raise PermissionError(f"lease denied {PREVIEW_TOKEN}")
+
+    monkeypatch.setattr(ConfigurationProcessLease, "acquire", fail_acquire)
+    with pytest.raises(PermissionError):
+        await op.run_operator_child(lease_profile, build_env(lease_doc, lease_env))
+    lease_raw = lease_outcome.read_text(encoding="utf-8")
+    assert json.loads(lease_raw) == {"errorClass": "PermissionError"}
+    assert PREVIEW_TOKEN not in lease_raw
+    assert "lease denied" not in lease_raw
+
+    # 5. Symlink at outcome target is refused cleanly and never overwrites target contents.
+    sym_profile, sym_doc, sym_env, sym_outcome, _ = setup("symlink")
+    target = tmp_path / "sensitive-target.txt"
+    target.write_text("do-not-touch", encoding="utf-8")
+    try:
+        sym_outcome.symlink_to(target)
+    except (OSError, NotImplementedError):
+        return
+    with pytest.raises((ValueError, OSError)):
+        await op.run_operator_child(sym_profile, build_env(sym_doc, sym_env))
+    assert target.read_text(encoding="utf-8") == "do-not-touch"
+
+
+@pytest.mark.anyio
+async def test_runtime_outcome_handles_junctions_o_excl_temp_cleanup_and_unlink_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    op = _op()
+    assert hasattr(op, "is_link_like")
+
+    # 1. Junction/reparse detection via is_link_like rejects existing target even without symlink.
+    junc_dir = tmp_path / "junction-case"
+    junc_dir.mkdir()
+    junc_file = junc_dir / "runtime-outcome.json"
+    junc_file.write_text("existing", encoding="utf-8")
+
+    monkeypatch.setattr(op, "is_link_like", lambda path: Path(path) == junc_file)
+    with pytest.raises(ValueError, match="Invalid runtime outcome path"):
+        op._write_runtime_outcome(junc_file, {"errorClass": "RuntimeError"})
+    monkeypatch.undo()
+
+    # 2. Unique O_EXCL temp creation cleans up temp artifact if write/replace fails.
+    fail_dir = tmp_path / "temp-cleanup"
+    fail_dir.mkdir()
+    fail_file = fail_dir / "runtime-outcome.json"
+    seen_flags: list[int] = []
+    seen_tmp_names: list[str] = []
+    real_open = os.open
+
+    def spy_open(path: object, flags: int, mode: int = 0o777) -> int:
+        if Path(str(path)).parent == fail_dir:
+            seen_flags.append(flags)
+            seen_tmp_names.append(Path(str(path)).name)
+        return real_open(path, flags, mode)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda *_args: (_ for _ in ()).throw(OSError("simulated replace failure")),
+    )
+    with pytest.raises(OSError, match="simulated replace failure"):
+        op._write_runtime_outcome(fail_file, {"errorClass": "RuntimeError"})
+    assert len(seen_flags) == 1
+    assert seen_flags[0] & os.O_EXCL
+    assert seen_tmp_names[0] != f".{fail_file.name}.tmp"
+    assert [p for p in fail_dir.iterdir() if p.name.endswith(".tmp")] == []
+    monkeypatch.undo()
+
+    # 3. OSError on stale runtime-outcome.json unlink does not fail child startup.
+    unlink_dir = tmp_path / "unlink-busy"
+    unlink_dir.mkdir()
+    profile_path, doc, environ = _operator_bundle(unlink_dir)
+    state_dir = Path(str(doc["stateDirectory"])).resolve()
+    outcome_path = state_dir / "runtime-outcome.json"
+    outcome_path.write_text('{"stale":true}\n', encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def busy_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == outcome_path:
+            raise PermissionError("held by reader")
+        real_unlink(self, missing_ok=missing_ok)
+
+    async def ok_run_manifest(*_args: object, **kwargs: object) -> int:
+        cb = kwargs.get("report_callback")
+        assert callable(cb)
+        cb({"errorClass": "TransientProbe"})
+        return 1
+
+    monkeypatch.setattr(Path, "unlink", busy_unlink)
+    monkeypatch.setattr(run_camera_runtime, "run_manifest", ok_run_manifest)
+    if hasattr(op, "run_manifest"):
+        monkeypatch.setattr(op, "run_manifest", ok_run_manifest)
+
+    child_env = {
+        "SMARTSITE_AI_PREVIEW_SERVICE_TOKEN": environ["SMARTSITE_AI_PREVIEW_SERVICE_TOKEN"],
+        "SMARTSITE_AI_BACKEND_SERVICE_TOKEN": environ["SMARTSITE_AI_BACKEND_SERVICE_TOKEN"],
+        "SMARTSITE_AI_BACKEND_INGESTION_URL": environ["SMARTSITE_AI_BACKEND_INGESTION_URL"],
+        "SMARTSITE_AI_SOURCE_RUNTIME_SOURCE": "0",
+        "SMARTSITE_AI_SOURCE_RUNTIME_GENERATION": json.dumps(_valid_child_generation()),
+        "SMARTSITE_AI_SOURCE_RUNTIME_EXPECTED_CONFIGURATION": _resume_manifest_json(
+            str(doc["cameraId"])
+        ),
+    }
+    assert await op.run_operator_child(profile_path, child_env) == 1
+    assert json.loads(outcome_path.read_text(encoding="utf-8")) == {"errorClass": "TransientProbe"}

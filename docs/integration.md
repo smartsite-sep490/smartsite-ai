@@ -294,6 +294,18 @@ These experimental objects do not create tracks, change wearer PPE status, confi
 or enter durable alert delivery. Model selection alone does not establish accuracy, correct wearing
 or safe anchorage; production model acceptance and rollout remain separate.
 
+For explicit offline evaluation of additional PPE without replacing core detections,
+`SupplementalPpeDetector(core=legacy5_detector, supplement=unified15_detector)` retains
+the original Person/hat/vest objects and adds only canonical classes 5–14. Wrap this
+inside `PersonAnchoredPpeDetector(ppe=supplemented, persons=person_detector)` when
+using a separate Person model. Both batches must match the same frame and declared
+taxonomies; failures propagate and do not silently become compliant or degraded output.
+The composition digest binds both artifacts and their versions. It does not load or
+admit a model, change a default manifest, or enable new policy families. Mask, Harness
+and Hook remain raw object evidence where wearer/policy support is unavailable.
+Additional inference can change latency and frame cadence: unchanged core objects do
+not prove unchanged tracking or alert metrics. Benchmark and qualify before rollout.
+
 A preview sink failure is logged using a fixed safe diagnostic and the sink is retired until restart;
 it does not interrupt durable event handling. Preview/API availability does not prove successful
 Backend ingestion, persistence, recipient notification or independent model accuracy.

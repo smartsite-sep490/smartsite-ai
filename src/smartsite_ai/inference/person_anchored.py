@@ -4,6 +4,7 @@ import hashlib
 import json
 
 from smartsite_ai.inference.models import DetectionBatch
+from smartsite_ai.inference.ppe_profiles import LEGACY_PPE_5_PROFILE, UNIFIED_PPE_15_PROFILE
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 
@@ -64,4 +65,49 @@ class PersonAnchoredPpeDetector:
             raise ValueError("Person/PPE detector returned a different source frame")
 
 
-__all__ = ["PersonAnchoredPpeDetector"]
+class SupplementalPpeDetector:
+    """Keep core Person/hat/vest evidence and add only non-core unified-15 classes.
+
+    Explicit evaluation composition only: callers own artifact admission, resource
+    lifecycle and latency qualification. No runtime loads or selects this implicitly.
+    """
+
+    def __init__(self, *, core: DetectorProtocol, supplement: DetectorProtocol) -> None:
+        self._core, self._supplement = core, supplement
+
+    async def detect(self, frame: FrameEnvelope) -> DetectionBatch:
+        core = await self._core.detect(frame)
+        PersonAnchoredPpeDetector._require_frame(core, frame)
+        core_classes = dict(LEGACY_PPE_5_PROFILE.class_map)
+        if any(core_classes.get(d.class_id) != d.class_name for d in core.detections):
+            raise ValueError("Core class mapping must match legacy-ppe-5")
+        supplement = await self._supplement.detect(frame)
+        PersonAnchoredPpeDetector._require_frame(supplement, frame)
+        extra_classes = dict(UNIFIED_PPE_15_PROFILE.class_map)
+        if any(extra_classes.get(d.class_id) != d.class_name for d in supplement.detections):
+            raise ValueError("Supplemental class mapping must match unified-ppe-15")
+        provenance = {
+            "composition": "legacy5-with-unified15-noncore-v1",
+            "core": [core.model_artifact_id, core.model_version, core.model_sha256],
+            "supplement": [
+                supplement.model_artifact_id,
+                supplement.model_version,
+                supplement.model_sha256,
+            ],
+        }
+        digest = hashlib.sha256(
+            json.dumps(provenance, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return DetectionBatch.from_frame(
+            frame,
+            model_artifact_id="supplemental-ppe",
+            model_version="v1",
+            model_sha256=digest,
+            detections=(
+                *core.detections,
+                *(d for d in supplement.detections if d.class_id >= 5),
+            ),
+        )
+
+
+__all__ = ["PersonAnchoredPpeDetector", "SupplementalPpeDetector"]

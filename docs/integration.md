@@ -283,6 +283,17 @@ become a safety-compliance conclusion. Track IDs remain local technical tracks. 
 preview is technical evidence status, not a Backend-approved case, Worker identity or Zone permission.
 The immutable occupancy snapshot keeps people visibly inside between entry transitions.
 
+With the explicit `unified-ppe-15` model profile, analyzed previews also include the existing
+`modelObjects` object-detection-only contract. Its artifact identity and normalized raw boxes are
+bound to the exact analyzed frame, including Mask, Harness and Hook classes. Class-ID/name or
+frame mismatch makes that preview unavailable. Other model profiles keep their prior payload.
+When explicitly combined with the Person detector, the preview retains the composition's artifact
+identity and provenance digest; only its COCO class-0 `person` label is rendered as `Person` for
+the preview taxonomy. The original detector batch and all other class bindings stay unchanged.
+These experimental objects do not create tracks, change wearer PPE status, confirm missing PPE,
+or enter durable alert delivery. Model selection alone does not establish accuracy, correct wearing
+or safe anchorage; production model acceptance and rollout remain separate.
+
 A preview sink failure is logged using a fixed safe diagnostic and the sink is retired until restart;
 it does not interrupt durable event handling. Preview/API availability does not prove successful
 Backend ingestion, persistence, recipient notification or independent model accuracy.

@@ -133,6 +133,7 @@ class HeadlessCameraProcessingWorker:
         partitioned_frame_delivery: bool = False,
         tracked_capture: TrackedCapturePolicy | None = None,
         analysis_observer: Callable[[AnalysisFrame], None] | None = None,
+        experimental_object_preview: bool = False,
         delivery_context_provider: Callable[
             [CameraBundle, FrameEnvelope, Literal["LIVE", "REPLAY"]],
             Awaitable[EventDeliveryContext | None],
@@ -153,6 +154,7 @@ class HeadlessCameraProcessingWorker:
         self._stream = stream
         self._detector = detector
         self._analysis_observer = analysis_observer
+        self._experimental_object_preview = experimental_object_preview
         self._pipeline = pipeline
         self._ppe_region_id = ppe_region_id.casefold()
         self._configurations = configurations
@@ -539,6 +541,7 @@ class HeadlessCameraProcessingWorker:
                         confirmed_ppe_items=confirmed_preview_items,
                         occupied_zone_regions=frozenset(occupied_zone_regions),
                         zone_anchor=getattr(self._pipeline, "zone_anchor", "BOTTOM_CENTER"),
+                        raw_detections=batch if self._experimental_object_preview else None,
                     )
                 )
             except Exception:

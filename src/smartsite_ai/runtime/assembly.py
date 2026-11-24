@@ -306,6 +306,7 @@ def assemble_sessions(
             ),
             tracked_capture=tracked_capture,
             analysis_observer=analysis.offer if analysis is not None else None,
+            experimental_object_preview=experimental_model_profile == "unified-ppe-15",
             delivery_context_provider=plan.poller.snapshot_delivery_context
             if tracked_capture is not None or camera.entry.generation_bound_event_delivery
             else None,

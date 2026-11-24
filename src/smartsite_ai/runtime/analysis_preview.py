@@ -7,14 +7,33 @@ from datetime import UTC, datetime
 from typing import Any
 
 from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
-from smartsite_ai.pipelines._geometry import point_in_polygon
+from smartsite_ai.inference.ppe_profiles import UNIFIED_PPE_15_PROFILE
+from smartsite_ai.pipelines._geometry import point_in_polygon, to_observation_bounding_box
 from smartsite_ai.pipelines.analysis_frame import AnalysisFrame
+from smartsite_ai.processing_worker import validate_frame_batch_binding
 from smartsite_ai.runtime.supervisor import _finish_cleanup
 
 
 def encode_analysis_frame(item: AnalysisFrame) -> dict[str, Any]:
     if item.zone_anchor not in ("BOTTOM_CENTER", "BOX_CENTER"):
         raise ValueError("Invalid Zone preview anchor")
+    raw = item.raw_detections
+    if raw is not None:
+        validate_frame_batch_binding(item.frame, raw)
+        class_map = dict(UNIFIED_PPE_15_PROFILE.class_map)
+        # The explicit two-artifact adapter retains COCO's lowercase Person label.
+        object_names = [
+            "Person"
+            if (raw.model_artifact_id, raw.model_version, d.class_id, d.class_name)
+            == ("person-anchored-ppe", "v1", 0, "person")
+            else d.class_name
+            for d in raw.detections
+        ]
+        if any(
+            class_map.get(d.class_id) != name
+            for d, name in zip(raw.detections, object_names, strict=True)
+        ):
+            raise ValueError("Raw preview class mapping does not match unified-ppe-15")
     # Keep the existing technical preview mapping, without starting its socket
     # runtime, model, camera, or Backend delivery loop.
     from smartsite_ai.realtime import build_realtime_preview
@@ -27,6 +46,25 @@ def encode_analysis_frame(item: AnalysisFrame) -> dict[str, Any]:
         confirmed_ppe_items=item.confirmed_ppe_items,
         occupied_zone_regions=item.occupied_zone_regions,
     )
+    if raw is not None:
+        payload["modelObjects"] = {
+            "modelFamily": "yolo11s",
+            "experimental": True,
+            "scope": "OBJECT_DETECTION_ONLY",
+            "artifactId": raw.model_artifact_id,
+            "artifactSha256": raw.model_sha256,
+            "detections": [
+                {
+                    "classId": d.class_id,
+                    "className": name,
+                    "confidence": d.confidence,
+                    "boundingBox": to_observation_bounding_box(d.bounding_box).model_dump(
+                        by_alias=True
+                    ),
+                }
+                for d, name in zip(raw.detections, object_names, strict=True)
+            ],
+        }
     if item.zone_anchor == "BOX_CENTER":
         payload["zoneAnchor"] = item.zone_anchor
     if isinstance(item.configuration, CameraPolicyConfigurationBundle):

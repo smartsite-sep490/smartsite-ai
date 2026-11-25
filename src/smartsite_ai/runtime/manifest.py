@@ -288,6 +288,8 @@ def bind_manifest(
                 target_fps=entry.target_fps,
                 is_live=entry.live,
                 pace_replay=not entry.live,
+                # LIVE consumers must not drain old samples after slow inference/delivery.
+                max_queue_size=1 if entry.live else 5,
                 max_consecutive_failures=None
                 if entry.live and entry.generation_credential_file is None
                 else 1,

@@ -93,6 +93,11 @@ class PpePipeline:
         self._emit_missing = emit_missing
 
     @property
+    def supported_items(self) -> tuple[PpeItem, ...]:
+        """Declared observation families, not accuracy or wearing qualification."""
+        return self._items
+
+    @property
     def minimum_schema_version(self) -> Literal["1.0.0", "1.1.0"]:
         """Minimum consumer version for the configured observation families."""
         return (

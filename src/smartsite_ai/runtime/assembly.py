@@ -107,7 +107,13 @@ async def preflight_manifest(
                         UUID(generation.worker_generation_id),
                         UUID(generation.stream_session_id),
                     )
-                store = RegionConfigurationStore(allow_policy_v2=tracked)
+                profile = experimental_ppe_profile(bound.manifest.experimental_model_profile)
+                store = RegionConfigurationStore(
+                    allow_policy_v2=tracked,
+                    supported_ppe_items=frozenset(
+                        PpePipeline.for_model_profile(profile).supported_items
+                    ),
+                )
                 poller = CameraConfigurationPoller(
                     client=client,
                     store=store,

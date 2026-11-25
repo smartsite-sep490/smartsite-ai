@@ -2,7 +2,7 @@ import asyncio
 from enum import StrEnum
 
 from smartsite_ai.core.canonical_hash import compute_canonical_payload_hash
-from smartsite_ai.domain.configuration_bundle import CameraConfigurationBundle
+from smartsite_ai.domain.configuration_bundle import PPE_ITEMS, CameraConfigurationBundle, PpeItem
 from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigurationBundle
 from smartsite_ai.domain.regions import (
     CameraRegionConfiguration,
@@ -23,10 +23,21 @@ CameraBundle = CameraConfigurationBundle | CameraPolicyConfigurationBundle
 
 
 class RegionConfigurationStore:
-    def __init__(self, *, allow_policy_v2: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allow_policy_v2: bool = False,
+        supported_ppe_items: frozenset[PpeItem] | None = None,
+    ) -> None:
         if not isinstance(allow_policy_v2, bool):
             raise ValueError("Policy v2 support must be an explicit boolean")
+        if supported_ppe_items is not None and (
+            not isinstance(supported_ppe_items, frozenset)
+            or not supported_ppe_items.issubset(PPE_ITEMS)
+        ):
+            raise ValueError("Supported PPE items must be a canonical immutable set")
         self._allow_policy_v2 = allow_policy_v2
+        self._supported_ppe_items = supported_ppe_items
         self._lock = asyncio.Lock()
         self._snapshots: dict[str, tuple[CameraRegionConfiguration, str, CameraBundle | None]] = {}
 
@@ -62,6 +73,26 @@ class RegionConfigurationStore:
     async def apply_bundle(self, bundle: CameraBundle) -> RegionConfigurationApplyOutcome:
         if isinstance(bundle, CameraPolicyConfigurationBundle) and not self._allow_policy_v2:
             raise RegionConfigurationConflict("Policy bundle v2 requires explicit consumer support")
+        if self._supported_ppe_items is not None:
+            if isinstance(bundle, CameraPolicyConfigurationBundle):
+                policies = (
+                    bundle.camera_ppe_policy,
+                    *(region.ppe_policy for region in bundle.regions),
+                )
+                required = {
+                    item
+                    for policy in policies
+                    if policy.mode == "EXPLICIT"
+                    for item in policy.required_ppe
+                }
+            else:
+                required = {item for region in bundle.regions for item in region.required_ppe}
+            unsupported = required - self._supported_ppe_items
+            if unsupported:
+                raise RegionConfigurationConflict(
+                    "Configuration requests unsupported PPE items: "
+                    + ", ".join(sorted(unsupported))
+                )
         projection = bundle.to_region_configuration()
         async with self._lock:
             current = self._snapshots.get(bundle.camera_external_id)

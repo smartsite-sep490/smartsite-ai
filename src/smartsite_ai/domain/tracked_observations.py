@@ -17,6 +17,7 @@ from smartsite_ai.domain.observations import (
     StrictWireModel,
     TechnicalObservationEvent,
     ZoneEntryObservation,
+    validate_uuid_str,
 )
 
 RetirementReason = Literal[
@@ -109,6 +110,30 @@ class CameraPpeObservation(StrictWireModel):
     bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
 
 
+class RegionalSupplementalPpeObservation(StrictWireModel):
+    """Existing v1.4 regional semantics; never widen CAMERA or legacy DTOs."""
+
+    type: Literal["PPE"]
+    track_id: JsonInteger = Field(alias="trackId", ge=0, le=MAX_SAFE_INTEGER)
+    ppe_item: Literal["MASK", "FULL_BODY_HARNESS", "LANYARD_HOOK"] = Field(alias="ppeItem")
+    status: Literal["PRESENT", "MISSING"]
+    region_id: str = Field(alias="regionId")
+    geometry_version: JsonInteger = Field(alias="geometryVersion", ge=1, le=MAX_SAFE_INTEGER)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    bounding_box: BoundingBox | None = Field(default=None, alias="boundingBox")
+
+    @field_validator("region_id")
+    @classmethod
+    def valid_region(cls, value: str) -> str:
+        return validate_uuid_str(value, "regionId")
+
+    @model_validator(mode="after")
+    def present_only_fall_protection(self) -> Self:
+        if self.ppe_item != "MASK" and self.status != "PRESENT":
+            raise ValueError("Harness and Hook observations must be PRESENT only")
+        return self
+
+
 class TrackedZoneEntryObservation(ZoneEntryObservation):
     entry_origin: Literal["OUTSIDE_TO_INSIDE", "INSIDE_ENTRY_UNOBSERVED"] = Field(
         alias="entryOrigin"
@@ -120,6 +145,7 @@ class TrackedZoneEntryObservation(ZoneEntryObservation):
 TrackedObservation = (
     PersonObservation
     | PpeObservation
+    | RegionalSupplementalPpeObservation
     | CameraPpeObservation
     | TrackedZoneEntryObservation
     | ZoneEntryObservation
@@ -178,7 +204,11 @@ class TrackedObservationEvent(TechnicalObservationEvent):
             for item in self.observations
             if isinstance(item, PersonObservation) and item.bounding_box is not None
         }
-        regional = {item.track_id for item in self.observations if isinstance(item, PpeObservation)}
+        regional = {
+            item.track_id
+            for item in self.observations
+            if isinstance(item, PpeObservation | RegionalSupplementalPpeObservation)
+        }
         for item in self.observations:
             if isinstance(item, CameraPpeObservation):
                 if self.schema_version != "1.7.0":

@@ -188,7 +188,7 @@ async def run_worker(args: argparse.Namespace, *, settings: Settings | None = No
         pace_replay=not args.live,
         max_consecutive_failures=None if args.live and generation is None else 1,
     )
-    store = RegionConfigurationStore()
+    store = RegionConfigurationStore(supported_ppe_items=frozenset(PpePipeline().supported_items))
     runner: UltralyticsYoloRunner | None = None
     async with (
         BackendConfigurationClient.from_settings(runtime_settings) as configuration_client,

@@ -1076,6 +1076,19 @@ expiry reset. A preview does not revert to pending merely because no new deliver
 candidate is emitted on that frame. This presentation state does not emit another
 event or replace Backend review and authorization.
 
+## PPE configuration and model capability
+
+Runtime preflight checks configured PPE families against the selected observation
+profile before opening capture or loading a model. The default legacy profile
+supports Hardhat and Safety Vest; an explicit expanded profile is needed for
+Gloves, Boots or Goggles. Subsequent bundle updates use the same capability bound.
+An unsupported requirement is rejected without replacing the last accepted
+configuration or acknowledging the new one. Disabled PPE policies can still be
+used for Zone-only monitoring.
+
+This check establishes taxonomy compatibility only. It does not qualify model
+accuracy, prove that PPE is worn correctly, or infer missing PPE from absence.
+
 ## Academic Context
 
 SmartSite AI is developed as part of the SmartSite SEP490 capstone project. The service is currently a prototype and engineering platform; it must not be interpreted as a certified safety system or as a replacement for qualified safety personnel.

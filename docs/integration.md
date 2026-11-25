@@ -1,5 +1,16 @@
 # Tích hợp SmartSite Backend
 
+## Typed regional PPE evidence
+
+The tracked v1.5–v1.7 DTO accepts the existing canonical regional Mask,
+full-body Harness and Lanyard Hook shapes referenced from v1.4. Harness/Hook
+remain `PRESENT` only; they never assert absence, fit or safe anchorage. The
+five-family CAMERA shape and legacy DTOs remain unchanged. Same-part PERSON,
+region geometry and unmixed CAMERA/REGION checks still apply.
+
+This restores typed wire compatibility only. It does not select a model,
+enable additional required-PPE policies or prove eight-family live monitoring.
+
 ## Explicit sampled LIVE continuity
 
 A tracked LIVE camera manifest may opt into `sampledContinuity` with both

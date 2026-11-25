@@ -8,8 +8,18 @@ remain `PRESENT` only; they never assert absence, fit or safe anchorage. The
 five-family CAMERA shape and legacy DTOs remain unchanged. Same-part PERSON,
 region geometry and unmixed CAMERA/REGION checks still apply.
 
-This restores typed wire compatibility only. It does not select a model,
-enable additional required-PPE policies or prove eight-family live monitoring.
+In an explicitly configured unified15 tracked worker, enabled regional PPE
+monitoring also carries positive Mask/Harness/Hook object evidence. It uses the
+same unambiguous Person ownership checks as existing PPE. Contradictory Mask
+evidence remains unknown. Disabled regions, people outside all regions and
+legacy/native10 profiles retain their prior behavior. These extra objects do
+not enter missing-item confirmation, required-PPE policies or compliance claims;
+they remain in the complete tracked frame for Backend evidence/grouping.
+
+This does not select or qualify a model, enable additional required-PPE policies
+or prove eight-family live monitoring. The five-item capability declaration
+continues to describe supported required-PPE policies, separate from raw object
+and regional positive evidence.
 
 ## Explicit sampled LIVE continuity
 

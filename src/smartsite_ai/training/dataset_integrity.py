@@ -166,7 +166,12 @@ def _reject_cross_split_image_overlap(entries: Sequence[Mapping[str, object]]) -
             raise DatasetIntegrityError("cross-split image overlap: video-source filename")
 
 
-def verify_prepared_dataset(data_config: Path, *, reject_split_overlap: bool = False) -> str:
+def verify_prepared_dataset(
+    data_config: Path,
+    *,
+    reject_split_overlap: bool = False,
+    expected_profile: str | None = None,
+) -> str:
     """Verify every prepared byte and return the pinned aggregate SHA-256."""
 
     root = data_config.parent.resolve(strict=True)
@@ -181,11 +186,23 @@ def verify_prepared_dataset(data_config: Path, *, reject_split_overlap: bool = F
         raise DatasetIntegrityError("preparation manifest root must be an object")
     if payload.get("schemaVersion") != "1.0.0" or payload.get("status") != "COMPLETE":
         raise DatasetIntegrityError("preparation manifest must be COMPLETE schema 1.0.0")
+    class_map = _CANONICAL_CLASS_MAP
+    if expected_profile == "unified-ppe-15":
+        from smartsite_ai.inference.ppe_profiles import UNIFIED_PPE_15_PROFILE
+
+        class_map = {str(key): name for key, name in UNIFIED_PPE_15_PROFILE.class_map}
+        if payload.get("experimentalOnly") is not True or any(
+            not isinstance(payload.get(key), str) or not str(payload[key]).strip()
+            for key in ("license", "attribution")
+        ):
+            raise DatasetIntegrityError("experimental dataset requires license and attribution")
+    elif expected_profile not in {None, "legacy-ppe-5"}:
+        raise DatasetIntegrityError("unsupported dataset profile")
     canonical = payload.get("canonical")
     if (
         not isinstance(canonical, Mapping)
         or canonical.get("outputRoot") != str(root)
-        or canonical.get("classMap") != _CANONICAL_CLASS_MAP
+        or canonical.get("classMap") != class_map
     ):
         raise DatasetIntegrityError("preparation manifest output root does not match dataset")
     entries = _manifest_entries(payload)
@@ -212,6 +229,10 @@ def verify_prepared_dataset(data_config: Path, *, reject_split_overlap: bool = F
         or output_aggregate.get("sha256") != aggregate
     ):
         raise DatasetIntegrityError("preparation manifest aggregate does not match dataset")
-    if reject_split_overlap:
+    if reject_split_overlap or expected_profile == "unified-ppe-15":
         _reject_cross_split_image_overlap(verified)
+    if expected_profile == "unified-ppe-15":
+        from smartsite_ai.training.scoped_supervision import validate_supervision_scopes
+
+        validate_supervision_scopes(root, verified)
     return aggregate

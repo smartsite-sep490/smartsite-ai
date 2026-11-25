@@ -11,7 +11,10 @@ from smartsite_ai.domain.observations import (
     PpeObservation,
     TechnicalObservationEvent,
 )
-from smartsite_ai.domain.tracked_observations import CameraPpeObservation
+from smartsite_ai.domain.tracked_observations import (
+    CameraPpeObservation,
+    RegionalSupplementalPpeObservation,
+)
 from smartsite_ai.pipelines.observation_frame import FrameObservation, ObservationFrame
 
 
@@ -74,7 +77,9 @@ class TemporalPpeCandidateGate:
         session_id: UUID,
         observed_at: datetime,
         active_track_ids: Sequence[int],
-        observations: Sequence[PpeObservation | CameraPpeObservation],
+        observations: Sequence[
+            PpeObservation | CameraPpeObservation | RegionalSupplementalPpeObservation
+        ],
         camera_configuration_version: int | None = None,
     ) -> tuple[ConfirmedPpeCandidate, ...]:
         """Update temporal state and return new confirmed candidates outside cooldown."""
@@ -116,7 +121,7 @@ class TemporalPpeCandidateGate:
         ] = {}
         conflicting_items: set[tuple[int, PpeItem, str | None, int]] = set()
         for obs in observations:
-            if obs.type != "PPE":
+            if obs.type != "PPE" or obs.ppe_item not in PPE_ITEMS:
                 continue
             key = _ppe_binding(obs, camera_configuration_version)
             if key is None:

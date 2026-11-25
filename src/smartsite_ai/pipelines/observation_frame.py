@@ -12,11 +12,17 @@ from smartsite_ai.domain.observations import (
 )
 from smartsite_ai.domain.tracked_observations import (
     CameraPpeObservation,
+    RegionalSupplementalPpeObservation,
     TrackedZoneEntryObservation,
 )
 from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment
 
-FrameObservation = Observation | CameraPpeObservation | TrackedZoneEntryObservation
+FrameObservation = (
+    Observation
+    | CameraPpeObservation
+    | RegionalSupplementalPpeObservation
+    | TrackedZoneEntryObservation
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -168,6 +168,10 @@ class Mf05Mf06Pipeline:
                         for observation in self._ppe.process(tracked_frame, region)
                         if observation.ppe_item in required
                     )
+                    if self._tracked_v17:
+                        observations_by_region.extend(
+                            self._ppe.process_regional_presence(tracked_frame, region)
+                        )
             if self._tracked_v17:
                 observations_by_region.extend(
                     self._ppe.process_camera(

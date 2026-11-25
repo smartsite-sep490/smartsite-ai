@@ -5,7 +5,10 @@ from typing import Final, Literal
 
 from smartsite_ai.domain.observations import PpeObservation
 from smartsite_ai.domain.regions import CameraObservationRegionConfiguration
-from smartsite_ai.domain.tracked_observations import CameraPpeObservation
+from smartsite_ai.domain.tracked_observations import (
+    CameraPpeObservation,
+    RegionalSupplementalPpeObservation,
+)
 from smartsite_ai.inference.models import NormalizedBoundingBox, NormalizedDetection
 from smartsite_ai.inference.ppe_profiles import (
     LEGACY_PPE_5_PROFILE,
@@ -23,6 +26,7 @@ from smartsite_ai.pipelines._geometry import (
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
 
 PpeItem = Literal["HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES"]
+PpeEvidenceItem = PpeItem | Literal["MASK", "FULL_BODY_HARNESS", "LANYARD_HOOK"]
 PPE_ITEMS: Final[tuple[PpeItem, ...]] = ("HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES")
 DEFAULT_PPE_CLASS_NAMES: Final[dict[PpeItem, frozenset[str]]] = {
     "HARD_HAT": frozenset({"hard_hat", "hard hat", "hardhat", "helmet", "safety helmet"}),
@@ -91,11 +95,17 @@ class PpePipeline:
         self._minimum_association_coverage = minimum_association_coverage
         self._minimum_observable_person_height = minimum_observable_person_height
         self._emit_missing = emit_missing
+        self._regional_presence_enabled = False
 
     @property
     def supported_items(self) -> tuple[PpeItem, ...]:
         """Declared observation families, not accuracy or wearing qualification."""
         return self._items
+
+    @property
+    def regional_presence_enabled(self) -> bool:
+        """Object evidence support is separate from the five required-PPE policies."""
+        return self._regional_presence_enabled
 
     @property
     def minimum_schema_version(self) -> Literal["1.0.0", "1.1.0"]:
@@ -131,7 +141,46 @@ class PpePipeline:
         }
         if profile == UNIFIED_PPE_15_PROFILE:
             missing["SAFETY_VEST"] = DEFAULT_MISSING_PPE_CLASS_NAMES["SAFETY_VEST"]
-        return cls(class_names_by_item=present, missing_class_names_by_item=missing)
+        pipeline = cls(class_names_by_item=present, missing_class_names_by_item=missing)
+        pipeline._regional_presence_enabled = profile == UNIFIED_PPE_15_PROFILE
+        return pipeline
+
+    def process_regional_presence(
+        self,
+        tracked_frame: TrackedFrame,
+        observation_region: CameraObservationRegionConfiguration,
+    ) -> tuple[RegionalSupplementalPpeObservation, ...]:
+        """Emit only explicit positive object evidence, with normal ownership guards."""
+        if not self._regional_presence_enabled:
+            return ()
+        eligible = tuple(
+            person
+            for person in tracked_frame.persons
+            if point_in_polygon(
+                bottom_center(person.bounding_box), observation_region.polygon.coordinates
+            )
+        )
+        associations, conflicts = self._associate(
+            tracked_frame,
+            eligible,
+            class_mapping={
+                "mask": ("MASK", "PRESENT"),
+                "no-mask": ("MASK", "MISSING"),
+                "fullbody-harness": ("FULL_BODY_HARNESS", "PRESENT"),
+                "lanyard-hook": ("LANYARD_HOOK", "PRESENT"),
+            },
+        )
+        return tuple(
+            RegionalSupplementalPpeObservation.model_validate(
+                {
+                    **self._observation_fields(track, item, status, detection),
+                    "regionId": observation_region.region_id,
+                    "geometryVersion": observation_region.geometry_version,
+                }
+            )
+            for (track, item), (status, detection) in associations.items()
+            if (track, item) not in conflicts and status == "PRESENT"
+        )
 
     def process(
         self,
@@ -210,18 +259,24 @@ class PpePipeline:
         self,
         tracked_frame: TrackedFrame,
         eligible_people: tuple[TrackedPerson, ...],
+        *,
+        class_mapping: Mapping[str, tuple[PpeEvidenceItem, Literal["PRESENT", "MISSING"]]]
+        | None = None,
     ) -> tuple[
-        dict[tuple[int, PpeItem], tuple[Literal["PRESENT", "MISSING"], NormalizedDetection]],
-        set[tuple[int, PpeItem]],
+        dict[
+            tuple[int, PpeEvidenceItem], tuple[Literal["PRESENT", "MISSING"], NormalizedDetection]
+        ],
+        set[tuple[int, PpeEvidenceItem]],
     ]:
         best_by_status: dict[
-            tuple[int, PpeItem, Literal["PRESENT", "MISSING"]],
+            tuple[int, PpeEvidenceItem, Literal["PRESENT", "MISSING"]],
             tuple[float, float, int, NormalizedDetection],
         ] = {}
         eligible_track_ids = {person.track_id for person in eligible_people}
-        conflicted: set[tuple[int, PpeItem]] = set()
+        conflicted: set[tuple[int, PpeEvidenceItem]] = set()
+        mapping = self._class_to_observation if class_mapping is None else class_mapping
         for detection_index, detection in enumerate(tracked_frame.batch.detections):
-            observation = self._class_to_observation.get(detection.class_name.casefold())
+            observation = mapping.get(detection.class_name.casefold())
             if observation is None:
                 continue
             item, status = observation
@@ -256,14 +311,14 @@ class PpePipeline:
                 best_by_status[status_key] = candidate
 
         grouped: dict[
-            tuple[int, PpeItem],
+            tuple[int, PpeEvidenceItem],
             dict[Literal["PRESENT", "MISSING"], tuple[float, float, int, NormalizedDetection]],
         ] = {}
         for (track_id, item, status), value in best_by_status.items():
             grouped.setdefault((track_id, item), {})[status] = value
 
         result: dict[
-            tuple[int, PpeItem],
+            tuple[int, PpeEvidenceItem],
             tuple[Literal["PRESENT", "MISSING"], NormalizedDetection],
         ] = {}
         for (track_id, item), statuses in grouped.items():
@@ -288,7 +343,7 @@ class PpePipeline:
     @staticmethod
     def _observation_fields(
         track_id: int,
-        item: PpeItem,
+        item: PpeEvidenceItem,
         status: Literal["PRESENT", "MISSING"],
         detection: NormalizedDetection | None,
     ) -> dict[str, object]:

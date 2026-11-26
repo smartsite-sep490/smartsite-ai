@@ -104,5 +104,33 @@
     "examplePath": "contracts/examples/v1.1/source-unowned-prepared.json",
     "sourceExamplePath": "contracts/examples/v1.1/source-unowned-prepared.json",
     "exampleSha256": "68bab3bf0f3a211472fc13f70242ac34b75f7ebaf1497919d52cbe9ff71738bf"
+  },
+  "maskVersionedContracts": {
+    "sourceRepository": "smartsite-sep490/smartsite",
+    "sourceCommitSha": "fb9b53adc3c67f7b4e1d28251108daeef2986d81",
+    "adoptionDocPath": "contracts/mask-versioned-adoption.md",
+    "sourceAdoptionDocPath": "contracts/mask-versioned-adoption.md",
+    "adoptionDocSha256": "d66e5e450e8559242f7451197f2dae5920e644002847254c77b8094a6fb933e4",
+    "technicalObservation": {
+      "schemaVersion": "1.8.0",
+      "path": "contracts/schemas/v1.8/technical-observation-event.json",
+      "sourcePath": "contracts/schemas/v1.8/technical-observation-event.json",
+      "schemaSha256": "25f48f2db28bb93068fb94b3d43f6b61b84d4b52cce0a81d3c727cec241fd84e",
+      "examplePath": "contracts/schemas/v1.8/examples/mask-camera-observation.json",
+      "sourceExamplePath": "contracts/schemas/v1.8/examples/mask-camera-observation.json",
+      "exampleSha256": "cf089bf2e5029840032400be985da2d7b6e44071f4cf73759440460390a595f1",
+      "hashesPath": "contracts/schemas/v1.8/examples/mask-contract-hashes.json",
+      "sourceHashesPath": "contracts/schemas/v1.8/examples/mask-contract-hashes.json",
+      "hashesSha256": "19d56479fc59471e069c1ce81d8edc99aae12c61c4f187d7343b877077989352"
+    },
+    "cameraPolicyConfigurationBundle": {
+      "schemaVersion": "2.1.0",
+      "path": "contracts/schemas/v2.1/camera-policy-configuration-bundle.json",
+      "sourcePath": "contracts/schemas/v2.1/camera-policy-configuration-bundle.json",
+      "schemaSha256": "696b89cad9fed7341d03bbe2a8ee234860abc092e15c29cec0ddcc885656e3b7",
+      "examplePath": "contracts/schemas/v2.1/examples/mask-policy-configuration-bundle.json",
+      "sourceExamplePath": "contracts/schemas/v2.1/examples/mask-policy-configuration-bundle.json",
+      "exampleSha256": "6231ffc24d17382cb001e7ca59c26c9d856ccf2dbc03ac261490667c50ecaa6c"
+    }
   }
 }

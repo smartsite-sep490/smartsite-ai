@@ -67,4 +67,5 @@ docs/
 !CONTRIBUTING.md
 !AGENTS.md
 !**/README.md
+!contracts/mask-versioned-adoption.md
 .superpowers/

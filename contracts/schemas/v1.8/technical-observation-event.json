@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smartsite.local/contracts/v1.8/technical-observation-event.json",
+  "title": "TrackedFrameMaskCameraPpeObservationEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "schemaVersion",
+    "cameraExternalId",
+    "streamSessionId",
+    "capturedAt",
+    "frameDimensions",
+    "observations",
+    "evidence",
+    "framePartition",
+    "continuity"
+  ],
+  "properties": {
+    "eventId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/eventId"
+    },
+    "schemaVersion": {
+      "const": "1.8.0"
+    },
+    "cameraExternalId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/cameraExternalId"
+    },
+    "streamSessionId": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/streamSessionId"
+    },
+    "capturedAt": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/capturedAt"
+    },
+    "frameDimensions": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/frameDimensions"
+    },
+    "observations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/personObservation"
+          },
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/ppeObservation"
+          },
+          {
+            "$ref": "#/$defs/zoneEntryObservation"
+          },
+          {
+            "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/identityCandidateObservation"
+          },
+          {
+            "$ref": "#/$defs/cameraPpeObservation"
+          }
+        ]
+      }
+    },
+    "evidence": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/evidence"
+    },
+    "framePartition": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/framePartition"
+    },
+    "continuity": {
+      "$ref": "https://smartsite.local/contracts/v1.5/technical-observation-event.json#/properties/continuity"
+    }
+  },
+  "$defs": {
+    "zoneEntryObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId", "regionId", "geometryVersion", "entryOrigin"],
+      "properties": {
+        "type": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/type"
+        },
+        "trackId": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/trackId"
+        },
+        "regionId": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/regionId"
+        },
+        "geometryVersion": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/geometryVersion"
+        },
+        "confidence": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/zoneEntryObservation/properties/confidence"
+        },
+        "entryOrigin": {
+          "enum": ["OUTSIDE_TO_INSIDE", "INSIDE_ENTRY_UNOBSERVED"]
+        }
+      }
+    },
+    "cameraPpeObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "trackId", "scope", "ppeItem", "status"],
+      "properties": {
+        "type": {
+          "const": "PPE"
+        },
+        "scope": {
+          "const": "CAMERA"
+        },
+        "trackId": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/ppeObservation/properties/trackId"
+        },
+        "ppeItem": {
+          "enum": ["HARD_HAT", "SAFETY_VEST", "GLOVES", "BOOTS", "GOGGLES", "MASK"]
+        },
+        "status": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/ppeObservation/properties/status"
+        },
+        "confidence": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/ppeObservation/properties/confidence"
+        },
+        "boundingBox": {
+          "$ref": "https://smartsite.local/contracts/v1.4/technical-observation-event.json#/$defs/boundingBox"
+        }
+      }
+    }
+  }
+}

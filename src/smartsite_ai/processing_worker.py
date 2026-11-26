@@ -308,22 +308,7 @@ class HeadlessCameraProcessingWorker:
                 await self._dispatcher.drain_once()
                 tracked = self._tracked_capture
                 if tracked is not None:
-                    try:
-                        while (
-                            remaining := await self._outbox.tracked_pending_remaining_seconds(
-                                tracked.credential
-                            )
-                        ) is not None:
-                            if remaining <= 0:
-                                raise TimeoutError
-                            async with asyncio.timeout(remaining):
-                                await self._dispatcher.drain_once()
-                                if await self._outbox.has_pending_tracked_frame(tracked.credential):
-                                    await asyncio.sleep(self._delivery_interval_seconds)
-                    except TimeoutError:
-                        raise TimeoutError(
-                            "Timed out waiting for final tracked frame confirmation"
-                        ) from None
+                    await self._wait_tracked_confirmation(tracked.credential)
 
         source_status = self._stream.snapshot()
         if source_status.state is StreamState.ERROR:
@@ -346,6 +331,31 @@ class HeadlessCameraProcessingWorker:
                 )
             except TimeoutError:
                 continue
+
+    async def _next_tracked_confirmation_seconds(
+        self, credential: WorkerGenerationCredential
+    ) -> float | None:
+        remaining = await self._outbox.tracked_pending_remaining_seconds(credential)
+        if remaining is None:
+            return None
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for final tracked frame confirmation") from None
+        return remaining
+
+    async def _wait_tracked_confirmation(self, credential: WorkerGenerationCredential) -> None:
+        while (remaining := await self._next_tracked_confirmation_seconds(credential)) is not None:
+            try:
+                async with asyncio.timeout(remaining) as timeout_context:
+                    await self._dispatcher.drain_once()
+            except TimeoutError:
+                if not timeout_context.expired():
+                    raise
+                if await self._next_tracked_confirmation_seconds(credential) is None:
+                    return
+                continue
+            if (remaining := await self._next_tracked_confirmation_seconds(credential)) is None:
+                return
+            await asyncio.sleep(min(self._delivery_interval_seconds, remaining))
 
     def _capture_state_snapshot(self) -> _WorkerStateSnapshot:
         checkpoint = getattr(self._pipeline, "checkpoint_derived_state", None)

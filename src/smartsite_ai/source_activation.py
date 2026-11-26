@@ -40,6 +40,17 @@ class ResumeDriver(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class StoppedOwnerResumeDriver(Protocol):
+    """Opt-in interface verifying unowned stopped-owner recovery against an OS capture lease."""
+
+    def supports_stopped_owner_resume(self, scope: Scope) -> bool: ...
+    def can_resume_stopped_owner(
+        self, scope: Scope, source: str, binding: ResumeBinding
+    ) -> bool: ...
+    async def verify_unowned_capture_released(self, scope: Scope) -> None: ...
+
+
 class SourceRegistry:
     """One coordinator owns this encrypted file; no cross-process writer sharing."""
 
@@ -283,6 +294,28 @@ class SourceActivator:
                 ).generationBinding.model_dump()
             return result
 
+    async def _verify_stopped_owner(
+        self,
+        driver: ResumeDriver,
+        scope: Scope,
+        source: object,
+        binding: ResumeBinding,
+    ) -> None:
+        if (
+            not isinstance(source, str)
+            or not source
+            or not isinstance(driver, StoppedOwnerResumeDriver)
+            or not driver.supports_stopped_owner_resume(scope)
+            or not driver.can_resume_stopped_owner(scope, source, binding)
+        ):
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+        persisted_generation = await self.driver.generation_id(scope)
+        if not isinstance(persisted_generation, str) or persisted_generation != (
+            binding.workerGenerationId
+        ):
+            raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+        await driver.verify_unowned_capture_released(scope)
+
     async def prepare_resume(self, scope: Scope, request: ResumePrepare) -> dict[str, object]:
         # Revalidate even callers using model_copy/model_construct; freeze before awaiting.
         request = ResumePrepare.model_validate(request.model_dump())
@@ -293,31 +326,53 @@ class SourceActivator:
             history = self._resume_history(row) if row else {}
             if request.commandId in history and row.get("commandId") != request.commandId:
                 raise SourceActivationError("SOURCE_RESUME_SUPERSEDED")
+            binding = request.generationBinding
             if row and row.get("commandId") == request.commandId:
                 if row.get("operation") != "RESUME" or row.get("requestHash") != fingerprint:
                     raise SourceActivationError()
                 if row.get("state") not in {"PREPARED", "RUNNING"}:
                     raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
-                if row["state"] == "RUNNING" and (
-                    not self._owns_running_resume(scope, row)
-                    or not await self.driver.is_running(scope, str(row["currentGenerationId"]))
+                if row["state"] == "RUNNING":
+                    if not self._owns_running_resume(
+                        scope, row
+                    ) or not await self.driver.is_running(scope, str(row["currentGenerationId"])):
+                        raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+                    return self._public(row)
+                source = row.get("source")
+                if (
+                    (not isinstance(source, str) or not driver.owns_resume(scope, source, binding))
+                    and isinstance(driver, StoppedOwnerResumeDriver)
+                    and driver.supports_stopped_owner_resume(scope)
                 ):
-                    raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+                    prior = row.get("generation")
+                    if (
+                        row.get("sourceKind") != "LIVE"
+                        or type(row.get("sourceRevision")) is not int
+                        or row.get("sourceRevision") != request.expectedRevision
+                        or row.get("currentGenerationId") != binding.workerGenerationId
+                        or not isinstance(prior, dict)
+                        or prior.get("workerGenerationId") != binding.workerGenerationId
+                        or prior.get("streamSessionId") != binding.streamSessionId
+                    ):
+                        raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+                    await self._verify_stopped_owner(driver, scope, source, binding)
                 return self._public(row)
-            binding = request.generationBinding
             prior = row.get("generation") if row else None
             if (
                 not row
                 or row.get("state") != "RUNNING"
                 or row.get("sourceKind") != "LIVE"
+                or type(row.get("sourceRevision")) is not int
                 or row.get("sourceRevision") != request.expectedRevision
                 or row.get("currentGenerationId") != binding.workerGenerationId
                 or not isinstance(prior, dict)
+                or prior.get("workerGenerationId") != binding.workerGenerationId
                 or prior.get("streamSessionId") != binding.streamSessionId
                 or not isinstance(row.get("source"), str)
-                or not driver.owns_resume(scope, row["source"], binding)
             ):
                 raise SourceActivationError("SOURCE_RECONCILIATION_REQUIRED")
+            if not driver.owns_resume(scope, row["source"], binding):
+                await self._verify_stopped_owner(driver, scope, row["source"], binding)
             row.update(
                 state="STOPPING",
                 operation="RESUME",

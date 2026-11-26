@@ -186,13 +186,20 @@ def test_source_process_driver_seed_requirement_and_allow_unowned_start_guards(
         unreadable_seed = tmp_path / "unreadable-generation.json"
         unreadable_seed.write_text(json.dumps({"workerGenerationId": GEN2}), encoding="utf-8")
         real_read_bytes = Path.read_bytes
+        real_open = Path.open
 
         def guarded_read_bytes(self: Path) -> bytes:
             if self == unreadable_seed:
                 raise PermissionError("unreadable seed")
             return real_read_bytes(self)
 
+        def guarded_open(self: Path, *args: object, **kwargs: object) -> object:
+            if self == unreadable_seed:
+                raise PermissionError("unreadable seed")
+            return real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+
         monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+        monkeypatch.setattr(Path, "open", guarded_open)
         unreadable_driver = SourceProcessDriver(
             scope=SCOPE,
             command=(str(Path(sys.executable)), "-I", str(child)),

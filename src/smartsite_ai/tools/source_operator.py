@@ -230,7 +230,7 @@ def build_operator_app(
     backend_url = environ["SMARTSITE_AI_BACKEND_INGESTION_URL"]
     # Constructor validates the canonical URL without creating an HTTP client or socket.
     BackendConfigurationClient(backend_url, backend_token, policy_v2=True)
-    host, _capture = _load_bindings(profile, environ)
+    host, capture = _load_bindings(profile, environ)
     origin = f"http://127.0.0.1:{profile.preview_port}"
 
     async def ready(generation_id: str) -> bool:
@@ -297,6 +297,8 @@ def build_operator_app(
         resume_camera_id=str(profile.camera_id),
         resume_manifest_supported=True,
         resume_configuration_loader=load_configuration,
+        capture_lease_directory=capture.lock_directory,
+        capture_lease_resource_id=capture.resource_id,
     )
     registry = SourceRegistry(profile.state_directory / "source-registry.enc", registry_key)
     # Only the configured operator camera is served even if its host policy covers more Sites.

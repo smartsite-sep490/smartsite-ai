@@ -14,7 +14,7 @@ from smartsite_ai.inference.models import (
 )
 from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import TrackedFrame, TrackedPerson
-from smartsite_ai.tracking.segment_lifecycle import SegmentLifecycle
+from smartsite_ai.tracking.segment_lifecycle import SegmentLifecycle, SegmentLifecycleState
 
 _DEFAULT_PERSON_CLASS_NAMES: Final[frozenset[str]] = frozenset({"person"})
 
@@ -40,6 +40,17 @@ class _MutableTrack:
     missed_frames: int = 0
     confirmation_streak: int = 0
     confirmed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class IoUTrackerState:
+    source_key: tuple[str, UUID] | None
+    camera_external_id: str | None
+    last_sequence: int | None
+    view_revision: int | None
+    next_track_id: int
+    tracks: tuple[_MutableTrack, ...]
+    segments: SegmentLifecycleState
 
 
 class IoUPersonTracker:
@@ -101,6 +112,45 @@ class IoUPersonTracker:
         self._segments = SegmentLifecycle(
             max_segment_gap=max_segment_gap, continuity_policy=continuity_policy
         )
+
+    def checkpoint_state(self) -> IoUTrackerState:
+        """Capture tracker and segment continuity state before an uncommitted frame."""
+        return IoUTrackerState(
+            source_key=self._source_key,
+            camera_external_id=self._camera_external_id,
+            last_sequence=self._last_sequence,
+            view_revision=self._view_revision,
+            next_track_id=self._next_track_id,
+            tracks=tuple(
+                _MutableTrack(
+                    track_id=track.track_id,
+                    detection=track.detection,
+                    missed_frames=track.missed_frames,
+                    confirmation_streak=track.confirmation_streak,
+                    confirmed=track.confirmed,
+                )
+                for track in self._tracks.values()
+            ),
+            segments=self._segments.checkpoint_state(),
+        )
+
+    def restore_state(self, state: IoUTrackerState) -> None:
+        self._source_key = state.source_key
+        self._camera_external_id = state.camera_external_id
+        self._last_sequence = state.last_sequence
+        self._view_revision = state.view_revision
+        self._next_track_id = state.next_track_id
+        self._tracks = {
+            track.track_id: _MutableTrack(
+                track_id=track.track_id,
+                detection=track.detection,
+                missed_frames=track.missed_frames,
+                confirmation_streak=track.confirmation_streak,
+                confirmed=track.confirmed,
+            )
+            for track in state.tracks
+        }
+        self._segments.restore_state(state.segments)
 
     def update(self, batch: DetectionBatch, *, view_revision: int | None = None) -> TrackedFrame:
         """Associate the person detections in ``batch`` with existing tracks."""

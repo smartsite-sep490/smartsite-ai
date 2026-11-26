@@ -55,6 +55,35 @@ async def stage_tracked_capture(
             "profileSha256": profile_sha256,
         }
     )
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_fn = getattr(outbox, "_clock", None)
+    cred_expiry = datetime.fromisoformat(credential.expires_at)
+    effective_expiry = min(expires_at, cred_expiry)
+    lease_deadline: float | None = None
+    if clock_fn is not None:
+        now_wall = clock_fn()
+        credential.ensure_current(now_wall)
+        initial_lease_remaining = (effective_expiry - now_wall).total_seconds()
+        if initial_lease_remaining <= 0:
+            raise TimeoutError("Tracked frame lease has expired")
+        lease_deadline = clock() + initial_lease_remaining
+
+    def remaining_lease_seconds() -> float | None:
+        if lease_deadline is None:
+            return None
+        return max(0.0, lease_deadline - clock())
+
+    def raise_if_lease_expired(timeout_message: str) -> None:
+        if clock_fn is None:
+            return
+        current_wall = clock_fn()
+        credential.ensure_current(current_wall)
+        if current_wall >= effective_expiry or (
+            lease_deadline is not None and clock() >= lease_deadline
+        ):
+            raise TimeoutError(timeout_message)
+
     predecessor = None
     sequence = frame.source_sequence_number
     if (
@@ -76,14 +105,24 @@ async def stage_tracked_capture(
             raise ValueError("Tracked continuation exceeds the configured sequence bound")
         predecessor = await outbox.read_tracked_predecessor(scope_sha256, str(previous_sequence))
         if predecessor is None and predecessor_wait_seconds is not None:
+            wait_limit = predecessor_wait_seconds
+            lease_remaining = remaining_lease_seconds()
+            if lease_remaining is not None:
+                wait_limit = min(wait_limit, lease_remaining)
+            if wait_limit <= 0:
+                raise_if_lease_expired("Timed out waiting for the tracked predecessor")
+                raise TimeoutError("Timed out waiting for the tracked predecessor")
             try:
-                async with asyncio.timeout(predecessor_wait_seconds):
+                async with asyncio.timeout(wait_limit):
                     while predecessor is None:
+                        if before_enqueue is not None:
+                            await before_enqueue()
                         await asyncio.sleep(poll_interval_seconds)
                         predecessor = await outbox.read_tracked_predecessor(
                             scope_sha256, str(previous_sequence)
                         )
             except TimeoutError:
+                raise_if_lease_expired("Timed out waiting for the tracked predecessor")
                 raise TimeoutError("Timed out waiting for the tracked predecessor") from None
     parts, references = encode_complete_tracked_frame(
         tracked_delivery_frame(frame, confirmed_ppe_candidates),
@@ -100,6 +139,9 @@ async def stage_tracked_capture(
                 for observation in part["observations"]
             ):
                 continue
+            if before_enqueue is not None:
+                await before_enqueue()
+            raise_if_lease_expired("Tracked frame lease expired before evidence publication")
             # The existing publisher validates the exact captured frame and part partition.
             # Use a temporary supported event with the final tracked part ID and copy only evidence.
             publication = TechnicalObservationEvent.model_validate(
@@ -128,19 +170,21 @@ async def stage_tracked_capture(
                 raise EvidenceBindingError("Tracked evidence must bind to the original part")
             part["evidence"] = [bound[0].model_dump(by_alias=True, exclude_none=True)]
 
-    clock = asyncio.get_running_loop().time
     capacity_deadline = clock() + (predecessor_wait_seconds or 0)
+    if lease_deadline is not None:
+        capacity_deadline = min(capacity_deadline, lease_deadline)
     cancellation = None
     while True:
         if before_enqueue is not None:
             await before_enqueue()
+        raise_if_lease_expired("Tracked frame lease expired before durable enqueue")
         owned = asyncio.create_task(
             outbox.enqueue_tracked_parts(
                 credential,
                 context,
                 parts,
                 expected_seal=references,
-                expires_at=expires_at,
+                expires_at=effective_expiry,
                 max_pending=max_pending,
                 max_bytes=max_bytes,
             ),
@@ -160,6 +204,7 @@ async def stage_tracked_capture(
                 raise cancellation from None
             remaining = capacity_deadline - clock()
             if remaining <= 0:
+                raise_if_lease_expired("Timed out waiting within tracked frame lease")
                 raise
             # Delivery can drain the previous frames while this exact frame waits.
             await asyncio.sleep(min(remaining, poll_interval_seconds))

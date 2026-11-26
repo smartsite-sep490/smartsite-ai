@@ -1,8 +1,6 @@
 """Local realtime stream: verified YOLO detector, MF05/MF06 pipeline, optional backend post."""
 
 import asyncio
-import base64
-import io
 import json
 from collections.abc import Callable
 from contextlib import suppress
@@ -13,7 +11,6 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from fastapi import WebSocket, WebSocketDisconnect
-from PIL import Image
 
 from smartsite_ai.config import Settings
 from smartsite_ai.domain.regions import CameraRegionConfiguration
@@ -34,6 +31,7 @@ from smartsite_ai.pipelines.ppe_temporal import (
     filter_event_for_delivery,
 )
 from smartsite_ai.pipelines.zones import RestrictedZonePipeline
+from smartsite_ai.runtime.jpeg_preview import encode_bgr24_jpeg_data_url
 from smartsite_ai.runtime_device import validate_runtime_device
 from smartsite_ai.tracking.iou_tracker import IoUPersonTracker
 
@@ -170,17 +168,17 @@ def build_realtime_preview(
     This preview is not retained evidence and does not change the ingestion contract.
     Decimal sequence strings preserve the full source integer range in JavaScript.
     """
-    image = Image.frombytes("RGB", (frame.width, frame.height), frame.payload, "raw", "BGR")
-    image.thumbnail((1280, 1280))
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=75)
-    encoded = buffer.getvalue()
-    if len(encoded) > 1_048_576:
-        raise ValueError("realtime preview exceeds image size limit")
+    data_url, out_width, out_height = encode_bgr24_jpeg_data_url(
+        frame,
+        max_side=1280,
+        qualities=(75,),
+        max_raw_bytes=1_048_576,
+        error_message="realtime preview exceeds image size limit",
+    )
     payload = _ui_frame(
         event,
-        image.width,
-        image.height,
+        out_width,
+        out_height,
         confirmed_ppe_items=confirmed_ppe_items,
         occupied_zone_regions=occupied_zone_regions,
     )
@@ -190,7 +188,7 @@ def build_realtime_preview(
         sessionId=str(frame.session_id),
         sequenceNumber=str(frame.sequence_number),
         capturedAt=frame.captured_at_iso,
-        imageDataUrl="data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"),
+        imageDataUrl=data_url,
         zonePolygons=[
             {
                 "regionId": region.region_id,

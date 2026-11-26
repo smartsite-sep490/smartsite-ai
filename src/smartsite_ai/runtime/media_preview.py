@@ -4,7 +4,6 @@ import asyncio
 import base64
 import copy
 import hashlib
-import io
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -14,6 +13,7 @@ from smartsite_ai.configuration_image import ConfigurationImagePayload, SourceKi
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.queue import PreviewFrameQueue, QueueClosedError
 from smartsite_ai.runtime.analysis_preview import AnalysisPreviewObserver
+from smartsite_ai.runtime.jpeg_preview import encode_bgr24_jpeg_data_url
 from smartsite_ai.runtime.supervisor import _finish_cleanup
 
 
@@ -33,27 +33,24 @@ def encode_media_frame(frame: FrameEnvelope) -> CameraMediaFrame:
     """Encode display pixels only; never attach detections from a different frame."""
     if frame.width * frame.height > 16_777_216:
         raise ValueError("Preview input exceeds pixel budget")
-    from PIL import Image
-
-    image = Image.frombytes("RGB", (frame.width, frame.height), frame.payload, "raw", "BGR")
-    image.thumbnail((640, 640))
-    for quality in (65, 45, 25):
-        output = io.BytesIO()
-        image.save(output, format="JPEG", quality=quality)
-        data_url = "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
-        if len(data_url) <= 180_000:
-            return {
-                "type": "media-frame",
-                "mediaVersion": 1,
-                "cameraExternalId": frame.camera_external_id,
-                "sessionId": str(frame.session_id),
-                "sequenceNumber": str(frame.sequence_number),
-                "capturedAt": frame.captured_at_iso,
-                "width": image.width,
-                "height": image.height,
-                "imageDataUrl": data_url,
-            }
-    raise ValueError("Preview JPEG exceeds byte budget")
+    data_url, out_width, out_height = encode_bgr24_jpeg_data_url(
+        frame,
+        max_side=640,
+        qualities=(65, 45, 25),
+        max_data_url_bytes=180_000,
+        error_message="Preview JPEG exceeds byte budget",
+    )
+    return {
+        "type": "media-frame",
+        "mediaVersion": 1,
+        "cameraExternalId": frame.camera_external_id,
+        "sessionId": str(frame.session_id),
+        "sequenceNumber": str(frame.sequence_number),
+        "capturedAt": frame.captured_at_iso,
+        "width": out_width,
+        "height": out_height,
+        "imageDataUrl": data_url,
+    }
 
 
 class CameraPreviewObserver:

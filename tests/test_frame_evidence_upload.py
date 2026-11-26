@@ -328,6 +328,7 @@ async def test_outbox_uploads_evidence_before_each_raw_part_and_still_requires_s
             ("RAW", parts[0]["eventId"].lower()),
             ("EVIDENCE", parts[1]["eventId"].lower()),
             ("RAW", parts[1]["eventId"].lower()),
+            ("SEAL_CHECK", frame_id),
         ]
         assert not await outbox.ready_tracked_parts(credential, limit=2)
         # RAW_STORED + EVIDENCE_STORED never advance predecessor without ADMITTED seal.
@@ -338,7 +339,7 @@ async def test_outbox_uploads_evidence_before_each_raw_part_and_still_requires_s
         sealed = True
         await dispatcher.drain_once(limit=2)
 
-    assert call_log[-1] == ("SEAL_CHECK", frame_id)
+    assert call_log[4:] == [("SEAL_CHECK", frame_id), ("SEAL_CHECK", frame_id)]
     head = await outbox.read_tracked_predecessor(refs.scope_sha256, refs.sequence_number)
     assert head is not None
     assert head.subject_references() == refs.subject_references()

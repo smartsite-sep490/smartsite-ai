@@ -63,6 +63,48 @@ async def enqueue(outbox, parts=None, refs=None, **options):
 
 
 @pytest.mark.anyio
+async def test_delivery_exposes_an_immediately_admitted_frame_before_next_tick(tmp_path):
+    _, context, credential, refs = frame_parts()
+    outbox = SqliteEventOutbox(tmp_path / "outbox.sqlite", clock=lambda: NOW)
+    await enqueue(outbox)
+    methods = []
+
+    def backend(request):
+        methods.append(request.method)
+        if request.method == "POST":
+            event = json.loads(request.content)["event"]
+            digest = compute_canonical_payload_hash(event)
+            return httpx.Response(
+                200,
+                json={
+                    "kind": "RAW_STORED",
+                    "eventId": event["eventId"],
+                    "payloadHash": digest,
+                    "bindingHash": context.binding_hash(digest),
+                },
+            )
+        return httpx.Response(
+            200, json={"kind": "ADMITTED_TRACKED_FRAME", **refs.model_dump(by_alias=True)}
+        )
+
+    async with BackendClient(
+        "https://backend.example", "synthetic-service", transport=httpx.MockTransport(backend)
+    ) as client:
+        dispatcher = OutboxDispatcher(
+            outbox, client, generation_credential=credential, tracked_batch_limit=2
+        )
+        await dispatcher.drain_once()
+        assert methods == ["POST", "POST", "GET"]
+        head = await outbox.read_tracked_predecessor(refs.scope_sha256, refs.sequence_number)
+        assert head is not None
+        assert head.subject_references() == refs.subject_references()
+        assert not await outbox.has_pending_tracked_frame(credential)
+
+        await dispatcher.drain_once()
+        assert methods == ["POST", "POST", "GET"]
+
+
+@pytest.mark.anyio
 async def test_tracked_outbox_restart_atomic_retry_and_admitted_head(tmp_path):
     parts, context, credential, refs = frame_parts()
     path = tmp_path / "outbox.sqlite"

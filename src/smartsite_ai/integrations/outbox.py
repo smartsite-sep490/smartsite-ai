@@ -1150,7 +1150,9 @@ class OutboxDispatcher:
         try:
             # Resolve previously stored frames even if a later raw send fails.
             await self._outbox.reconcile_tracked_frames(self._backend, credential, limit=limit)
-            await self.drain_tracked_once(limit=limit)
+            if await self.drain_tracked_once(limit=limit):
+                # A ready seal can unblock the next frame without another delivery tick.
+                await self._outbox.reconcile_tracked_frames(self._backend, credential, limit=limit)
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
             if status not in (408, 429) and not 500 <= status < 600:

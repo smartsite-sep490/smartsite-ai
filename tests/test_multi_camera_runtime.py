@@ -446,6 +446,34 @@ async def test_partial_startup_failure_does_not_load_the_model() -> None:
 
 
 @pytest.mark.anyio
+async def test_runtime_check_warms_model_and_never_builds_camera_sessions() -> None:
+    calls = []
+
+    async def preflight():
+        calls.append("backend")
+        return None
+
+    async def open_model():
+        calls.append("warmup")
+        return _Detector()
+
+    async def close_model():
+        calls.append("close")
+
+    def build_sessions(_detector):
+        pytest.fail("a runtime check must not construct any camera sessions")
+
+    report = await execute_runtime(
+        RuntimePlan(preflight, open_model, close_model, build_sessions),
+        check_cameras=(("gate-01", "CAM-A"),),
+    )
+    assert calls == ["backend", "warmup", "close"]
+    assert report.model_loaded and report.model_closed
+    assert [camera.status for camera in report.cameras] == ["configuration_checked"]
+    assert build_parser().parse_args(["--manifest", "runtime.json", "--check"]).check
+
+
+@pytest.mark.anyio
 async def test_runtime_failure_keeps_the_healthy_camera_and_closes_the_model_once() -> None:
     opened = 0
     closed = 0

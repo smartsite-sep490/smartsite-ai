@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--require-resume-manifest", action="store_true")
     parser.add_argument("--source-control-profile", type=Path)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify Backend camera configuration and warm up the model without opening cameras",
+    )
     return parser
 
 
@@ -107,6 +112,7 @@ async def run_manifest(
     preview_port: int | None = None,
     require_resume_manifest: bool = False,
     source_control_profile: Path | None = None,
+    check_only: bool = False,
     report_callback: Callable[[dict[str, object]], None] | None = None,
 ) -> int:
     if report_callback is not None and not callable(report_callback):
@@ -121,6 +127,7 @@ async def run_manifest(
             preview_port=preview_port,
             require_resume_manifest=require_resume_manifest,
             source_control_profile=source_control_profile,
+            check_only=check_only,
         )
     except Exception as exc:
         if report_callback is not None:
@@ -128,10 +135,20 @@ async def run_manifest(
                 report_callback({"errorClass": type(exc).__name__})
         raise
     payload = report_payload(report)
+    if check_only:
+        payload["mode"] = "check"
     if report_callback is not None:
         with suppress(Exception):
             report_callback(payload)
     print(json.dumps(payload, separators=(",", ":")))
+    if check_only:
+        return (
+            0
+            if report.model_closed
+            and report.cameras
+            and all(camera.status == "configuration_checked" for camera in report.cameras)
+            else 1
+        )
     return exit_code(report)
 
 
@@ -145,7 +162,10 @@ async def _run_manifest_report(
     preview_port: int | None = None,
     require_resume_manifest: bool = False,
     source_control_profile: Path | None = None,
+    check_only: bool = False,
 ) -> RuntimeReport:
+    if check_only and (preview_port is not None or source_control_profile is not None):
+        raise CameraRuntimeError("Check mode cannot start preview or bind a source-control child")
     if source_control_profile is None and any(
         key in os.environ for key in (SOURCE_ENV, GENERATION_ENV)
     ):
@@ -234,6 +254,7 @@ async def _run_manifest_report(
                 runtime_settings, policy_v2=True
             ),
             generation_override=generation_override,
+            **({"check_only": True} if check_only else {}),
         )
         plans.extend(prepared)
         if failure is None and expected_resume is not None:
@@ -353,7 +374,14 @@ async def _run_manifest_report(
                     0
                 ].camera_external_id: expected_resume.generationBinding.workerGenerationId
             }
-        if preview_port is None:
+        if check_only:
+            report = await execute_runtime(
+                plan,
+                check_cameras=tuple(
+                    (camera.stream_id, camera.camera_external_id) for camera in bound.cameras
+                ),
+            )
+        elif preview_port is None:
             report = await execute_runtime(plan)
         else:
             report = await run_with_camera_preview(
@@ -374,6 +402,8 @@ def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preview_options = {} if args.preview_port is None else {"preview_port": args.preview_port}
     resume_options = {"require_resume_manifest": True} if args.require_resume_manifest else {}
+    if args.check:
+        resume_options["check_only"] = True
     try:
         if args.source_control_profile is not None:
             return asyncio.run(

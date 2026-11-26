@@ -244,6 +244,15 @@ def test_multi_preflight_claims_before_source_and_duplicate_preflight_fails(tmp_
             clients.append(result)
             return result
 
+        failed, plans = await preflight_manifest(
+            bound, configuration_client_factory=client, check_only=True
+        )
+        assert failed is None
+        assert plans[0].generation is not None
+        assert await plans[0].store.get_bundle("CAM") is not None
+        assert not (tmp_path / "outbox.sqlite3").exists()
+        await close_configuration_clients(plans)
+
         failed, plans = await preflight_manifest(bound, configuration_client_factory=client)
         assert failed is None
         source = SimpleNamespace(source_id="synthetic", is_connected=False)

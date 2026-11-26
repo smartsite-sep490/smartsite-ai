@@ -39,11 +39,12 @@ jobs:
           tracked_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["trackedTechnicalObservationVersions"][-1]["sourceCommitSha"])')
           evidence_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["aiFrameEvidenceReceipt"]["sourceCommitSha"])')
           activation_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["cameraSourceActivationState"]["sourceCommitSha"])')
+          mask_commit=$(python -c 'import json; print(json.load(open("contracts/metadata.json"))["maskVersionedContracts"]["sourceCommitSha"])')
           source_checkout="$RUNNER_TEMP/smartsite-contract-source"
           git init --quiet "$source_checkout"
           # Fetch every immutable source in one operation, avoiding repeated shallow
           # boundary updates. Every comparison below still selects its exact SHA.
-          mapfile -t source_commits < <(printf '%s\n' "$source_commit" "$policy_commit" "$tracked_commit" "$evidence_commit" "$activation_commit" | sort -u)
+          mapfile -t source_commits < <(printf '%s\n' "$source_commit" "$policy_commit" "$tracked_commit" "$evidence_commit" "$activation_commit" "$mask_commit" | sort -u)
           git -C "$source_checkout" fetch --quiet --depth=1 "https://github.com/${source_repository}.git" "${source_commits[@]}"
           git -C "$source_checkout" show "${source_commit}:contracts/schemas/v1/technical-observation-event.json" > "$RUNNER_TEMP/source-schema.json"
           git -C "$source_checkout" show "${source_commit}:contracts/test/golden-vectors.json" > "$RUNNER_TEMP/source-golden-vectors.json"
@@ -80,6 +81,16 @@ jobs:
             git -C "$source_checkout" show "${activation_commit}:${activation_path}" > "$RUNNER_TEMP/source-activation-bytes.json"
             cmp "$activation_path" "$RUNNER_TEMP/source-activation-bytes.json"
           done
+          for mask_path in \
+            contracts/mask-versioned-adoption.md \
+            contracts/schemas/v1.8/technical-observation-event.json \
+            contracts/schemas/v1.8/examples/mask-camera-observation.json \
+            contracts/schemas/v1.8/examples/mask-contract-hashes.json \
+            contracts/schemas/v2.1/camera-policy-configuration-bundle.json \
+            contracts/schemas/v2.1/examples/mask-policy-configuration-bundle.json; do
+            git -C "$source_checkout" show "${mask_commit}:${mask_path}" > "$RUNNER_TEMP/source-mask-bytes"
+            cmp "$mask_path" "$RUNNER_TEMP/source-mask-bytes"
+          done
       - name: Lint, format and test
         run: |
           uv run --frozen ruff check .
@@ -111,6 +122,12 @@ jobs:
           assert "smartsite_ai/contracts/examples/v1.7/one-person-camera-ppe.json" in names
           assert "smartsite_ai/contracts/schemas/v1/ai-frame-evidence-receipt.json" in names
           assert "smartsite_ai/contracts/examples/v1/ai-frame-evidence-receipt.json" in names
+          assert "smartsite_ai/contracts/mask-versioned-adoption.md" in names
+          assert "smartsite_ai/contracts/schemas/v1.8/technical-observation-event.json" in names
+          assert "smartsite_ai/contracts/schemas/v1.8/examples/mask-camera-observation.json" in names
+          assert "smartsite_ai/contracts/schemas/v1.8/examples/mask-contract-hashes.json" in names
+          assert "smartsite_ai/contracts/schemas/v2.1/camera-policy-configuration-bundle.json" in names
+          assert "smartsite_ai/contracts/schemas/v2.1/examples/mask-policy-configuration-bundle.json" in names
           PY
       - name: Verify minimal runtime package
         run: |

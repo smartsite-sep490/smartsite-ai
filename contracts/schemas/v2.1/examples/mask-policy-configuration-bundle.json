@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "2.1.0",
+  "cameraId": "11111111-2222-4333-8444-555555555555",
+  "cameraExternalId": "camera-01",
+  "configurationVersion": 4,
+  "viewRevision": 2,
+  "issuedAt": "2026-11-13T00:00:00.000Z",
+  "cameraPpePolicy": {
+    "mode": "EXPLICIT",
+    "requiredPpe": ["HARD_HAT", "MASK"]
+  },
+  "regions": [
+    {
+      "regionId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1",
+      "geometryVersion": 1,
+      "coordinateSpace": "NORMALIZED_0_1",
+      "polygon": {
+        "coordinates": [
+          [0.2, 0.2],
+          [0.7, 0.2],
+          [0.5, 0.7]
+        ]
+      },
+      "zoneId": "99999999-8888-4777-8666-555555555551",
+      "policyRevision": 1,
+      "ppePolicy": {
+        "mode": "EXPLICIT",
+        "requiredPpe": ["GLOVES", "MASK"]
+      }
+    },
+    {
+      "regionId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee2",
+      "geometryVersion": 1,
+      "coordinateSpace": "NORMALIZED_0_1",
+      "polygon": {
+        "coordinates": [
+          [0.2, 0.2],
+          [0.7, 0.2],
+          [0.5, 0.7]
+        ]
+      },
+      "zoneId": "99999999-8888-4777-8666-555555555551",
+      "policyRevision": 1,
+      "ppePolicy": {
+        "mode": "EXPLICIT",
+        "requiredPpe": ["GLOVES"]
+      }
+    },
+    {
+      "regionId": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee3",
+      "geometryVersion": 1,
+      "coordinateSpace": "NORMALIZED_0_1",
+      "polygon": {
+        "coordinates": [
+          [0.2, 0.2],
+          [0.7, 0.2],
+          [0.5, 0.7]
+        ]
+      },
+      "zoneId": "99999999-8888-4777-8666-555555555551",
+      "policyRevision": 1,
+      "ppePolicy": {
+        "mode": "DISABLED",
+        "reason": "Temporary PPE policy exception"
+      }
+    }
+  ],
+  "bundleSha256": "05f703a6aa84ff9c181b66cd41e5aa9445c80db1d18b73a177614b10f42359a9"
+}

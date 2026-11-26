@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -40,6 +41,37 @@ from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 
 _LOGGER = logging.getLogger(__name__)
 _LIVE_STAGING_LIMIT = 4
+
+
+async def _finish_cleanup[T](work: Awaitable[T]) -> T:
+    """Drain owned cleanup despite repeated cancellation, then propagate cancellation."""
+    cleanup = asyncio.ensure_future(work)
+    interrupted = False
+    while True:
+        try:
+            result = await asyncio.shield(cleanup)
+            break
+        except asyncio.CancelledError:
+            if cleanup.cancelled():
+                raise
+            interrupted = True
+    if interrupted:
+        raise asyncio.CancelledError
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkerStateSnapshot:
+    restore_pipeline: Callable[[object], None] | None
+    pipeline_state: object
+    temporal_state: tuple[TemporalPpeCandidateGate, dict[tuple[str, int], TemporalPpeCandidateGate]]
+    previous: tuple[object, ...]
+
+
+@dataclass(slots=True)
+class _LiveStagedEntry:
+    pre_snapshot: _WorkerStateSnapshot | None
+    committed: bool = False
 
 
 def validate_frame_batch_binding(frame: FrameEnvelope, batch: DetectionBatch) -> None:
@@ -169,6 +201,8 @@ class HeadlessCameraProcessingWorker:
         self._last_frame_event_count = 0
         self._live_staging_queue: asyncio.Queue[Callable[[], Awaitable[None]] | None] | None = None
         self._live_staged_event_count = 0
+        self._live_staged_entries: deque[_LiveStagedEntry] = deque()
+        self._current_frame_snapshot: _WorkerStateSnapshot | None = None
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
@@ -244,6 +278,8 @@ class HeadlessCameraProcessingWorker:
                 for worker in done:
                     worker.result()
                 workers.difference_update(done)
+                if staging_task is not None and staging_task in done and not capture_task.done():
+                    raise RuntimeError("live staging loop stopped unexpectedly")
             frames_processed, events_enqueued = capture_task.result()
             events_enqueued += self._live_staged_event_count
             normal_source_completion = True
@@ -252,16 +288,21 @@ class HeadlessCameraProcessingWorker:
             for task in workers_to_stop:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*workers_to_stop, return_exceptions=True)
-            self._live_staging_queue = None
-            self._stop_delivery.set()
-            if not normal_source_completion and delivery_task is not None:
-                if not delivery_task.done():
-                    # Events were persisted before dispatch, so cancelling an
-                    # in-flight attempt is safe; restart replays the same IDs.
-                    delivery_task.cancel()
-                await asyncio.gather(delivery_task, return_exceptions=True)
-            await self._stream.stop()
+            try:
+                await _finish_cleanup(asyncio.gather(*workers_to_stop, return_exceptions=True))
+            finally:
+                self._restore_first_uncommitted_live_state()
+                self._live_staging_queue = None
+                self._stop_delivery.set()
+                try:
+                    if not normal_source_completion and delivery_task is not None:
+                        if not delivery_task.done():
+                            # Events were persisted before dispatch, so cancelling an
+                            # in-flight attempt is safe; restart replays the same IDs.
+                            delivery_task.cancel()
+                        await _finish_cleanup(asyncio.gather(delivery_task, return_exceptions=True))
+                finally:
+                    await _finish_cleanup(self._stream.stop())
             if normal_source_completion and delivery_task is not None:
                 await delivery_task
                 await self._dispatcher.drain_once()
@@ -306,18 +347,53 @@ class HeadlessCameraProcessingWorker:
             except TimeoutError:
                 continue
 
-    async def _process_frame(self, frame: FrameEnvelope) -> None:
-        checkpoint = getattr(self._pipeline, "checkpoint_temporal_state", None)
-        restore = getattr(self._pipeline, "restore_temporal_state", None)
-        zone_state = checkpoint() if checkpoint is not None and restore is not None else None
-        temporal_state = deepcopy((self._temporal_gate, self._region_gates))
-        previous = (
-            self._current_session_id,
-            self._current_ppe_geometry_version,
-            self._active_snapshot,
-            self._last_tracked_sequence,
-            self._last_tracked_batch,
+    def _capture_state_snapshot(self) -> _WorkerStateSnapshot:
+        checkpoint = getattr(self._pipeline, "checkpoint_derived_state", None)
+        restore = getattr(self._pipeline, "restore_derived_state", None)
+        if checkpoint is None or restore is None:
+            checkpoint = getattr(self._pipeline, "checkpoint_temporal_state", None)
+            restore = getattr(self._pipeline, "restore_temporal_state", None)
+        pipeline_state = checkpoint() if checkpoint is not None and restore is not None else None
+        return _WorkerStateSnapshot(
+            restore_pipeline=restore if checkpoint is not None and restore is not None else None,
+            pipeline_state=pipeline_state,
+            temporal_state=deepcopy((self._temporal_gate, self._region_gates)),
+            previous=(
+                self._current_session_id,
+                self._current_ppe_geometry_version,
+                self._active_snapshot,
+                self._last_tracked_sequence,
+                self._last_tracked_batch,
+            ),
         )
+
+    def _restore_state_snapshot(self, snapshot: _WorkerStateSnapshot) -> None:
+        if snapshot.restore_pipeline is not None:
+            snapshot.restore_pipeline(snapshot.pipeline_state)
+        self._temporal_gate, self._region_gates = snapshot.temporal_state
+        (
+            session_id,
+            geometry_version,
+            active_snapshot,
+            last_sequence,
+            last_batch,
+        ) = snapshot.previous
+        self._current_session_id = session_id  # type: ignore[assignment]
+        self._current_ppe_geometry_version = geometry_version  # type: ignore[assignment]
+        self._active_snapshot = active_snapshot  # type: ignore[assignment]
+        self._last_tracked_sequence = last_sequence  # type: ignore[assignment]
+        self._last_tracked_batch = last_batch  # type: ignore[assignment]
+
+    def _restore_first_uncommitted_live_state(self) -> None:
+        for entry in self._live_staged_entries:
+            if not entry.committed and entry.pre_snapshot is not None:
+                self._restore_state_snapshot(entry.pre_snapshot)
+                break
+        self._live_staged_entries.clear()
+
+    async def _process_frame(self, frame: FrameEnvelope) -> None:
+        snapshot = self._capture_state_snapshot()
+        self._current_frame_snapshot = snapshot
         self._discard_frame = False
         self._durably_committed = False
         completed = False
@@ -325,17 +401,9 @@ class HeadlessCameraProcessingWorker:
             await self._process_frame_once(frame)
             completed = not self._discard_frame
         finally:
+            self._current_frame_snapshot = None
             if not completed and not self._durably_committed:
-                if zone_state is not None:
-                    restore(zone_state)
-                self._temporal_gate, self._region_gates = temporal_state
-                (
-                    self._current_session_id,
-                    self._current_ppe_geometry_version,
-                    self._active_snapshot,
-                    self._last_tracked_sequence,
-                    self._last_tracked_batch,
-                ) = previous
+                self._restore_state_snapshot(snapshot)
 
     def _new_temporal_gate(self) -> TemporalPpeCandidateGate:
         policy = (
@@ -596,9 +664,10 @@ class HeadlessCameraProcessingWorker:
 
             camera_external_id = frame.camera_external_id
             staging_queue = self._live_staging_queue
-            expires_at = min(
-                datetime.now(UTC) + timedelta(seconds=tracked.pending_seconds),
-                datetime.fromisoformat(tracked.credential.expires_at),
+            staged_entry = (
+                _LiveStagedEntry(pre_snapshot=self._current_frame_snapshot)
+                if staging_queue is not None
+                else None
             )
             # Retain pixels only for frames that can produce tracked evidence.
             evidence_publisher = self._evidence_publisher
@@ -622,6 +691,11 @@ class HeadlessCameraProcessingWorker:
 
             def on_staged(parts: int) -> None:
                 if staging_queue is not None:
+                    if staged_entry is not None:
+                        staged_entry.committed = True
+                        staged_entry.pre_snapshot = None
+                        while self._live_staged_entries and self._live_staged_entries[0].committed:
+                            self._live_staged_entries.popleft()
                     self._live_staged_event_count += parts
                     return
                 self._durably_committed = True
@@ -632,6 +706,13 @@ class HeadlessCameraProcessingWorker:
                 if staging_queue is not None:
                     # The queued observation may have waited across a configuration change.
                     await check_context()
+                now = datetime.now(UTC)
+                credential_expiry = datetime.fromisoformat(tracked.credential.expires_at)
+                tracked.credential.ensure_current(now)
+                expires_at = min(
+                    now + timedelta(seconds=tracked.pending_seconds),
+                    credential_expiry,
+                )
                 await stage_tracked_capture(
                     self._outbox,
                     event,
@@ -653,7 +734,13 @@ class HeadlessCameraProcessingWorker:
                 )
 
             if staging_queue is not None:
-                await staging_queue.put(stage)
+                assert staged_entry is not None
+                self._live_staged_entries.append(staged_entry)
+                try:
+                    await staging_queue.put(stage)
+                except BaseException:
+                    self._live_staged_entries.remove(staged_entry)
+                    raise
             else:
                 await stage()
             return

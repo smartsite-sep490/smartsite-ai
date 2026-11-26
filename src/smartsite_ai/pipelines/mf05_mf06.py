@@ -63,6 +63,28 @@ class Mf05Mf06Pipeline:
         # Keep processed tracking state and its monotonically allocated IDs.
         self._zones.restore_temporal_state(state)
 
+    def checkpoint_derived_state(
+        self,
+    ) -> tuple[ZoneTemporalState, object | None, tuple[object, ...] | None]:
+        """Capture full derived pipeline state (zones, tracker/segments, tracked scope)."""
+        checkpoint_tracker = getattr(self._tracker, "checkpoint_state", None)
+        tracker_state = checkpoint_tracker() if checkpoint_tracker is not None else None
+        return (self._zones.checkpoint_temporal_state(), tracker_state, self._tracked_scope)
+
+    def restore_derived_state(self, state: object) -> None:
+        if (
+            not isinstance(state, tuple)
+            or len(state) != 3
+            or not isinstance(state[0], ZoneTemporalState)
+        ):
+            raise TypeError("Invalid pipeline derived checkpoint")
+        zone_state, tracker_state, tracked_scope = state
+        self._zones.restore_temporal_state(zone_state)
+        restore_tracker = getattr(self._tracker, "restore_state", None)
+        if restore_tracker is not None and tracker_state is not None:
+            restore_tracker(tracker_state)
+        self._tracked_scope = tracked_scope
+
     def process(
         self,
         batch: DetectionBatch,

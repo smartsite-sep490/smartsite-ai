@@ -1,5 +1,6 @@
 """Conservative internal continuity; no wire admission or tracker qualification."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Literal
 from uuid import uuid4
@@ -7,6 +8,12 @@ from uuid import uuid4
 from smartsite_ai.inference.models import DetectionBatch
 from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 from smartsite_ai.tracking.models import RetiredSegment, SubjectSegment, TrackedFrame
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentLifecycleState:
+    previous: TrackedFrame | None
+    view_revision: int | None
 
 
 class SegmentLifecycle:
@@ -30,6 +37,14 @@ class SegmentLifecycle:
         self._continuity_policy = continuity_policy or FrameContinuityPolicy()
         self._previous: TrackedFrame | None = None
         self._view_revision: int | None = None
+
+    def checkpoint_state(self) -> SegmentLifecycleState:
+        """Capture reversible continuity state before an uncommitted frame mutates it."""
+        return SegmentLifecycleState(previous=self._previous, view_revision=self._view_revision)
+
+    def restore_state(self, state: SegmentLifecycleState) -> None:
+        self._previous = state.previous
+        self._view_revision = state.view_revision
 
     def discontinuity_reason(
         self, batch: DetectionBatch, *, view_revision: int | None

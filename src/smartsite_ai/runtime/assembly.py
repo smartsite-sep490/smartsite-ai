@@ -67,6 +67,7 @@ async def preflight_manifest(
     configuration_client_factory: ConfigurationClientFactory,
     policy_v2_client_factory: ConfigurationClientFactory | None = None,
     generation_override: WorkerGenerationCredential | None = None,
+    check_only: bool = False,
 ) -> tuple[tuple[CameraOutcome, ...] | None, tuple[CameraPlan, ...]]:
     """Confirm every camera region before a model or source is opened."""
 
@@ -101,7 +102,7 @@ async def preflight_manifest(
                         camera.entry.camera_id,
                         now=datetime.now(UTC),
                     )
-                if generation is not None:
+                if generation is not None and not check_only:
                     await SqliteEventOutbox(camera.outbox).claim_worker_session(
                         camera.entry.camera_id,
                         UUID(generation.worker_generation_id),

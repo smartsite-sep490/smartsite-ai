@@ -269,6 +269,20 @@ non-retryable Backend response requires operator review.
 
 ### Multi-camera runtime
 
+Before starting a worker on another machine, check its reviewed manifest with
+the same private environment and CPU or GPU model configuration it will use:
+
+```sh
+smartsite-ai-camera-runtime --manifest /absolute/private/runtime.json --check
+```
+
+This fetches and validates the assigned camera configuration from Backend and
+loads and warms the pinned model on a synthetic image. Exit code `0` means
+these checks passed. The output reports `configuration_checked` for each camera.
+The check does not open a camera, start preview, claim a worker generation, or
+write to the outbox. Check camera connectivity and live delivery by starting
+the worker with the reviewed configuration and without `--check`.
+
 `smartsite-ai-camera-runtime` supervises one to three cameras declared in a strict manifest. It
 loads one verified YOLO11s artifact and closes that runner once. Each camera keeps its own region
 store, configuration poller, tracker, PPE temporal gate, outbox, and optional evidence directory.

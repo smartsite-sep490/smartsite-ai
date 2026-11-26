@@ -168,7 +168,11 @@ async def supervise_sessions(sessions: Sequence[CameraSession]) -> tuple[CameraO
     )
 
 
-async def execute_runtime(plan: RuntimePlan) -> RuntimeReport:
+async def execute_runtime(
+    plan: RuntimePlan,
+    *,
+    check_cameras: tuple[tuple[str, str], ...] | None = None,
+) -> RuntimeReport:
     """Preflight every camera, then load the model once around the supervised run."""
 
     report = RuntimeReport(cameras=(), model_loaded=False, model_closed=False)
@@ -179,6 +183,12 @@ async def execute_runtime(plan: RuntimePlan) -> RuntimeReport:
             return report
         detector = await plan.open_model()
         report.model_loaded = True
+        if check_cameras is not None:
+            report.cameras = tuple(
+                CameraOutcome(stream_id, camera_id, "configuration_checked")
+                for stream_id, camera_id in check_cameras
+            )
+            return report
         report.cameras = await supervise_sessions(plan.build_sessions(detector))
         return report
     finally:

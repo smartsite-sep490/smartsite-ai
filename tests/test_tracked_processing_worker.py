@@ -37,6 +37,62 @@ def test_direct_tracked_policy_rejects_boolean_timeouts(field):
 
 
 @pytest.mark.anyio
+async def test_staging_failure_cancels_pending_live_capture_and_stops_stream():
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from smartsite_ai.domain.tracked_observations import TrackedScopeTransitionRequired
+
+    _, _, credential, *_ = packet()
+    capture_waiting = asyncio.Event()
+    capture_cancelled = asyncio.Event()
+    first_frame = True
+
+    async def get_frame():
+        nonlocal first_frame
+        if first_frame:
+            first_frame = False
+            return object()
+        capture_waiting.set()
+        try:
+            await asyncio.Future()
+        finally:
+            capture_cancelled.set()
+
+    stream = SimpleNamespace(
+        config=SimpleNamespace(is_live=True, camera_external_id="CAM", stream_id="CAM"),
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        get_frame=get_frame,
+    )
+    worker = HeadlessCameraProcessingWorker(
+        stream=stream,
+        detector=SimpleNamespace(),
+        pipeline=SimpleNamespace(),
+        ppe_region_id="region",
+        configurations=SimpleNamespace(get=AsyncMock(return_value=object())),
+        outbox=SimpleNamespace(initialize=AsyncMock()),
+        dispatcher=SimpleNamespace(drain_once=AsyncMock(return_value=0)),
+        delivery_context_provider=AsyncMock(),
+        tracked_capture=TrackedCapturePolicy(credential, SITE, "b" * 64, 30, 5, 2, 100_000),
+    )
+
+    async def stage():
+        await capture_waiting.wait()
+        raise TrackedScopeTransitionRequired("synthetic configuration changed")
+
+    async def process(_frame):
+        worker._last_frame_enqueued = False
+        await worker._live_staging_queue.put(stage)
+
+    worker._process_frame = process
+    with pytest.raises(TrackedScopeTransitionRequired, match="configuration changed"):
+        await asyncio.wait_for(worker.run(), timeout=1)
+    assert capture_cancelled.is_set()
+    stream.stop.assert_awaited_once()
+
+
+@pytest.mark.anyio
 async def test_final_frame_can_finish_after_predecessor_wait_within_its_pending_lease():
     import asyncio
     from unittest.mock import AsyncMock

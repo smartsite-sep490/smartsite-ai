@@ -23,6 +23,15 @@ and regional positive evidence.
 
 ## Explicit sampled LIVE continuity
 
+Live analysis publishes the processed preview before staging tracked evidence.
+A single ordered staging task can hold up to four queued observations, limited
+further by the configured outbox item limit. It retains frame pixels only for
+potential evidence. When this queue fills, processing waits instead of dropping
+observations or expanding memory. Staging rechecks the active configuration,
+waits for the exact admitted predecessor, and uses the existing durable outbox.
+Normal source completion drains the queue. If staging fails, the worker stops
+and retains the events already committed to the outbox for retry.
+
 A tracked LIVE camera manifest may opt into `sampledContinuity` with both
 `maxSourceSequenceGap` (strict integer 1–64) and `maxCaptureGapMs` (strict
 integer 1–2000). Omission preserves strict consecutive-sequence behavior. This

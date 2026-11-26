@@ -39,6 +39,7 @@ from smartsite_ai.pipelines.ppe_temporal import (
 from smartsite_ai.tracking.continuity import FrameContinuityPolicy
 
 _LOGGER = logging.getLogger(__name__)
+_LIVE_STAGING_LIMIT = 4
 
 
 def validate_frame_batch_binding(frame: FrameEnvelope, batch: DetectionBatch) -> None:
@@ -166,6 +167,8 @@ class HeadlessCameraProcessingWorker:
         self._partitioned_frame_delivery = partitioned_frame_delivery
         self._delivery_context_provider = delivery_context_provider
         self._last_frame_event_count = 0
+        self._live_staging_queue: asyncio.Queue[Callable[[], Awaitable[None]] | None] | None = None
+        self._live_staged_event_count = 0
         self._stop_delivery = asyncio.Event()
         self._current_session_id: UUID | None = None
         self._current_ppe_geometry_version: int | None = None
@@ -175,6 +178,27 @@ class HeadlessCameraProcessingWorker:
         self._last_tracked_batch: DetectionBatch | None = None
         self._active_snapshot: CameraRegionConfiguration | CameraBundle | None = None
         self._started = False
+
+    async def _stage_live_frames(
+        self, queue: asyncio.Queue[Callable[[], Awaitable[None]] | None]
+    ) -> None:
+        while (stage := await queue.get()) is not None:
+            await stage()
+
+    async def _capture_frames(self) -> tuple[int, int]:
+        frames_processed = 0
+        events_enqueued = 0
+        while True:
+            try:
+                frame = await self._stream.get_frame()
+            except QueueClosedError:
+                if self._live_staging_queue is not None:
+                    await self._live_staging_queue.put(None)
+                return frames_processed, events_enqueued
+            await self._process_frame(frame)
+            frames_processed += 1
+            if self._last_frame_enqueued:
+                events_enqueued += self._last_frame_event_count
 
     async def run(self) -> ProcessingWorkerResult:
         if self._started:
@@ -190,9 +214,8 @@ class HeadlessCameraProcessingWorker:
         # transient failure remains durably scheduled and does not lose the event.
         await self._dispatcher.drain_once()
         delivery_task: asyncio.Task[None] | None = None
-        frames_processed = 0
-        events_enqueued = 0
-        frame_task: asyncio.Task[FrameEnvelope] | None = None
+        staging_task: asyncio.Task[None] | None = None
+        capture_task: asyncio.Task[tuple[int, int]] | None = None
         normal_source_completion = False
         try:
             await self._stream.start()
@@ -200,36 +223,37 @@ class HeadlessCameraProcessingWorker:
                 self._delivery_loop(),
                 name=f"outbox-dispatch-{self._stream.config.stream_id}",
             )
-            while True:
-                frame_task = asyncio.create_task(
-                    self._stream.get_frame(),
-                    name=f"next-frame-{self._stream.config.stream_id}",
+            if self._stream.config.is_live and self._tracked_capture is not None:
+                self._live_staging_queue = asyncio.Queue(
+                    maxsize=min(_LIVE_STAGING_LIMIT, self._tracked_capture.max_pending)
                 )
+                staging_task = asyncio.create_task(
+                    self._stage_live_frames(self._live_staging_queue), name="stage-live-frames"
+                )
+            capture_task = asyncio.create_task(self._capture_frames(), name="process-camera-frames")
+            workers: set[asyncio.Task[tuple[int, int]] | asyncio.Task[None]] = {capture_task}
+            if staging_task is not None:
+                workers.add(staging_task)
+            while workers:
                 done, _pending = await asyncio.wait(
-                    (frame_task, delivery_task),
-                    return_when=asyncio.FIRST_COMPLETED,
+                    (*workers, delivery_task), return_when=asyncio.FIRST_COMPLETED
                 )
                 if delivery_task in done:
-                    if not frame_task.done():
-                        frame_task.cancel()
-                    await asyncio.gather(frame_task, return_exceptions=True)
                     delivery_task.result()
                     raise RuntimeError("outbox delivery loop stopped unexpectedly")
-                try:
-                    frame = frame_task.result()
-                except QueueClosedError:
-                    normal_source_completion = True
-                    break
-                finally:
-                    frame_task = None
-                await self._process_frame(frame)
-                frames_processed += 1
-                if self._last_frame_enqueued:
-                    events_enqueued += self._last_frame_event_count
+                for worker in done:
+                    worker.result()
+                workers.difference_update(done)
+            frames_processed, events_enqueued = capture_task.result()
+            events_enqueued += self._live_staged_event_count
+            normal_source_completion = True
         finally:
-            if frame_task is not None and not frame_task.done():
-                frame_task.cancel()
-                await asyncio.gather(frame_task, return_exceptions=True)
+            workers_to_stop = [task for task in (capture_task, staging_task) if task is not None]
+            for task in workers_to_stop:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*workers_to_stop, return_exceptions=True)
+            self._live_staging_queue = None
             self._stop_delivery.set()
             if not normal_source_completion and delivery_task is not None:
                 if not delivery_task.done():
@@ -570,14 +594,26 @@ class HeadlessCameraProcessingWorker:
                     "Tracked capture context is unavailable or changed"
                 )
 
+            camera_external_id = frame.camera_external_id
+            staging_queue = self._live_staging_queue
+            expires_at = min(
+                datetime.now(UTC) + timedelta(seconds=tracked.pending_seconds),
+                datetime.fromisoformat(tracked.credential.expires_at),
+            )
+            # Retain pixels only for frames that can produce tracked evidence.
+            evidence_publisher = self._evidence_publisher
+            if not confirmed_candidates and not any(
+                observation.type == "ZONE_ENTRY" for observation in event.observations
+            ):
+                evidence_publisher = None
+            evidence_frame = frame if evidence_publisher is not None else None
+
             async def check_context() -> None:
                 if self._configuration_guard is not None:
                     self._configuration_guard()
                 if (
                     self._stream.config.is_live
-                    and await self._configurations.get_active_configuration(
-                        frame.camera_external_id
-                    )
+                    and await self._configurations.get_active_configuration(camera_external_id)
                     is not configuration
                 ):
                     raise TrackedScopeTransitionRequired(
@@ -585,32 +621,41 @@ class HeadlessCameraProcessingWorker:
                     )
 
             def on_staged(parts: int) -> None:
+                if staging_queue is not None:
+                    self._live_staged_event_count += parts
+                    return
                 self._durably_committed = True
                 self._last_frame_enqueued = True
                 self._last_frame_event_count = parts
 
-            await stage_tracked_capture(
-                self._outbox,
-                event,
-                delivery_context,
-                tracked.credential,
-                site_id=tracked.site_id,
-                profile_sha256=tracked.profile_sha256,
-                confirmed_ppe_candidates=confirmed_candidates,
-                expires_at=min(
-                    datetime.now(UTC) + timedelta(seconds=tracked.pending_seconds),
-                    datetime.fromisoformat(tracked.credential.expires_at),
-                ),
-                max_pending=tracked.max_pending,
-                max_bytes=tracked.max_bytes,
-                source_frame=frame if self._evidence_publisher is not None else None,
-                evidence_publisher=self._evidence_publisher,
-                predecessor_wait_seconds=tracked.predecessor_wait_seconds,
-                poll_interval_seconds=self._delivery_interval_seconds,
-                before_enqueue=check_context,
-                on_staged=on_staged,
-                continuity_policy=tracked.continuity_policy,
-            )
+            async def stage() -> None:
+                if staging_queue is not None:
+                    # The queued observation may have waited across a configuration change.
+                    await check_context()
+                await stage_tracked_capture(
+                    self._outbox,
+                    event,
+                    delivery_context,
+                    tracked.credential,
+                    site_id=tracked.site_id,
+                    profile_sha256=tracked.profile_sha256,
+                    confirmed_ppe_candidates=confirmed_candidates,
+                    expires_at=expires_at,
+                    max_pending=tracked.max_pending,
+                    max_bytes=tracked.max_bytes,
+                    source_frame=evidence_frame,
+                    evidence_publisher=evidence_publisher,
+                    predecessor_wait_seconds=tracked.predecessor_wait_seconds,
+                    poll_interval_seconds=self._delivery_interval_seconds,
+                    before_enqueue=check_context,
+                    on_staged=on_staged,
+                    continuity_policy=tracked.continuity_policy,
+                )
+
+            if staging_queue is not None:
+                await staging_queue.put(stage)
+            else:
+                await stage()
             return
 
         if event is None:

@@ -956,8 +956,11 @@ async def test_staging_timeout_rollback_and_queued_lease_bounded_by_credential(
         == frozenset()
     )
 
-    # Part 2: 4 queued frames with pending=0.35s, predecessor_wait=0.25s, each seal=0.14s
-    # accumulate > 0.35s in queue wait, yet complete without ValueError on credential/lease.
+    # Three predecessor confirmations take longer than one pending lease. Leave room
+    # for Windows timer granularity and SQLite scheduling within each individual lease.
+    seal_delay_seconds = 0.65
+    pending_seconds = 1.75
+    predecessor_wait_seconds = 1.10
     outbox2 = SqliteEventOutbox(tmp_path / "lease_ok.sqlite")
     seals2: dict[str, dict] = {}
     first_seen2: dict[str, float] = {}
@@ -965,7 +968,7 @@ async def test_staging_timeout_rollback_and_queued_lease_bounded_by_credential(
     def backend_slow_seal(request: httpx.Request) -> httpx.Response:
         if request.method == "GET":
             fid = request.url.path.rsplit("/", 2)[-2]
-            if time.monotonic() - first_seen2[fid] < 0.14:
+            if time.monotonic() - first_seen2[fid] < seal_delay_seconds:
                 return httpx.Response(404)
             return httpx.Response(200, json=seals2[fid])
         original = json.loads(request.content)["event"]
@@ -1021,9 +1024,11 @@ async def test_staging_timeout_rollback_and_queued_lease_bounded_by_credential(
             dispatcher=dispatcher2,
             delivery_interval_seconds=0.01,
             delivery_context_provider=lambda _b, _f, _k: asyncio.sleep(0, result=ctx),
-            tracked_capture=TrackedCapturePolicy(cred, SITE, "b" * 64, 0.35, 0.25, 8, 200_000),
+            tracked_capture=TrackedCapturePolicy(
+                cred, SITE, "b" * 64, pending_seconds, predecessor_wait_seconds, 8, 200_000
+            ),
         )
-        res = await asyncio.wait_for(worker2.run(), timeout=3.0)
+        res = await asyncio.wait_for(worker2.run(), timeout=8.0)
     assert res.frames_processed == 4
     assert res.events_enqueued == 4
     assert not await outbox2.has_pending_tracked_frame(cred)

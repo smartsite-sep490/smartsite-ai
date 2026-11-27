@@ -209,9 +209,10 @@ class StreamWorker:
                     self.state = StreamState.STREAMING
                     self._consecutive_successful_frames = 0
                     self._first_frame_in_connection = True
-                    # Sampling resets on reconnect. Retain the preceding session UUID
-                    # until the new connection establishes a fresh session.
-                    self._last_sampled_timestamp = None
+                    # A browser transport reconnect may continue the same capture
+                    # session. Reset sampling only for sources that restart capture.
+                    if self._browser_uplink_session_id is None:
+                        self._last_sampled_timestamp = None
 
                     # Ingestion inner loop
                     while not self._stop_event.is_set():
@@ -278,22 +279,20 @@ class StreamWorker:
                                 raise SessionSequenceError(
                                     "A connection must start at sequence zero"
                                 )
-                            if frame.session_id == self._current_session_id:
+                            elif frame.session_id == self._current_session_id:
                                 raise SessionSequenceError(
                                     "Reconnect must use a fresh session UUID"
                                 )
-                            self._current_session_id = frame.session_id
-                            self._first_frame_in_connection = False
-                        else:
-                            if frame.session_id != self._current_session_id:
-                                raise SessionSequenceError("Session changed within a connection")
-                            if (
-                                self._last_sequence_number is not None
-                                and frame.sequence_number <= self._last_sequence_number
-                            ):
-                                raise SessionSequenceError(
-                                    "Sequence must increase within a session"
-                                )
+                        elif frame.session_id != self._current_session_id:
+                            raise SessionSequenceError("Session changed within a connection")
+                        if (
+                            frame.session_id == self._current_session_id
+                            and self._last_sequence_number is not None
+                            and frame.sequence_number <= self._last_sequence_number
+                        ):
+                            raise SessionSequenceError("Sequence must increase within a session")
+                        self._current_session_id = frame.session_id
+                        self._first_frame_in_connection = False
                         self._last_sequence_number = frame.sequence_number
 
                         # 3. Stable Criteria: reset backoff after min_stable_frames

@@ -114,6 +114,8 @@ class OpenCvFrameSource:
 
     def _resolve_capture_source(self) -> int | str:
         raw_source = self.config.get_raw_source_url().strip()
+        if raw_source.lower().startswith("browser://"):
+            raise SourceConnectionError("Browser capture requires an assigned Backend frame reader")
         if raw_source.isdecimal():
             return int(raw_source)
         return raw_source

@@ -38,13 +38,19 @@ class StreamWorker:
         clock: Callable[[], datetime] | None = None,
         *,
         preview_frames: PreviewFrameQueue | None = None,
+        browser_uplink_session_id: UUID | None = None,
     ) -> None:
         if preview_frames is not None and (
             not isinstance(preview_frames, PreviewFrameQueue) or preview_frames.is_closed
         ):
             raise ValueError("Preview requires an open, single-frame queue")
+        if browser_uplink_session_id is not None and (
+            not isinstance(browser_uplink_session_id, UUID) or not config.is_live
+        ):
+            raise ValueError("Browser uplink requires a trusted LIVE session UUID")
         self.config = config
         self.source = source
+        self._browser_uplink_session_id = browser_uplink_session_id
         self.queue = BoundedFrameQueue(maxsize=config.max_queue_size)
         # The runtime owns the observer/encoder. Capture only offers immutable
         # validated frames; it never waits for preview or inference consumers.
@@ -203,9 +209,10 @@ class StreamWorker:
                     self.state = StreamState.STREAMING
                     self._consecutive_successful_frames = 0
                     self._first_frame_in_connection = True
-                    # Sampling resets on reconnect. Retain the preceding session UUID
-                    # until the new connection establishes a fresh session.
-                    self._last_sampled_timestamp = None
+                    # A browser transport reconnect may continue the same capture
+                    # session. Reset sampling only for sources that restart capture.
+                    if self._browser_uplink_session_id is None:
+                        self._last_sampled_timestamp = None
 
                     # Ingestion inner loop
                     while not self._stop_event.is_set():
@@ -258,26 +265,34 @@ class StreamWorker:
 
                         # 2. Session & Monotonic Sequence Semantics (MF05/MF06)
                         if self._first_frame_in_connection:
-                            if frame.sequence_number != 0:
+                            if self._browser_uplink_session_id is not None:
+                                # The Backend's latest-only browser lease starts at one.
+                                # A consumer may attach later, but must retain capture lineage.
+                                if (
+                                    frame.session_id != self._browser_uplink_session_id
+                                    or frame.sequence_number == 0
+                                ):
+                                    raise SessionSequenceError(
+                                        "Frame does not match the assigned browser uplink session"
+                                    )
+                            elif frame.sequence_number != 0:
                                 raise SessionSequenceError(
                                     "A connection must start at sequence zero"
                                 )
-                            if frame.session_id == self._current_session_id:
+                            elif frame.session_id == self._current_session_id:
                                 raise SessionSequenceError(
                                     "Reconnect must use a fresh session UUID"
                                 )
-                            self._current_session_id = frame.session_id
-                            self._first_frame_in_connection = False
-                        else:
-                            if frame.session_id != self._current_session_id:
-                                raise SessionSequenceError("Session changed within a connection")
-                            if (
-                                self._last_sequence_number is not None
-                                and frame.sequence_number <= self._last_sequence_number
-                            ):
-                                raise SessionSequenceError(
-                                    "Sequence must increase within a session"
-                                )
+                        elif frame.session_id != self._current_session_id:
+                            raise SessionSequenceError("Session changed within a connection")
+                        if (
+                            frame.session_id == self._current_session_id
+                            and self._last_sequence_number is not None
+                            and frame.sequence_number <= self._last_sequence_number
+                        ):
+                            raise SessionSequenceError("Sequence must increase within a session")
+                        self._current_session_id = frame.session_id
+                        self._first_frame_in_connection = False
                         self._last_sequence_number = frame.sequence_number
 
                         # 3. Stable Criteria: reset backoff after min_stable_frames

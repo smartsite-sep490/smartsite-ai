@@ -16,6 +16,7 @@ from smartsite_ai.domain.policy_configuration_bundle import CameraPolicyConfigur
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
 from smartsite_ai.inference.ppe_profiles import ExperimentalPpeProfile, experimental_ppe_profile
 from smartsite_ai.inference.protocol import DetectorProtocol
+from smartsite_ai.ingestion.browser_uplink import BrowserUplinkFrameSource
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.queue import PreviewFrameQueue
 from smartsite_ai.ingestion.status import StreamState
@@ -255,16 +256,26 @@ def assemble_sessions(
             schema_version=observation_schema_version,
             tracked_v17=tracked_capture is not None,
         )
-        outbox = SqliteEventOutbox(camera.outbox)
-        delivery_backend = backend_client_factory()
         source = source_factory(camera.source_config)
+        browser_lease = (
+            source.assigned_session_id if isinstance(source, BrowserUplinkFrameSource) else None
+        )
+        if browser_lease is not None and tracked_capture is None:
+            raise CameraRuntimeError("Browser webcam requires a tracked generation")
         if plan.generation is not None:
             plan.generation.ensure_current(datetime.now(UTC))
-            source = GenerationBoundSource(source, plan.generation)
+            source = GenerationBoundSource(
+                source, plan.generation, browser_uplink_session_id=browser_lease
+            )
             plan.poller.enable_generation_ack(source)
+        outbox = SqliteEventOutbox(camera.outbox)
+        delivery_backend = backend_client_factory()
         preview_queue = PreviewFrameQueue() if preview_observers is not None else None
         stream = StreamWorker(
-            config=camera.source_config, source=source, preview_frames=preview_queue
+            config=camera.source_config,
+            source=source,
+            preview_frames=preview_queue,
+            browser_uplink_session_id=browser_lease,
         )
         preview = None
         analysis = None

@@ -9,6 +9,7 @@ from uuid import UUID
 import httpx
 import pytest
 from pydantic import SecretStr
+from test_browser_uplink_ingestion import sample_packet
 from test_frame_evidence_transport import (
     GENERATION_SECRET,
     SERVICE_TOKEN,
@@ -28,6 +29,7 @@ from smartsite_ai.domain.observations import (
 )
 from smartsite_ai.domain.tracked_frame_result import TrackedFrameReferences
 from smartsite_ai.evidence.local_publisher import LocalEvidencePublisher
+from smartsite_ai.ingestion.browser_uplink import BrowserUplinkFrameSource
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.integrations.backend_client import BackendClient
 from smartsite_ai.integrations.backend_configuration_client import BackendConfigurationClient
@@ -124,7 +126,10 @@ def test_manifest_private_evidence_upload_defaults_off_and_rejects_replay_or_unt
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_assembly_wires_evidence_uploader_only_when_manifest_opts_in(tmp_path, enabled):
+@pytest.mark.parametrize("browser", [False, True])
+async def test_assembly_wires_evidence_uploader_only_when_manifest_opts_in(
+    tmp_path, enabled, browser
+):
     value, bundle = document(tmp_path)
     if enabled:
         value["cameras"][0]["privateEvidenceUpload"] = True
@@ -155,11 +160,32 @@ async def test_assembly_wires_evidence_uploader_only_when_manifest_opts_in(tmp_p
         backends.append(client)
         return client
 
+    def source_factory(config):
+        if not browser:
+            return SimpleNamespace()
+        generation = plans[0].generation
+        assert generation is not None
+        lease = UUID(generation.stream_session_id)
+
+        async def packets():
+            yield sample_packet() | {
+                "cameraExternalId": config.camera_external_id,
+                "sessionId": str(lease),
+            }
+            await asyncio.Event().wait()
+
+        return BrowserUplinkFrameSource(
+            packets,
+            stream_id=config.stream_id,
+            camera_external_id=config.camera_external_id,
+            session_id=lease,
+        )
+
     try:
         sessions = assemble_sessions(
             plans,
             detector=SimpleNamespace(),
-            source_factory=lambda _: SimpleNamespace(),
+            source_factory=source_factory,
             backend_client_factory=backend_factory,
             evidence_max_bytes=1_048_576,
             delivery_interval_seconds=0.05,
@@ -171,6 +197,15 @@ async def test_assembly_wires_evidence_uploader_only_when_manifest_opts_in(tmp_p
             assert dispatcher._tracked_evidence_upload._backend is backends[-1]
         else:
             assert dispatcher._tracked_evidence_upload is None
+        if browser:
+            stream = sessions[0].worker._stream
+            await stream.start()
+            try:
+                frame = await asyncio.wait_for(stream.get_frame(), timeout=1)
+                assert frame.sequence_number == 42
+                assert str(frame.session_id) == plans[0].generation.stream_session_id
+            finally:
+                await stream.stop()
     finally:
         await close_configuration_clients(plans)
         for client in backends:

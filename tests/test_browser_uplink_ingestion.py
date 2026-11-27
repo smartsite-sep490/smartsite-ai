@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 from copy import deepcopy
@@ -6,10 +7,40 @@ from uuid import UUID
 import pytest
 from PIL import Image
 
-from smartsite_ai.ingestion.browser_uplink import decode_browser_uplink_frame
+from smartsite_ai.ingestion.browser_uplink import (
+    BrowserUplinkFrameSource,
+    decode_browser_uplink_frame,
+)
 from smartsite_ai.ingestion.source import SourceReadError
 
 LEASE = UUID("55555555-5555-4555-8555-555555555555")
+
+
+@pytest.mark.anyio
+async def test_browser_uplink_source_cancelled_by_close() -> None:
+    entered_read = asyncio.Event()
+    generator_closed = asyncio.Event()
+
+    async def packets():
+        try:
+            yield sample_packet()
+            entered_read.set()
+            await asyncio.Event().wait()
+        finally:
+            generator_closed.set()
+
+    source = BrowserUplinkFrameSource(
+        packets, stream_id="browser", camera_external_id="browser-camera", session_id=LEASE
+    )
+    await source.connect()
+    first = await source.read_frame()
+    assert first is not None and first.sequence_number == 42
+    read_task = asyncio.create_task(source.read_frame())
+    await asyncio.wait_for(entered_read.wait(), timeout=1)
+    await asyncio.wait_for(source.close(), timeout=1)
+    assert await read_task is None
+    assert generator_closed.is_set() and not source.is_connected
+    await source.close()
 
 
 def sample_packet() -> dict:

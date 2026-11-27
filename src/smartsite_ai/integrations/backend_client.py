@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
@@ -425,6 +427,54 @@ class BackendClient:
                 raise ValueError(f"{label} exceeds size limit")
             body.extend(chunk)
         return body
+
+    async def read_browser_frame(
+        self,
+        site_id: UUID,
+        camera_id: UUID,
+        lease_id: UUID,
+        after_sequence: int,
+        reader_secret: SecretStr,
+    ) -> dict[str, object] | None:
+        """Read once from a previously assigned webcam lease."""
+        if (
+            not all(isinstance(item, UUID) for item in (site_id, camera_id, lease_id))
+            or type(after_sequence) is not int
+            or not 0 <= after_sequence <= 9_007_199_254_740_991
+            or not isinstance(reader_secret, SecretStr)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{43}", reader_secret.get_secret_value())
+        ):
+            raise ValueError("Browser frame assignment is invalid")
+        origin = self._base_url.removesuffix(INGESTION_ENDPOINT_PATH)
+        parsed = urlsplit(origin)
+        if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Browser frame transport requires HTTPS")
+
+        headers = self._get_headers()
+        headers["x-browser-frame-reader-secret"] = reader_secret.get_secret_value()
+        headers["accept-encoding"] = "identity"
+        client = await self._get_client()
+        url = (
+            f"{origin}/api/v1/integrations/ai/sites/{site_id}/cameras/{camera_id}"
+            f"/browser-uplink/{lease_id}/frame"
+        )
+        try:
+            async with client.stream(
+                "GET",
+                url,
+                params={"afterSequence": after_sequence},
+                headers=headers,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code == 204:
+                    return None
+                body = await self._read_tracked_json(response, limit=182_000, label="Browser frame")
+            packet = json.loads(body, object_pairs_hook=_reject_duplicate_json_keys)
+        except (httpx.HTTPError, ValueError):
+            raise ValueError("Backend browser frame read failed") from None
+        if not isinstance(packet, dict):
+            raise ValueError("Backend browser frame payload is invalid")
+        return packet
 
     async def read_tracked_frame_result(
         self,

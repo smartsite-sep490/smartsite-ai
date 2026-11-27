@@ -2,7 +2,7 @@
 
 import asyncio
 import base64
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from datetime import datetime
 from io import BytesIO
 from typing import Literal
@@ -38,6 +38,35 @@ class BrowserUplinkFrameSource:
         self._session_id = session_id
         self._stream: AsyncGenerator[Mapping[str, object], None] | None = None
         self._pending: asyncio.Task[FrameEnvelope | None] | None = None
+        self._last_sequence = 0
+
+    @classmethod
+    def from_frame_reader(
+        cls,
+        read_packet: Callable[[int], Awaitable[Mapping[str, object] | None]],
+        *,
+        stream_id: str,
+        camera_external_id: str,
+        session_id: UUID,
+    ) -> "BrowserUplinkFrameSource":
+        async def packets() -> AsyncGenerator[Mapping[str, object], None]:
+            while True:
+                try:
+                    packet = await read_packet(source._last_sequence)
+                except ValueError:
+                    raise SourceReadError("Browser frame transport failed") from None
+                if packet is not None:
+                    yield packet
+                else:
+                    await asyncio.sleep(0.15)
+
+        source = cls(
+            packets,
+            stream_id=stream_id,
+            camera_external_id=camera_external_id,
+            session_id=session_id,
+        )
+        return source
 
     @property
     def source_id(self) -> str:
@@ -60,7 +89,12 @@ class BrowserUplinkFrameSource:
         self._pending = pending
         try:
             frame = await pending
-            return frame if self._stream is stream else None
+            if self._stream is not stream or frame is None:
+                return None
+            if frame.sequence_number <= self._last_sequence:
+                raise SourceReadError("Browser frame sequence did not advance")
+            self._last_sequence = frame.sequence_number
+            return frame
         except asyncio.CancelledError:
             caller = asyncio.current_task()
             if self._stream is not stream and caller is not None and not caller.cancelling():

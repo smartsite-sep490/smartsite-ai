@@ -14,7 +14,7 @@ from pydantic import (
 
 from smartsite_ai.ingestion.source import sanitize_stream_url
 
-_ALLOWED_SCHEMES = frozenset({"rtsp", "rtsps", "http", "https", "fake", "mock", "test"})
+_ALLOWED_SCHEMES = frozenset({"rtsp", "rtsps", "http", "https", "fake", "mock", "test", "browser"})
 _ALLOWED_FILE_EXTENSIONS = (".mp4", ".avi", ".mkv", ".mov")
 _DEVICE_INDEX_RE = re.compile(r"^(?:/dev/video\d+|\d+)$")
 
@@ -49,6 +49,7 @@ def _is_valid_source_url(raw_url: str) -> bool:
 
     Policy:
     - Supported network schemes: rtsp://, rtsps://, http://, https://, and test fixtures.
+    - Browser sources use the internal browser:// identity, resolved by the assigned reader.
     - Device paths: Numeric index ('0', '1') or standard device nodes ('/dev/video0').
     - Local video files: Must be an absolute path ending in .mp4/.avi/.mkv/.mov.
       Relative paths, path traversal ('..'), and 'file://' URLs are strictly rejected.

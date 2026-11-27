@@ -17,6 +17,7 @@ from smartsite_ai.inference.loading import load_yolo11_detector, load_yolo11_per
 from smartsite_ai.inference.person_anchored import PersonAnchoredPpeDetector
 from smartsite_ai.inference.protocol import DetectorProtocol
 from smartsite_ai.inference.ultralytics_runner import UltralyticsYoloRunner
+from smartsite_ai.ingestion.browser_uplink import BrowserUplinkFrameSource
 from smartsite_ai.ingestion.config import StreamConfig
 from smartsite_ai.ingestion.envelope import FrameEnvelope
 from smartsite_ai.ingestion.opencv_source import OpenCvFrameSource
@@ -28,9 +29,11 @@ from smartsite_ai.runtime.assembly import (
     close_configuration_clients,
     preflight_manifest,
 )
+from smartsite_ai.runtime.browser_reader_assignment import load_browser_reader_assignment
 from smartsite_ai.runtime.generation_manifest import bind_generation_manifest
 from smartsite_ai.runtime.inference_lane import SerializingDetector, share_detector
 from smartsite_ai.runtime.manifest import (
+    BrowserCameraSource,
     CameraRuntimeError,
     bind_manifest,
     load_manifest_bytes,
@@ -66,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="absolute path of the 1-3 camera runtime manifest",
     )
     parser.add_argument("--generation-credential-file", type=Path)
+    parser.add_argument("--browser-reader-assignment-file", type=Path)
     parser.add_argument("--expected-camera-id", type=UUID)
     parser.add_argument("--expected-outbox", type=Path)
     parser.add_argument(
@@ -107,6 +111,7 @@ async def run_manifest(
     *,
     settings: Settings | None = None,
     generation_credential_file: Path | None = None,
+    browser_reader_assignment_file: Path | None = None,
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
     preview_port: int | None = None,
@@ -122,6 +127,7 @@ async def run_manifest(
             manifest_path,
             settings=settings,
             generation_credential_file=generation_credential_file,
+            browser_reader_assignment_file=browser_reader_assignment_file,
             expected_camera_id=expected_camera_id,
             expected_outbox=expected_outbox,
             preview_port=preview_port,
@@ -157,6 +163,7 @@ async def _run_manifest_report(
     *,
     settings: Settings | None = None,
     generation_credential_file: Path | None = None,
+    browser_reader_assignment_file: Path | None = None,
     expected_camera_id: UUID | None = None,
     expected_outbox: Path | None = None,
     preview_port: int | None = None,
@@ -184,6 +191,7 @@ async def _run_manifest_report(
         value is not None
         for value in (
             generation_credential_file,
+            browser_reader_assignment_file,
             expected_camera_id,
             expected_outbox,
             source_control_profile,
@@ -199,6 +207,26 @@ async def _run_manifest_report(
     if not manifest_path.is_absolute() or not manifest_path.is_file():
         raise CameraRuntimeError("manifest path must identify an absolute existing file")
     manifest = load_manifest_bytes(manifest_path.read_bytes())
+    browser_cameras = tuple(
+        camera for camera in manifest.cameras if isinstance(camera.source, BrowserCameraSource)
+    )
+    browser_assignment = None
+    if browser_cameras or browser_reader_assignment_file is not None:
+        if (
+            len(browser_cameras) != 1
+            or len(manifest.cameras) != 1
+            or browser_reader_assignment_file is None
+            or source_control_profile is not None
+        ):
+            raise CameraRuntimeError("Browser webcam requires a single supervised assignment")
+        browser_camera = browser_cameras[0]
+        browser_assignment = load_browser_reader_assignment(browser_reader_assignment_file)
+        if (
+            browser_camera.tracked_v17 is None
+            or browser_assignment.camera_id != browser_camera.camera_id
+            or browser_assignment.site_id != browser_camera.tracked_v17.site_id
+        ):
+            raise CameraRuntimeError("Browser reader scope does not match the camera manifest")
     generation_override = None
     if source_control_profile is not None:
         if (
@@ -257,6 +285,14 @@ async def _run_manifest_report(
             **({"check_only": True} if check_only else {}),
         )
         plans.extend(prepared)
+        if failure is None and browser_assignment is not None:
+            generation = prepared[0].generation
+            if generation is None or generation.stream_session_id != str(
+                browser_assignment.lease_id
+            ):
+                raise CameraRuntimeError(
+                    "Browser reader lease does not match the worker generation"
+                )
         if failure is None and expected_resume is not None:
             if len(prepared) != 1:
                 raise CameraRuntimeError("Resume must bind exactly one tracked LIVE camera")
@@ -340,8 +376,27 @@ async def _run_manifest_report(
             backend_clients.append(client)
             return client
 
-        def source_factory(config: StreamConfig) -> OpenCvFrameSource:
-            return OpenCvFrameSource(config)
+        def source_factory(config: StreamConfig) -> OpenCvFrameSource | BrowserUplinkFrameSource:
+            assignment = browser_assignment
+            if assignment is None:
+                return OpenCvFrameSource(config)
+            backend = backend_client_factory()
+
+            async def read_packet(after_sequence: int) -> dict[str, object] | None:
+                return await backend.read_browser_frame(
+                    assignment.site_id,
+                    assignment.camera_id,
+                    assignment.lease_id,
+                    after_sequence,
+                    assignment.reader_secret,
+                )
+
+            return BrowserUplinkFrameSource.from_frame_reader(
+                read_packet,
+                stream_id=config.stream_id,
+                camera_external_id=config.camera_external_id,
+                session_id=assignment.lease_id,
+            )
 
         return assemble_sessions(
             plans,
@@ -402,6 +457,8 @@ def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     preview_options = {} if args.preview_port is None else {"preview_port": args.preview_port}
     resume_options = {"require_resume_manifest": True} if args.require_resume_manifest else {}
+    if args.browser_reader_assignment_file is not None:
+        resume_options["browser_reader_assignment_file"] = args.browser_reader_assignment_file
     if args.check:
         resume_options["check_only"] = True
     try:

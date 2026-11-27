@@ -63,7 +63,13 @@ class EnvCameraSource(_StrictModel):
     name: str = Field(min_length=1, max_length=96)
 
 
-CameraSource = Annotated[PathCameraSource | EnvCameraSource, Field(discriminator="kind")]
+class BrowserCameraSource(_StrictModel):
+    kind: Literal["browser"]
+
+
+CameraSource = Annotated[
+    PathCameraSource | EnvCameraSource | BrowserCameraSource, Field(discriminator="kind")
+]
 
 
 class TrackedV17Manifest(_StrictModel):
@@ -128,6 +134,8 @@ class CameraManifestEntry(_StrictModel):
 
     @model_validator(mode="after")
     def require_absolute_runtime_paths(self) -> CameraManifestEntry:
+        if isinstance(self.source, BrowserCameraSource) and self.tracked_v17 is None:
+            raise ValueError("camera runtime manifest is invalid")
         if self.private_evidence_upload and (
             self.tracked_v17 is None or not self.live or self.evidence_dir is None
         ):
@@ -290,7 +298,9 @@ def bind_manifest(
                 pace_replay=not entry.live,
                 # LIVE consumers must not drain old samples after slow inference/delivery.
                 max_queue_size=1 if entry.live else 5,
-                max_consecutive_failures=None
+                max_consecutive_failures=3
+                if isinstance(entry.source, BrowserCameraSource)
+                else None
                 if entry.live and entry.generation_credential_file is None
                 else 1,
             )
@@ -336,13 +346,15 @@ def _reject_duplicates(cameras: tuple[CameraManifestEntry, ...]) -> None:
                 _path_key(camera.evidence_dir),
                 "duplicate evidence directory",
             )
+        if isinstance(camera.source, BrowserCameraSource):
+            continue
         source_key, source_error = _source_key(camera.source)
         if source_key in source_keys:
             raise ValueError(source_error)
         source_keys.add(source_key)
 
 
-def _source_key(source: CameraSource) -> tuple[str, str]:
+def _source_key(source: PathCameraSource | EnvCameraSource) -> tuple[str, str]:
     if isinstance(source, EnvCameraSource):
         if _ENV_NAME_RE.fullmatch(source.name) is None:
             raise ValueError("camera source environment name is invalid")
@@ -367,6 +379,8 @@ def _resolved_source_identity(source: str) -> str:
 
 def _resolve_source(entry: CameraManifestEntry, environ: Mapping[str, str]) -> str:
     source = entry.source
+    if isinstance(source, BrowserCameraSource):
+        return f"browser://{entry.camera_id}"
     if isinstance(source, EnvCameraSource):
         value = environ.get(source.name)
         if value is None or not value.strip():

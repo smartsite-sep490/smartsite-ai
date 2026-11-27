@@ -55,42 +55,44 @@ class WorkerGenerationCredential(BaseModel):
             raise RuntimeError("Worker generation expired or clock unavailable")
 
 
+def read_private_runtime_json(path: Path) -> object:
+    if not path.is_absolute() or path.is_symlink() or path.resolve() != path:
+        raise ValueError()
+    original = path.lstat()
+    if not stat.S_ISREG(original.st_mode):
+        raise ValueError()
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    )
+    with os.fdopen(descriptor, "rb") as file:
+        metadata = os.fstat(file.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > 4096
+            or metadata.st_nlink != 1
+            or (metadata.st_dev, metadata.st_ino) != (original.st_dev, original.st_ino)
+        ):
+            raise ValueError()
+        if os.name != "nt" and (metadata.st_mode & 0o077 or metadata.st_uid != os.getuid()):
+            raise ValueError()
+        payload = file.read(4097)
+        if len(payload) > 4096:
+            raise ValueError()
+
+        def unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            fields = dict(pairs)
+            if len(fields) != len(pairs):
+                raise ValueError()
+            return fields
+
+    return json.loads(payload, object_pairs_hook=unique_fields)
+
+
 def load_worker_generation(
     path: Path, camera_id: UUID, *, now: datetime
 ) -> WorkerGenerationCredential:
     try:
-        if not path.is_absolute() or path.is_symlink() or path.resolve() != path:
-            raise ValueError()
-        original = path.lstat()
-        if not stat.S_ISREG(original.st_mode):
-            raise ValueError()
-        descriptor = os.open(
-            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        )
-        with os.fdopen(descriptor, "rb") as file:
-            metadata = os.fstat(file.fileno())
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_size > 4096
-                or metadata.st_nlink != 1
-                or (metadata.st_dev, metadata.st_ino) != (original.st_dev, original.st_ino)
-            ):
-                raise ValueError()
-            if os.name != "nt" and (metadata.st_mode & 0o077 or metadata.st_uid != os.getuid()):
-                raise ValueError()
-            payload = file.read(4097)
-            if len(payload) > 4096:
-                raise ValueError()
-
-            def unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
-                fields = dict(pairs)
-                if len(fields) != len(pairs):
-                    raise ValueError()
-                return fields
-
-            binding = WorkerGenerationCredential.model_validate(
-                json.loads(payload, object_pairs_hook=unique_fields)
-            )
+        binding = WorkerGenerationCredential.model_validate(read_private_runtime_json(path))
         if binding.camera_id != str(camera_id):
             raise ValueError()
         binding.ensure_current(now)

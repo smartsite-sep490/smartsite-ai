@@ -1,5 +1,16 @@
 # Tích hợp SmartSite Backend
 
+## Supervised browser webcam capture
+
+The one-camera tracked LIVE runtime can select `"source": {"kind": "browser"}`.
+The trusted supervisor passes an absolute private file via
+`--browser-reader-assignment-file`. The file contains `siteId`, `cameraId`,
+`leaseId`, and `readerSecret`. Its IDs must match the runtime manifest and the
+issued generation. The runtime requests frames through Backend over HTTPS
+(loopback HTTP is available for local integration tests). The supervisor is
+responsible for issuing and renewing the grant. A valid grant controls frame
+reads. Tracked event authorization still uses the worker generation.
+
 ## Typed regional PPE evidence
 
 The tracked v1.5–v1.7 DTO accepts the existing canonical regional Mask,

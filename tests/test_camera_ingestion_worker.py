@@ -29,6 +29,36 @@ async def wait_until(predicate: Callable[[], bool], max_iterations: int = 200) -
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("sequence, matching_lease", [(42, True), (0, True), (42, False)])
+async def test_browser_uplink_first_frame_requires_bound_lease(
+    sequence: int, matching_lease: bool
+) -> None:
+    lease = UUID(int=17)
+    frame = make_test_frame(
+        "browser", sequence, session_id=lease if matching_lease else UUID(int=18)
+    )
+    config = StreamConfig(
+        stream_id=frame.stream_id,
+        camera_external_id=frame.camera_external_id,
+        source_url="fake://browser",
+        max_consecutive_failures=1,
+    )
+    source = FakeFrameSource("browser", [frame], block_when_exhausted=True)
+    worker = StreamWorker(config, source, browser_uplink_session_id=lease)
+    await worker.start()
+    try:
+        if sequence > 0 and matching_lease:
+            await wait_until(lambda: worker.queue.qsize() == 1)
+            assert await worker.get_frame() == frame
+        else:
+            await wait_until(lambda: worker.state == StreamState.ERROR)
+            assert worker.sequence_errors == 1
+            assert worker.queue.qsize() == 0
+    finally:
+        await worker.stop()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("completion", ["eof", "frame", "read_error"])
 async def test_stop_unblocks_read_without_reporting_disconnect(completion: str) -> None:
     """An intentional close may finish an in-flight read before loop cancellation."""

@@ -100,7 +100,7 @@ def load_worker_generation(
 
 
 class GenerationBoundSource:
-    """Bind one connection only; trusted renewal is required before reconnect."""
+    """Bind a physical connection or an explicitly assigned browser capture lease."""
 
     def __init__(
         self,
@@ -108,10 +108,17 @@ class GenerationBoundSource:
         binding: WorkerGenerationCredential,
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        browser_uplink_session_id: UUID | None = None,
     ) -> None:
+        if browser_uplink_session_id is not None and (
+            not isinstance(browser_uplink_session_id, UUID)
+            or str(browser_uplink_session_id) != binding.stream_session_id
+        ):
+            raise ValueError("Browser capture lease does not match the issued generation")
         self._source = source
         self._binding = binding
         self._clock = clock
+        self._browser_uplink_session_id = browser_uplink_session_id
         self._opened = False
         self._underlying_session: UUID | None = None
         self._normal_eof = False
@@ -156,9 +163,10 @@ class GenerationBoundSource:
 
     async def connect(self) -> None:
         self.ensure_current()
-        if self._opened:
+        if self._opened and self._browser_uplink_session_id is None:
             raise RuntimeError("Worker generation requires trusted renewal before reconnect")
         self._opened = True
+        self._underlying_session = None
         await self._source.connect()
 
     async def read_frame(self) -> FrameEnvelope | None:
@@ -166,8 +174,18 @@ class GenerationBoundSource:
         frame = await self._source.read_frame()
         self.ensure_current()
         if frame is None:
-            self._normal_eof = True
+            self._normal_eof = self._browser_uplink_session_id is None
             return None
+        if self._browser_uplink_session_id is not None:
+            if frame.session_id != self._browser_uplink_session_id or frame.sequence_number == 0:
+                raise RuntimeError("Frame does not belong to the issued browser capture lease")
+            if self._last_frame is not None and (
+                frame.sequence_number <= self._last_frame.sequence_number
+            ):
+                raise RuntimeError("Browser capture sequence did not advance")
+            self._underlying_session = frame.session_id
+            self._last_frame = frame
+            return frame
         if self._underlying_session is None:
             if frame.sequence_number != 0:
                 raise RuntimeError("Worker generation source must begin at sequence zero")

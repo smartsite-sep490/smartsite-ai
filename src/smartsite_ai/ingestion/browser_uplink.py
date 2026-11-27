@@ -73,6 +73,10 @@ class BrowserUplinkFrameSource:
         return self._stream_id
 
     @property
+    def assigned_session_id(self) -> UUID:
+        return self._session_id
+
+    @property
     def is_connected(self) -> bool:
         return self._stream is not None
 

@@ -103,6 +103,43 @@ async def test_bound_source_uses_issued_session_once_and_preserves_sequence():
 
 
 @pytest.mark.anyio
+async def test_bound_browser_source_reconnects_only_with_the_same_live_lease():
+    from smartsite_ai.integrations.worker_generation import (
+        GenerationBoundSource,
+        WorkerGenerationCredential,
+    )
+
+    binding = WorkerGenerationCredential.model_validate(credential_payload())
+    lease = UUID(binding.stream_session_id)
+    source = FakeSource()
+    source.session = lease
+    source.sequence = 42
+    with pytest.raises(ValueError):
+        GenerationBoundSource(source, binding, browser_uplink_session_id=uuid4())
+
+    bound = GenerationBoundSource(
+        source, binding, clock=lambda: NOW, browser_uplink_session_id=lease
+    )
+    await bound.connect()
+    first = await bound.read_frame()
+    assert first.session_id == lease and first.sequence_number == 42
+    assert bound.is_ready_for_ack
+    await bound.close()
+    await bound.connect()
+    assert not bound.is_ready_for_ack
+    next_frame = await bound.read_frame()
+    assert next_frame.session_id == lease and next_frame.sequence_number == 43
+    assert bound.is_ready_for_ack
+    source.sequence = 43
+    with pytest.raises(RuntimeError):
+        await bound.read_frame()
+    source.session = uuid4()
+    with pytest.raises(RuntimeError):
+        await bound.read_frame()
+    await bound.close()
+
+
+@pytest.mark.anyio
 async def test_bound_source_rejects_changed_underlying_session_and_expired_binding():
     from smartsite_ai.integrations.worker_generation import (
         GenerationBoundSource,

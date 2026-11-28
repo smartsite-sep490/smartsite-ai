@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import socket
 from dataclasses import replace
 from pathlib import Path
@@ -169,3 +170,42 @@ async def test_preview_bind_failure_cannot_start_a_model_or_camera() -> None:
             await run_with_camera_preview(
                 plan, {}, SecretStr("x" * 32), host="127.0.0.1", port=occupied.getsockname()[1]
             )
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX TCP socket address reuse")
+async def test_preview_rebinds_while_previous_connection_is_in_time_wait() -> None:
+    with socket.socket() as previous:
+        previous.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        previous.bind(("127.0.0.1", 0))
+        previous.listen()
+        port = previous.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            accepted, _ = previous.accept()
+            with accepted:
+                accepted.settimeout(2)
+                # The accepted side sends FIN first, retaining the server port in TIME_WAIT.
+                accepted.shutdown(socket.SHUT_WR)
+                assert client.recv(1) == b""
+                client.shutdown(socket.SHUT_WR)
+                assert accepted.recv(1) == b""
+
+    class Rebound(Exception):
+        pass
+
+    def on_bound(bound_port: int) -> None:
+        assert bound_port == port
+        raise Rebound
+
+    async def forbidden():
+        raise AssertionError("This probe must stop before opening runtime resources")
+
+    with pytest.raises(Rebound):
+        await run_with_camera_preview(
+            RuntimePlan(forbidden, forbidden, forbidden, lambda _: ()),
+            {},
+            SecretStr("x" * 32),
+            host="127.0.0.1",
+            port=port,
+            on_bound=on_bound,
+        )

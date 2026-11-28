@@ -265,6 +265,9 @@ construction. Configure `SMARTSITE_AI_PREVIEW_SERVICE_TOKEN` server-side to matc
 `SMARTSITE_AI_SERVICE_TOKEN`. The token is never a browser credential or a CLI argument.
 The host uses `SMARTSITE_AI_HOST` (default127.0.0.1). Its socket is bound before runtime preflight
 or model/camera activation, so a port conflict cannot leave a second camera owner running.
+On Linux, a restart can reuse the port while closed connections finish in TCP TIME_WAIT.
+A running preview listener still owns the port. For a Docker worker launched as a container,
+use `--init --stop-signal SIGINT` so `docker stop` asks the runtime to release its own resources.
 
 Configure the Backend's existing `SMARTSITE_AI_PREVIEW_SOURCES` allowlist for the camera's external
 ID and this host's origin. Loopback is appropriate only when reachable from the Backend host;

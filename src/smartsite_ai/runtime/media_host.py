@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import os
 import socket
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -53,6 +54,9 @@ async def run_with_camera_preview(
     runtime_task: asyncio.Task[RuntimeReport] | None = None
     try:
         try:
+            if os.name == "posix":
+                # Permit restart after closed connections without sharing an active listener.
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((str(address), port))
             listener.setblocking(False)
         except OSError:
